@@ -1,0 +1,13 @@
+[package]
+name = "a3s-ash-ops"
+description = "Portable coding-agent operations for ash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+ash-protocol.workspace = true

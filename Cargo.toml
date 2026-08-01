@@ -1,0 +1,39 @@
+[workspace]
+members = [
+    "crates/ash-cli",
+    "crates/ash-engine",
+    "crates/ash-ops",
+    "crates/ash-platform",
+    "crates/ash-protocol",
+    "crates/ash-store",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+authors = ["A3S Lab"]
+license = "MIT"
+repository = "https://github.com/A3S-Lab/ash"
+homepage = "https://github.com/A3S-Lab/ash"
+
+[workspace.dependencies]
+ash-engine = { package = "a3s-ash-engine", path = "crates/ash-engine" }
+ash-ops = { package = "a3s-ash-ops", path = "crates/ash-ops" }
+ash-platform = { package = "a3s-ash-platform", path = "crates/ash-platform" }
+ash-protocol = { package = "a3s-ash-protocol", path = "crates/ash-protocol" }
+ash-store = { package = "a3s-ash-store", path = "crates/ash-store" }
+rayon = "1.12.0"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.bench]
+lto = "thin"

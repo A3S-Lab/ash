@@ -1,0 +1,14 @@
+[package]
+name = "a3s-ash-platform"
+description = "Linux, macOS, and Windows platform boundary for ash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "a3s-ash"
+description = "AI Native Shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "ash"
+path = "src/main.rs"
+
+[dependencies]
+ash-engine.workspace = true
+ash-ops.workspace = true
+ash-platform.workspace = true
+ash-protocol.workspace = true
+ash-store.workspace = true
+tokio.workspace = true
