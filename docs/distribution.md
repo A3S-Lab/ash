@@ -1,8 +1,8 @@
 # Cross-platform distribution
 
-Status: installer plus signed release-verification checkpoint; activation and a published signed binary release remain open
+Status: installers and signed self-update pipeline implemented; release-key provisioning and a published signed binary release remain open
 
-This document defines how `ash` is built, installed, updated, rolled back, and removed on Linux, macOS, and Windows. The source tree contains offline-testable `install.sh` and `install.ps1` implementations plus an `ash-update` trust core that strictly verifies canonical Ed25519-signed metadata and bounded release archives. Activation, online orchestration, and the online installation commands remain release contracts until signed artifacts exist.
+This document defines how `ash` is built, installed, updated, rolled back, and removed on Linux, macOS, and Windows. The source tree contains offline-testable `install.sh` and `install.ps1` implementations plus an `ash-update` trust core and `ash self` coordinator that strictly verify canonical Ed25519-signed metadata, stream bounded release archives, activate healthy candidates, recover interrupted journals, and roll back. The online commands remain unavailable in ordinary development builds until a release public key is embedded and signed artifacts exist.
 
 ## 1. Distribution goals
 
@@ -192,7 +192,7 @@ The installed binary contains the trusted release-metadata public key. `ash self
 - protocol compatibility;
 - installation provenance and owned paths.
 
-Key rotation requires metadata signed by a currently trusted key and a threshold of designated successor keys.
+The initial build embeds an ordered key set through `ASH_RELEASE_TRUSTED_KEYS`; builds without it fail before network access. Threshold key rotation is a future manifest-version extension and is not claimed by the version-one verifier.
 
 ## 11. Update and rollback
 
@@ -205,11 +205,23 @@ The install root keeps the active version and at least one previous healthy vers
 5. Run `ash self check --candidate <path>`.
 6. Atomically switch the active pointer or launcher.
 7. Run a protocol handshake health check.
-8. Mark the receipt healthy and apply retention policy.
+8. Commit the receipt and monotonic update state while retaining the prior healthy version.
+
+Implemented machine entrypoints are:
+
+```text
+ash self status [--prefix <path>]
+ash self check --candidate <path>
+ash self update [--prefix <path>] [--from <release-directory>]
+ash self rollback [--prefix <path>]
+ash self recover [--prefix <path>]
+```
+
+`--from` runs the identical signature, archive, activation, and health path without network access. Success and failure output is canonical ASON; update failures use diagnostic family `11`.
 
 If the health check fails, activation returns to the previous version and records the failed candidate.
 
-On Windows, a running executable cannot reliably replace itself. The updater launches the verified candidate in a private replacement mode, transfers an authenticated journal handle, exits the parent, performs the switch with bounded retries, runs the health check, and completes or rolls back the receipt.
+On Windows, a running executable cannot reliably replace itself. The updater launches the verified candidate in a private replacement mode, validates the owned receipt and state-bound journal, exits the parent, performs the switch with bounded retries, runs the health check, and completes or rolls back the receipt.
 
 ## 12. Uninstall
 

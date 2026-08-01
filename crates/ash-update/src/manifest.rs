@@ -10,8 +10,8 @@ const MANIFEST_DOMAIN: &[u8] = b"ash-release-manifest-v1\0";
 const PRODUCT: &str = "ash";
 const CHANNEL: &str = "stable";
 const MAX_KEY_ID_BYTES: usize = 32;
-const MAX_MANIFEST_BYTES: usize = 64 * 1024;
-const MAX_SIGNATURE_BYTES: usize = 1024;
+pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+pub const MAX_SIGNATURE_BYTES: usize = 1024;
 pub const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -235,7 +235,8 @@ pub fn verify_release(
     manifest_bytes: &[u8],
     signature_bytes: &[u8],
     trust: &TrustStore,
-    current_version: &str,
+    installed_version: &str,
+    updater_version: &str,
     current_protocol: (u16, u16),
     current_ason: (u16, u16),
     target: &str,
@@ -270,10 +271,11 @@ pub fn verify_release(
         .map_err(|_| UpdateError::Signature)?;
 
     validate_manifest(&manifest, current_protocol, current_ason)?;
-    let current = Version::parse(current_version).map_err(|_| UpdateError::Version)?;
+    let current = Version::parse(installed_version).map_err(|_| UpdateError::Version)?;
+    let updater = Version::parse(updater_version).map_err(|_| UpdateError::Version)?;
     let next = Version::parse(&manifest.version).map_err(|_| UpdateError::Version)?;
     let minimum = Version::parse(&manifest.minimum_updater).map_err(|_| UpdateError::Version)?;
-    if current < minimum {
+    if updater < minimum {
         return Err(UpdateError::UpdaterTooOld);
     }
     let decision = if next == current {
@@ -471,6 +473,18 @@ pub enum UpdateError {
     Archive,
     #[error("embedded release metadata is invalid")]
     Package,
+    #[error("installation receipt, state, path ownership, or journal is invalid")]
+    Installation,
+    #[error("another installer or updater owns the installation lock")]
+    InstallLock,
+    #[error("an incomplete update must be recovered before this action")]
+    PendingUpdate,
+    #[error("the candidate or rollback health check failed")]
+    Health,
+    #[error("no validated previous version is available for rollback")]
+    NoRollback,
+    #[error("activation or rollback could not establish a provable state")]
+    Activation,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -539,6 +553,7 @@ mod tests {
             &signature,
             &trust,
             "1.0.0",
+            "1.0.0",
             (1, 0),
             (1, 0),
             "x86_64-pc-windows-msvc",
@@ -555,6 +570,7 @@ mod tests {
                 &manifest,
                 &signature,
                 &trust,
+                "1.0.0",
                 "1.0.0",
                 (1, 0),
                 (1, 0),
@@ -580,6 +596,7 @@ mod tests {
                 &signature,
                 &trust,
                 "1.0.0",
+                "1.0.0",
                 (1, 0),
                 (1, 0),
                 "x86_64-pc-windows-msvc",
@@ -596,6 +613,7 @@ mod tests {
                 &encoded,
                 &signature,
                 &trust,
+                "1.0.0",
                 "1.0.0",
                 (1, 0),
                 (1, 0),
@@ -618,6 +636,7 @@ mod tests {
                 &signature,
                 &other,
                 "1.0.0",
+                "1.0.0",
                 (1, 0),
                 (1, 0),
                 "x86_64-pc-windows-msvc",
@@ -639,6 +658,7 @@ mod tests {
                 &signature,
                 &trust,
                 "1.0.0",
+                "1.0.0",
                 (1, 0),
                 (1, 0),
                 "x86_64-unknown-linux-musl",
@@ -656,6 +676,7 @@ mod tests {
                 &signature,
                 &trust,
                 "1.0.0",
+                "1.0.0",
                 (1, 0),
                 (1, 0),
                 "x86_64-unknown-linux-musl",
@@ -666,5 +687,43 @@ mod tests {
             .decision(),
             UpdateDecision::SignedRollback
         );
+    }
+
+    #[test]
+    fn minimum_version_applies_to_the_verifier_not_the_installed_receipt() {
+        let mut release = manifest();
+        release.minimum_updater = "2.0.0".to_owned();
+        release.version = "4.0.0".to_owned();
+        let (encoded, signature, trust) = signed(&release);
+        assert!(
+            verify_release(
+                &encoded,
+                &signature,
+                &trust,
+                "3.0.0",
+                "2.0.0",
+                (1, 0),
+                (1, 0),
+                "x86_64-unknown-linux-musl",
+                0,
+                None,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            verify_release(
+                &encoded,
+                &signature,
+                &trust,
+                "3.0.0",
+                "1.9.9",
+                (1, 0),
+                (1, 0),
+                "x86_64-unknown-linux-musl",
+                0,
+                None,
+            ),
+            Err(UpdateError::UpdaterTooOld)
+        ));
     }
 }

@@ -262,12 +262,7 @@ fn validate_package(
         || metadata.ason != version_text(manifest.ason_version())
         || metadata.commit != manifest.source_commit()
         || metadata.binary_sha256 != artifact.binary_sha256()
-        || metadata.build.is_empty()
-        || metadata.build.len() > 64
-        || !metadata
-            .build
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        || !valid_build(&metadata.build)
     {
         return Err(UpdateError::Package);
     }
@@ -275,6 +270,50 @@ fn validate_package(
         root: destination.to_owned(),
         binary,
     })
+}
+
+pub(crate) fn validate_local_version(
+    root: &Path,
+    expected_version: &str,
+    expected_target: &str,
+) -> Result<PathBuf, UpdateError> {
+    let binary_name = if expected_target.contains("windows") {
+        "ash.exe"
+    } else {
+        "ash"
+    };
+    let binary = root.join(binary_name);
+    let metadata = fs::symlink_metadata(&binary)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_BINARY_BYTES
+    {
+        return Err(UpdateError::Package);
+    }
+    let release_path = root.join("release.json");
+    let release_metadata = fs::symlink_metadata(&release_path)?;
+    if !release_metadata.is_file() || release_metadata.file_type().is_symlink() {
+        return Err(UpdateError::Package);
+    }
+    let metadata_bytes = read_bounded(&release_path, MAX_RELEASE_METADATA_BYTES)?;
+    let release: PackageMetadata =
+        serde_json::from_slice(&metadata_bytes).map_err(|_| UpdateError::Package)?;
+    if canonical_json(&release)? != metadata_bytes
+        || release.schema != 1
+        || release.product != "ash"
+        || release.version != expected_version
+        || release.target != expected_target
+        || release.protocol != "1"
+        || release.ason != "1"
+        || !canonical_lower_hex(&release.commit, 40)
+        || !valid_build(&release.build)
+        || !canonical_lower_hex(&release.binary_sha256, 64)
+    {
+        return Err(UpdateError::Package);
+    }
+    verify_file(&binary, metadata.len(), &release.binary_sha256)?;
+    Ok(binary)
 }
 
 fn read_bounded(path: &Path, ceiling: u64) -> Result<Vec<u8>, UpdateError> {
@@ -301,6 +340,21 @@ fn version_text(version: (u16, u16)) -> String {
     } else {
         format!("{}.{}", version.0, version.1)
     }
+}
+
+fn valid_build(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+fn canonical_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn encode_hex(bytes: &[u8]) -> String {

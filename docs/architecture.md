@@ -4,7 +4,7 @@ Status: architecture baseline plus implementation checkpoint
 
 This document defines the intended architecture of `ash` and is normative for component ownership and runtime boundaries. Statements explicitly labeled as the current source checkpoint describe implemented behavior; the remaining contracts are design targets rather than release claims.
 
-The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution, bounded read/list/search, compare-and-swap patching with live rollback, durable file-only filesystem transactions with restart recovery, retained-result inspection, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, and strict signed-release/package verification. Online release publication, update activation, fuzz infrastructure, and published benchmark evidence remain open.
+The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution, bounded read/list/search, compare-and-swap patching with live rollback, durable file-only filesystem transactions with restart recovery, retained-result inspection, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, and strict signed-release verification, download, activation, recovery, and rollback. Online release publication, release-key provisioning, fuzz infrastructure, and published benchmark evidence remain open.
 
 ## 1. Product definition
 
@@ -196,7 +196,7 @@ Owns the release trust boundary:
 - exact-shape, size-bounded `.tar.gz` and `.zip` extraction;
 - installation journals, candidate activation, health checks, and rollback.
 
-The current checkpoint implements the first five items. It rejects weak or unknown keys, noncanonical metadata, signature alteration, sequence rollback or equivocation, incomplete target matrices, archive traversal, links, duplicate or surplus entries, decompression beyond declared ceilings, and mismatched embedded release metadata. Activation and recovery are the next vertical slice.
+The current checkpoint implements all of these boundaries. It rejects weak or unknown keys, noncanonical metadata, signature alteration, sequence rollback or equivocation, incomplete target matrices, archive traversal, links, duplicate or surplus entries, decompression beyond declared ceilings, mismatched embedded release metadata, unowned launchers, concurrent activation, and inconsistent recovery journals. Unix activation atomically replaces the active version link; Windows delegates running-binary replacement to the verified candidate with bounded retries. Health failure restores the prior executable and state before reporting failure.
 
 ## 5. Semantic execution model
 

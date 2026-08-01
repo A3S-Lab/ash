@@ -14,6 +14,7 @@ use ash_protocol::request::{
     SearchArgs, SnapshotArgs, SnapshotMode,
 };
 use ash_protocol::{Capability, Operation};
+use sha2::{Digest, Sha256};
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -110,6 +111,72 @@ fn run_from(directory: Option<&std::path::Path>, arguments: &[&str], input: &[u8
     child.wait_with_output().expect("wait for ash")
 }
 
+fn installed_fixture(directory: &TestDirectory) -> PathBuf {
+    let prefix = directory.0.join("installed-ash");
+    let version = env!("CARGO_PKG_VERSION");
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_ash"));
+    let build = run(&["--build-info"], b"");
+    let build = String::from_utf8(build.stdout).expect("build info");
+    let target = build
+        .lines()
+        .find_map(|line| line.strip_prefix("t:"))
+        .expect("target");
+    let binary_name = if cfg!(windows) { "ash.exe" } else { "ash" };
+    let version_root = prefix.join("versions").join(version);
+    fs::create_dir_all(&version_root).expect("version root");
+    let version_binary = version_root.join(binary_name);
+    fs::copy(&executable, &version_binary).expect("version binary");
+    let digest = Sha256::digest(fs::read(&version_binary).expect("read binary"));
+    let digest = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    fs::write(
+        version_root.join("release.json"),
+        format!(
+            "{{\"schema\":1,\"product\":\"ash\",\"version\":\"{version}\",\"target\":\"{target}\",\"protocol\":\"1\",\"ason\":\"1\",\"commit\":\"{}\",\"build\":\"test\",\"binary_sha256\":\"{digest}\"}}\n",
+            "a".repeat(40)
+        ),
+    )
+    .expect("release metadata");
+
+    #[cfg(unix)]
+    let launcher = {
+        use std::os::unix::fs::symlink;
+        symlink(
+            PathBuf::from("versions").join(version),
+            prefix.join("active"),
+        )
+        .expect("active link");
+        let bin = directory.0.join("bin");
+        fs::create_dir(&bin).expect("bin directory");
+        let launcher = bin.join("ash");
+        symlink(prefix.join("active").join("ash"), &launcher).expect("launcher link");
+        launcher
+    };
+    #[cfg(windows)]
+    let launcher = {
+        let active = prefix.join("active");
+        fs::create_dir(&active).expect("active directory");
+        let launcher = active.join("ash.exe");
+        fs::copy(&version_binary, &launcher).expect("launcher");
+        launcher
+    };
+    let receipt = serde_json::json!({
+        "schema": 1,
+        "repository": "A3S-Lab/ash",
+        "version": version,
+        "target": target,
+        "prefix": prefix,
+        "launcher": launcher,
+        "path_added": false,
+    });
+    let mut receipt = serde_json::to_vec(&receipt).expect("receipt JSON");
+    receipt.push(b'\n');
+    fs::write(prefix.join("install-receipt.json"), receipt).expect("receipt");
+    prefix
+}
+
 fn frame(payload: &[u8]) -> Vec<u8> {
     let mut framed = Vec::with_capacity(payload.len() + 4);
     framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
@@ -160,8 +227,51 @@ fn build_info_is_canonical_machine_metadata() {
     let metadata = String::from_utf8(output.stdout).expect("UTF-8");
     assert_eq!(decode(&metadata).expect("ASON").encode(), metadata);
     assert!(metadata.starts_with("v:0.1.0\nt:"));
-    assert!(metadata.ends_with("\np:1\na:1\n"));
+    assert!(metadata.contains("\np:1\na:1\nk:"));
+    assert!(metadata.ends_with('\n'));
     assert!(!metadata.contains("unsupported"));
+}
+
+#[test]
+fn self_status_and_candidate_check_are_canonical() {
+    let directory = TestDirectory::new();
+    let prefix = installed_fixture(&directory);
+    let prefix = prefix.to_str().expect("UTF-8 test path");
+    let status = run(&["self", "status", "--prefix", prefix], b"");
+    assert!(status.status.success(), "stderr={:?}", status.stderr);
+    let status = String::from_utf8(status.stdout).expect("status UTF-8");
+    assert_eq!(decode(&status).expect("status ASON").encode(), status);
+    assert!(status.starts_with("s:0\na:status\nv:0.1.0\nt:"), "{status}");
+    assert!(status.contains("\nq:0\nh:~\nk:~\n"), "{status}");
+
+    let candidate = env!("CARGO_BIN_EXE_ash");
+    let check = run(&["self", "check", "--candidate", candidate], b"");
+    assert!(check.status.success(), "stderr={:?}", check.stderr);
+    let check = String::from_utf8(check.stdout).expect("check UTF-8");
+    assert_eq!(decode(&check).expect("check ASON").encode(), check);
+    assert!(check.starts_with("s:0\na:healthy\nv:0.1.0\nt:"), "{check}");
+}
+
+#[test]
+fn self_update_fails_closed_without_embedded_release_trust() {
+    let directory = TestDirectory::new();
+    let prefix = installed_fixture(&directory);
+    let source = directory.0.join("empty-release");
+    fs::create_dir(&source).expect("release source");
+    let output = run(
+        &[
+            "self",
+            "update",
+            "--prefix",
+            prefix.to_str().expect("prefix"),
+            "--from",
+            source.to_str().expect("source"),
+        ],
+        b"",
+    );
+    assert_eq!(output.status.code(), Some(70));
+    assert!(output.stdout.is_empty());
+    assert_eq!(output.stderr, b"s:1\ne{c}:\n11\n");
 }
 
 #[test]

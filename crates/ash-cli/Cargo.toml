@@ -19,8 +19,14 @@ ash-ops.workspace = true
 ash-platform.workspace = true
 ash-protocol.workspace = true
 ash-store.workspace = true
+ash-update.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 blake3.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

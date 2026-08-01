@@ -9,6 +9,7 @@ use ash_protocol::frame::{FrameError, ProtocolReadError};
 use ash_protocol::handshake::SchemaError;
 use ash_protocol::request::RequestError;
 use ash_protocol::response::ResponseError;
+use ash_update::UpdateError;
 use thiserror::Error;
 use tokio::io::{AsyncWriteExt, stderr};
 
@@ -40,6 +41,10 @@ pub enum CliError {
     Operation(#[from] OperationError),
     #[error(transparent)]
     Build(#[from] BuildError),
+    #[error(transparent)]
+    Update(#[from] UpdateError),
+    #[error(transparent)]
+    Network(#[from] reqwest::Error),
     #[error("RPC input ended before a handshake")]
     MissingHandshake,
     #[error(transparent)]
@@ -71,6 +76,7 @@ impl CliError {
                 | PlatformError::InvalidWorkspace,
             ) => 6,
             Self::MissingHandshake => 7,
+            Self::Update(_) | Self::Network(_) => 11,
             Self::Build(_)
             | Self::Response(_)
             | Self::Engine(_)
@@ -94,13 +100,15 @@ impl CliError {
                 | PlatformError::InvalidWorkspace,
             )
             | Self::MissingHandshake => 4,
+            Self::Network(_) => 69,
             Self::Io(_)
             | Self::Build(_)
             | Self::Response(_)
             | Self::Engine(_)
             | Self::Platform(_)
             | Self::Operation(_)
-            | Self::Task(_) => 70,
+            | Self::Task(_)
+            | Self::Update(_) => 70,
         }
     }
 

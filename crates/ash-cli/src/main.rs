@@ -5,6 +5,7 @@ mod cli_error;
 mod execution;
 mod rpc;
 mod run_command;
+mod self_command;
 
 use std::process::ExitCode;
 
@@ -31,15 +32,17 @@ async fn run() -> Result<(), CliError> {
         [command] if command == "ason" => ason_command::run().await,
         [command] if command == "run" => run_command::run().await,
         [command] if command == "rpc" => rpc::run().await,
+        [command, tail @ ..] if command == "self" => self_command::run(tail).await,
         _ => Err(CliError::Usage),
     }
 }
 
 async fn build_info() -> Result<(), CliError> {
     let output = format!(
-        "v:{}\nt:{}\np:1\na:1\n",
+        "v:{}\nt:{}\np:1\na:1\nk:{}\n",
         env!("CARGO_PKG_VERSION"),
-        build_target()
+        build_target(),
+        self_command::trust_fingerprint()
     );
     let mut stdout = stdout();
     stdout.write_all(output.as_bytes()).await?;
@@ -47,7 +50,7 @@ async fn build_info() -> Result<(), CliError> {
     Ok(())
 }
 
-fn build_target() -> &'static str {
+pub(crate) fn build_target() -> &'static str {
     if cfg!(all(
         target_arch = "x86_64",
         target_os = "linux",
