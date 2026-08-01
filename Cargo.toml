@@ -24,6 +24,7 @@ ash-ops = { package = "a3s-ash-ops", path = "crates/ash-ops" }
 ash-platform = { package = "a3s-ash-platform", path = "crates/ash-platform" }
 ash-protocol = { package = "a3s-ash-protocol", path = "crates/ash-protocol" }
 ash-store = { package = "a3s-ash-store", path = "crates/ash-store" }
+blake3 = "1.8.5"
 rayon = "1.12.0"
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }

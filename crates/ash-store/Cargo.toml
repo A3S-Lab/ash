@@ -10,4 +10,5 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+blake3.workspace = true
 thiserror.workspace = true
