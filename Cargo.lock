@@ -20,6 +20,7 @@ name = "a3s-ash-engine"
 version = "0.1.0"
 dependencies = [
  "a3s-ash-protocol",
+ "a3s-ash-store",
  "rayon",
  "thiserror",
  "tokio",

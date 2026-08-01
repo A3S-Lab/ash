@@ -108,6 +108,15 @@ impl ComputePool {
     {
         self.pool.install(|| input.par_iter().map(map).collect())
     }
+
+    /// Runs one splittable CPU closure on the dedicated compute plane.
+    pub fn install<R, F>(&self, operation: F) -> R
+    where
+        R: Send,
+        F: FnOnce() -> R + Send,
+    {
+        self.pool.install(operation)
+    }
 }
 
 #[derive(Debug, Error)]

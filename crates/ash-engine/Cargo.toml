@@ -11,6 +11,7 @@ homepage.workspace = true
 
 [dependencies]
 ash-protocol.workspace = true
+ash-store.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
