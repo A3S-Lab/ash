@@ -24,6 +24,8 @@ pub enum PlatformError {
     NonUtf8Path,
     #[error("process environment contains an invalid name or NUL value")]
     InvalidEnvironment,
+    #[error("input contains {size} bytes, exceeding the operation ceiling of {max}")]
+    InputTooLarge { size: u64, max: u64 },
     #[error("filesystem or process I/O failed: {0}")]
     Io(#[from] io::Error),
 }

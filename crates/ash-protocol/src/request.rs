@@ -125,6 +125,12 @@ impl Request {
         Self::new(id, arguments, budget)
     }
 
+    /// Extracts a usable request identifier before full schema validation.
+    #[must_use]
+    pub fn id_hint(document: &Document) -> Option<u64> {
+        unsigned(document.get("i"), "i").ok().filter(|id| *id != 0)
+    }
+
     pub fn encode(&self) -> Result<Document, BuildError> {
         let operation = char::from(self.operation().id()).to_string();
         let budget = self.budget;

@@ -1,6 +1,6 @@
 # ASH/1 protocol and ASON
 
-Status: canonical ASON syntax, framing, handshake, and typed M1 request/result schemas are implemented
+Status: canonical ASON, framing, handshake, typed M1 schemas, and read/list/search runtime paths are implemented
 
 ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
 
@@ -133,7 +133,7 @@ N bytes canonical ASON payload
 
 The length prefix is transport metadata and is never shown to the LLM. The initial hard payload ceiling is 8 MiB, with a lower negotiated session default. Large content must use streaming events or result references.
 
-Before handshake negotiation, the implementation accepts at most 1 MiB per frame. Negotiation may lower or raise that limit but can never exceed the 8 MiB hard ceiling.
+Before handshake negotiation, the implementation accepts at most 1 MiB per frame. Negotiation may lower or raise that limit within `256..=8388608`; the 256-byte floor guarantees that every peer can carry a structural control result. The selected immediate-output ceiling is also capped by the selected frame size.
 
 A receiver must reject a frame before allocation when its declared length exceeds the negotiated ceiling. Zero-length frames are invalid. EOF inside a frame terminates the session with a framing error and cancels owned programs.
 
@@ -169,7 +169,7 @@ d{ap,av,zp,zv,frm,out,ops,cap,os,arch,sid,n}:
 1,0,1,0,1048576,65536,0,0,linux,x86_64,1,nonce-7
 ```
 
-The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. During the M0 protocol stage the executable advertises an operation mask of `0`; bits are enabled only as their complete operation contracts land.
+The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises `0x0e`, exactly the implemented `read`, `list`, and `search` bits; `exec` and later bits remain clear until their complete operation contracts land.
 
 The handshake is retained by the adapter and is not repeated in each model-visible result.
 
@@ -369,7 +369,7 @@ e{c}:
 4
 ```
 
-Bootstrap codes are `1` usage, `2` input ceiling, `3` invalid UTF-8, `4` ASON, `5` framing, `6` handshake schema, `7` missing handshake, `8` unavailable message type, `9` I/O, and `10` internal model construction. They are CLI diagnostics, not ASH request error codes.
+Bootstrap codes are `1` usage, `2` input ceiling, `3` invalid UTF-8, `4` ASON, `5` framing, `6` handshake or uncorrelatable message schema, `7` missing handshake, `8` unavailable message type, `9` I/O, and `10` internal model construction. Once a valid request ID exists, failures use a normal framed ASH result instead of stderr. These are CLI diagnostics, not ASH request error codes.
 
 ## 16. Parser security
 

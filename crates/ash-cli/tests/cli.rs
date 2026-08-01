@@ -1,8 +1,10 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
+use ash_ops::PortableOperations;
 use ash_protocol::ason::decode;
 use ash_protocol::handshake::{HandshakePreferences, HandshakeRequest, HandshakeResponse};
+use ash_protocol::request::{Arguments, Budget, ReadArgs, ReadMode, Request};
 
 fn run(arguments: &[&str], input: &[u8]) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ash"))
@@ -26,6 +28,18 @@ fn frame(payload: &[u8]) -> Vec<u8> {
     framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     framed.extend_from_slice(payload);
     framed
+}
+
+fn split_frames(mut bytes: &[u8]) -> Vec<&[u8]> {
+    let mut frames = Vec::new();
+    while !bytes.is_empty() {
+        assert!(bytes.len() >= 4, "truncated frame prefix");
+        let length = u32::from_be_bytes(bytes[..4].try_into().expect("prefix")) as usize;
+        assert!(bytes.len() >= length + 4, "truncated frame payload");
+        frames.push(&bytes[4..length + 4]);
+        bytes = &bytes[length + 4..];
+    }
+    frames
 }
 
 #[test]
@@ -53,6 +67,29 @@ fn ason_command_returns_a_machine_only_error() {
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
     assert_eq!(output.stderr, b"s:1\ne{c}:\n4\n");
+}
+
+#[test]
+fn run_executes_one_bare_typed_request() {
+    let request = Request::new(
+        31,
+        Arguments::Read(
+            ReadArgs::new(vec!["Cargo.toml".to_owned()], ReadMode::Bytes, 0, 32).expect("read"),
+        ),
+        Budget::new(1024, 8, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode")
+    .encode();
+    let output = run(&["run"], request.as_bytes());
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert!(output.stderr.is_empty());
+    let response = std::str::from_utf8(&output.stdout).expect("UTF-8 response");
+    assert_eq!(decode(response).expect("ASON response").encode(), response);
+    assert!(response.starts_with("t:3\ni:31\ns:0\n"));
+    assert!(response.contains("Cargo.toml"));
+    assert!(response.contains("d[1]{p,o,n,h,t,r}:"));
 }
 
 #[test]
@@ -113,5 +150,47 @@ fn rpc_negotiates_one_canonical_framed_session() {
         .expect("response schema");
     assert_eq!(response.session_id(), 1);
     assert_eq!(response.nonce(), "integration-17");
-    assert_eq!(response.operation_mask(), 0);
+    assert_eq!(
+        response.operation_mask(),
+        PortableOperations::operation_mask()
+    );
+}
+
+#[test]
+fn rpc_executes_a_request_after_the_handshake() {
+    let handshake = HandshakeRequest::new(
+        40,
+        ".",
+        "integration-40",
+        HandshakePreferences {
+            operation_mask: u64::MAX,
+            ..HandshakePreferences::default()
+        },
+    )
+    .expect("handshake")
+    .encode()
+    .expect("encode handshake")
+    .encode();
+    let request = Request::new(
+        41,
+        Arguments::Read(
+            ReadArgs::new(vec!["Cargo.toml".to_owned()], ReadMode::Bytes, 0, 16).expect("read"),
+        ),
+        Budget::new(1024, 8, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode request")
+    .encode();
+    let mut input = frame(handshake.as_bytes());
+    input.extend(frame(request.as_bytes()));
+    let output = run(&["rpc"], &input);
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert!(output.stderr.is_empty());
+    let frames = split_frames(&output.stdout);
+    assert_eq!(frames.len(), 2);
+    let result = std::str::from_utf8(frames[1]).expect("result UTF-8");
+    assert_eq!(decode(result).expect("result ASON").encode(), result);
+    assert!(result.starts_with("t:3\ni:41\ns:0\n"));
+    assert!(result.contains("Cargo.toml"));
 }

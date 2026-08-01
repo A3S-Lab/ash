@@ -1,9 +1,14 @@
 use std::io;
 use std::string::FromUtf8Error;
 
+use ash_engine::EngineError;
+use ash_ops::OperationError;
+use ash_platform::PlatformError;
 use ash_protocol::ason::{BuildError, DecodeError};
 use ash_protocol::frame::{FrameError, ProtocolReadError};
 use ash_protocol::handshake::SchemaError;
+use ash_protocol::request::RequestError;
+use ash_protocol::response::ResponseError;
 use thiserror::Error;
 use tokio::io::{AsyncWriteExt, stderr};
 
@@ -24,11 +29,19 @@ pub enum CliError {
     #[error(transparent)]
     Handshake(#[from] SchemaError),
     #[error(transparent)]
+    Request(#[from] RequestError),
+    #[error(transparent)]
+    Response(#[from] ResponseError),
+    #[error(transparent)]
+    Engine(#[from] EngineError),
+    #[error(transparent)]
+    Platform(#[from] PlatformError),
+    #[error(transparent)]
+    Operation(#[from] OperationError),
+    #[error(transparent)]
     Build(#[from] BuildError),
     #[error("RPC input ended before a handshake")]
     MissingHandshake,
-    #[error("this protocol message is not implemented yet")]
-    UnsupportedMessage,
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -44,13 +57,23 @@ impl CliError {
             Self::Protocol(ProtocolReadError::Ason(_)) => 4,
             Self::Frame(FrameError::Io(_))
             | Self::Protocol(ProtocolReadError::Frame(FrameError::Io(_)))
+            | Self::Platform(PlatformError::Io(_))
             | Self::Io(_) => 9,
             Self::Frame(_)
             | Self::Protocol(ProtocolReadError::Frame(_) | ProtocolReadError::NonCanonical) => 5,
-            Self::Handshake(_) => 6,
+            Self::Handshake(_)
+            | Self::Request(_)
+            | Self::Platform(
+                PlatformError::InvalidLogicalPath
+                | PlatformError::WorkspaceEscape
+                | PlatformError::InvalidWorkspace,
+            ) => 6,
             Self::MissingHandshake => 7,
-            Self::UnsupportedMessage => 8,
-            Self::Build(_) => 10,
+            Self::Build(_)
+            | Self::Response(_)
+            | Self::Engine(_)
+            | Self::Operation(_)
+            | Self::Platform(_) => 10,
         }
     }
 
@@ -61,9 +84,19 @@ impl CliError {
             Self::Frame(_)
             | Self::Protocol(_)
             | Self::Handshake(_)
-            | Self::MissingHandshake
-            | Self::UnsupportedMessage => 4,
-            Self::Io(_) | Self::Build(_) => 70,
+            | Self::Request(_)
+            | Self::Platform(
+                PlatformError::InvalidLogicalPath
+                | PlatformError::WorkspaceEscape
+                | PlatformError::InvalidWorkspace,
+            )
+            | Self::MissingHandshake => 4,
+            Self::Io(_)
+            | Self::Build(_)
+            | Self::Response(_)
+            | Self::Engine(_)
+            | Self::Platform(_)
+            | Self::Operation(_) => 70,
         }
     }
 

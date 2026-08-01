@@ -10,4 +10,12 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+ash-engine.workspace = true
+ash-platform.workspace = true
 ash-protocol.workspace = true
+ash-store.workspace = true
+blake3.workspace = true
+rayon.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

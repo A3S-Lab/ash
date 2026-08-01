@@ -87,6 +87,22 @@ impl Workspace {
         Ok(fs::read(native)?)
     }
 
+    pub fn read_limited_sync(
+        &self,
+        path: &ResolvedPath,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, PlatformError> {
+        let native = self.revalidate(path)?;
+        let size = fs::metadata(&native)?.len();
+        if size > max_bytes {
+            return Err(PlatformError::InputTooLarge {
+                size,
+                max: max_bytes,
+            });
+        }
+        Ok(fs::read(native)?)
+    }
+
     pub fn walk(
         &self,
         root: &ResolvedPath,

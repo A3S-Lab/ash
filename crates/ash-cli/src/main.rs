@@ -2,7 +2,9 @@
 
 mod ason_command;
 mod cli_error;
+mod execution;
 mod rpc;
+mod run_command;
 
 use std::process::ExitCode;
 
@@ -26,6 +28,7 @@ async fn run() -> Result<(), CliError> {
     match arguments.as_slice() {
         [command] if command == "--version" || command == "version" => version().await,
         [command] if command == "ason" => ason_command::run().await,
+        [command] if command == "run" => run_command::run().await,
         [command] if command == "rpc" => rpc::run().await,
         _ => Err(CliError::Usage),
     }

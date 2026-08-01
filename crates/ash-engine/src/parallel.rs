@@ -4,6 +4,7 @@ use std::thread;
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use thiserror::Error;
+use tokio::sync::oneshot;
 
 /// Bounded worker counts for the asynchronous and compute execution planes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,12 +118,41 @@ impl ComputePool {
     {
         self.pool.install(operation)
     }
+
+    /// Schedules owned CPU work without blocking a Tokio I/O worker.
+    pub async fn run<R, F>(&self, operation: F) -> Result<R, ParallelismError>
+    where
+        R: Send + 'static,
+        F: FnOnce() -> R + Send + 'static,
+    {
+        let (sender, receiver) = oneshot::channel();
+        self.pool.spawn(move || {
+            let _ = sender.send(operation());
+        });
+        receiver.await.map_err(|_| ParallelismError::WorkerLost)
+    }
+
+    /// Maps owned indexed input on the compute plane and preserves input order.
+    pub async fn map_ordered_owned<T, U, F>(
+        &self,
+        input: Vec<T>,
+        map: F,
+    ) -> Result<Vec<U>, ParallelismError>
+    where
+        T: Send + Sync + 'static,
+        U: Send + 'static,
+        F: Fn(&T) -> U + Send + Sync + 'static,
+    {
+        self.run(move || input.par_iter().map(map).collect()).await
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum ParallelismError {
     #[error("failed to create the ash compute pool: {0}")]
     Build(#[from] rayon::ThreadPoolBuildError),
+    #[error("ash compute worker ended before returning its result")]
+    WorkerLost,
 }
 
 #[cfg(test)]

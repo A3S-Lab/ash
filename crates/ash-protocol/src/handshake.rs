@@ -12,6 +12,7 @@ use crate::{
 const MAX_WORKSPACE_BYTES: usize = 4096;
 const MAX_NONCE_BYTES: usize = 128;
 const MAX_PLATFORM_BYTES: usize = 64;
+pub const MIN_SESSION_FRAME_BYTES: u32 = 256;
 
 const REQUEST_COLUMNS: &[&str] = &[
     "ap", "al", "ah", "zp", "zl", "zh", "frm", "out", "ops", "cap", "root", "n",
@@ -158,7 +159,7 @@ impl HandshakeRequest {
         if p.ash_minor_low > p.ash_minor_high || p.ason_minor_low > p.ason_minor_high {
             return Err(SchemaError::InvalidRange);
         }
-        if p.max_frame_bytes == 0
+        if p.max_frame_bytes < MIN_SESSION_FRAME_BYTES
             || usize::try_from(p.max_frame_bytes).unwrap_or(usize::MAX) > HARD_MAX_FRAME_BYTES
         {
             return Err(SchemaError::InvalidLimit("frm"));
@@ -219,7 +220,7 @@ impl ServerHandshake {
         {
             return Err(SchemaError::UnsupportedVersion("ason"));
         }
-        if self.max_frame_bytes == 0
+        if self.max_frame_bytes < MIN_SESSION_FRAME_BYTES
             || usize::try_from(self.max_frame_bytes).unwrap_or(usize::MAX) > HARD_MAX_FRAME_BYTES
             || self.max_output_bytes == 0
         {
@@ -229,12 +230,16 @@ impl ServerHandshake {
             return Err(SchemaError::InvalidServerConfiguration);
         }
 
+        let frame_bytes = preferences.max_frame_bytes.min(self.max_frame_bytes);
         Ok(HandshakeResponse {
             request_id: request.request_id,
             ash_minor: ASH_PROTOCOL_MINOR,
             ason_minor: ASON_FORMAT_MINOR,
-            frame_bytes: preferences.max_frame_bytes.min(self.max_frame_bytes),
-            output_bytes: preferences.output_bytes.min(self.max_output_bytes),
+            frame_bytes,
+            output_bytes: preferences
+                .output_bytes
+                .min(self.max_output_bytes)
+                .min(frame_bytes),
             operation_mask: preferences.operation_mask & self.operation_mask & ALL_OPERATION_MASK,
             capability_mask: preferences.capability_mask & self.capability_mask,
             os: self.os.clone(),
@@ -326,6 +331,11 @@ impl HandshakeResponse {
     }
 
     #[must_use]
+    pub const fn output_bytes(&self) -> u32 {
+        self.output_bytes
+    }
+
+    #[must_use]
     pub const fn session_id(&self) -> u64 {
         self.session_id
     }
@@ -342,7 +352,7 @@ impl HandshakeResponse {
         if self.ason_minor != ASON_FORMAT_MINOR {
             return Err(SchemaError::UnsupportedVersion("ason"));
         }
-        if self.frame_bytes == 0
+        if self.frame_bytes < MIN_SESSION_FRAME_BYTES
             || usize::try_from(self.frame_bytes).unwrap_or(usize::MAX) > HARD_MAX_FRAME_BYTES
         {
             return Err(SchemaError::InvalidLimit("frm"));

@@ -181,4 +181,5 @@ fn wrong_argument_column_order_is_rejected_before_dispatch() {
     ])
     .expect("document");
     assert_eq!(Request::decode(&document), Err(RequestError::Columns));
+    assert_eq!(Request::id_hint(&document), Some(1));
 }
