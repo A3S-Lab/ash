@@ -114,6 +114,7 @@ fn run_from(directory: Option<&std::path::Path>, arguments: &[&str], input: &[u8
 fn installed_fixture(directory: &TestDirectory) -> PathBuf {
     let prefix = directory.0.join("installed-ash");
     let version = env!("CARGO_PKG_VERSION");
+    #[cfg(windows)]
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_ash"));
     let build = run(&["--build-info"], b"");
     let build = String::from_utf8(build.stdout).expect("build info");
@@ -125,7 +126,10 @@ fn installed_fixture(directory: &TestDirectory) -> PathBuf {
     let version_root = prefix.join("versions").join(version);
     fs::create_dir_all(&version_root).expect("version root");
     let version_binary = version_root.join(binary_name);
+    #[cfg(windows)]
     fs::copy(&executable, &version_binary).expect("version binary");
+    #[cfg(unix)]
+    fs::write(&version_binary, b"fixture").expect("version binary");
     let digest = Sha256::digest(fs::read(&version_binary).expect("read binary"));
     let digest = digest
         .iter()
