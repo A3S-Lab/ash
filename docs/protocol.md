@@ -1,6 +1,6 @@
 # ASH/1 protocol and ASON
 
-Status: canonical ASON syntax, framing, and the ASH/1.0 session handshake are implemented
+Status: canonical ASON syntax, framing, handshake, and M1 request schemas are implemented
 
 ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
 
@@ -250,6 +250,30 @@ The first protocol level reserves single-character presentation identifiers:
 | `k` | 9 | cancellation | acknowledged target and final cancellation state |
 
 These identifiers are stable within ASH/1. Internal Rust enum ordering is not part of the protocol.
+
+### 9.1 M1 request schemas
+
+Every M1 request uses the exact envelope order `t,i,o,a,u`. The budget record is always:
+
+```ason
+u{tok,rec,ms}:
+256,64,30000
+```
+
+`tok` is the maximum immediate model-token projection requested by the adapter, `rec` is the emitted-record ceiling, and `ms` is the wall-clock deadline in milliseconds. The engine additionally applies the lower handshake, session, and system ceilings.
+
+Operation argument records are positional only after their declared columns, so a model emits field names once while the schema decoder still rejects reordered or surplus values:
+
+| Operation | Argument header | Semantics |
+| --- | --- | --- |
+| `x` | `a{x,v,c,e,in,f}:` | executable, argv vector, logical cwd, environment deltas, stdin source, flags |
+| `r` | `a{p,m,o,n}:` | path vector, range mode, offset, length |
+| `l` | `a{p,d,f}:` | root path vector, maximum depth, flags |
+| `g` | `a{q,p,f}:` | query, root path vector, flags |
+
+`exec` invokes `x` directly. Environment entries use `NAME=value` to set and `-NAME` to remove; duplicate names are invalid. `in` is `~`, inline text, or a retained `@reference`. Exec flag bit 0 clears the inherited environment before applying deltas.
+
+Read mode `0` is a zero-based byte range and mode `1` is a one-based line range. A zero length is invalid. List flag bits are 0 include hidden, 1 files only, and 2 directories only. Search flag bits are 0 regular expression, 1 case-insensitive, and 2 include hidden. Unknown flag bits fail schema validation rather than being silently ignored.
 
 ## 10. Process result
 

@@ -1,0 +1,7 @@
+t:1
+i:19
+o:r
+a{p,m,o,n}:
+[src/lib.rs],1,1,80
+u{tok,rec,ms}:
+512,64,30000

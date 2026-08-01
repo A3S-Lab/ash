@@ -1,0 +1,184 @@
+use super::{
+    Arguments, Budget, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource, LIST_INCLUDE_HIDDEN,
+    ListArgs, READ_COLUMNS, ReadArgs, ReadMode, Request, RequestError, SEARCH_CASE_INSENSITIVE,
+    SEARCH_REGEX, SearchArgs,
+};
+use crate::Operation;
+use crate::ason::{Atom, Cell, Document, Field, Key, Record, Value, decode};
+
+const SEARCH_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/search-request.ason");
+const EXEC_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/exec-request.ason");
+const READ_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/read-request.ason");
+const LIST_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/list-request.ason");
+
+fn budget() -> Budget {
+    Budget::new(256, 64, 30_000).expect("budget")
+}
+
+#[test]
+fn specification_search_fixture_decodes_and_reencodes_exactly() {
+    let request = Request::decode(&decode(SEARCH_REQUEST).expect("ASON")).expect("schema");
+    assert_eq!(request.id(), 17);
+    assert_eq!(request.operation(), Operation::Search);
+    let Arguments::Search(arguments) = request.arguments() else {
+        panic!("search arguments expected");
+    };
+    assert_eq!(arguments.query(), "TODO");
+    assert_eq!(arguments.paths(), &["src"]);
+    assert_eq!(request.encode().expect("encode").encode(), SEARCH_REQUEST);
+}
+
+#[test]
+fn all_m1_request_fixtures_are_canonical_typed_messages() {
+    let expected = [
+        (EXEC_REQUEST, Operation::Exec),
+        (READ_REQUEST, Operation::Read),
+        (LIST_REQUEST, Operation::List),
+        (SEARCH_REQUEST, Operation::Search),
+    ];
+    for (fixture, operation) in expected {
+        let request = Request::decode(&decode(fixture).expect("ASON")).expect("schema");
+        assert_eq!(request.operation(), operation);
+        assert_eq!(request.encode().expect("encode").encode(), fixture);
+    }
+}
+
+#[test]
+fn every_m1_argument_schema_round_trips() {
+    let requests = [
+        Request::new(
+            1,
+            Arguments::Exec(
+                ExecArgs::new(
+                    "cargo",
+                    vec!["test".to_owned(), "--locked".to_owned()],
+                    ".",
+                    vec!["RUST_BACKTRACE=1".to_owned(), "-SECRET".to_owned()],
+                    InputSource::Reference(9),
+                    EXEC_CLEAR_ENVIRONMENT,
+                )
+                .expect("exec"),
+            ),
+            budget(),
+        )
+        .expect("request"),
+        Request::new(
+            2,
+            Arguments::Read(
+                ReadArgs::new(vec!["src/lib.rs".to_owned()], ReadMode::Lines, 10, 20)
+                    .expect("read"),
+            ),
+            budget(),
+        )
+        .expect("request"),
+        Request::new(
+            3,
+            Arguments::List(
+                ListArgs::new(vec!["src".to_owned()], 4, LIST_INCLUDE_HIDDEN).expect("list"),
+            ),
+            budget(),
+        )
+        .expect("request"),
+        Request::new(
+            4,
+            Arguments::Search(
+                SearchArgs::new(
+                    "error|warning",
+                    vec!["src".to_owned()],
+                    SEARCH_REGEX | SEARCH_CASE_INSENSITIVE,
+                )
+                .expect("search"),
+            ),
+            budget(),
+        )
+        .expect("request"),
+    ];
+
+    for request in requests {
+        let encoded = request.encode().expect("encode").encode();
+        let decoded = Request::decode(&decode(&encoded).expect("ASON")).expect("schema");
+        assert_eq!(decoded, request);
+    }
+}
+
+#[test]
+fn strict_envelope_budget_and_operation_validation_rejects_ambiguity() {
+    for input in [
+        "t:1\ni:17\no:g\na{q,p,f}:\nTODO,[src],0\n",
+        "t:1\ni:0\no:g\na{q,p,f}:\nTODO,[src],0\nu{tok,rec,ms}:\n256,64,30000\n",
+        "t:1\ni:17\no:q\na{q,p,f}:\nTODO,[src],0\nu{tok,rec,ms}:\n256,64,30000\n",
+        "t:1\ni:17\no:g\na{q,p,f}:\nTODO,[src],8\nu{tok,rec,ms}:\n256,64,30000\n",
+        "t:1\ni:17\no:g\na{q,p,f}:\nTODO,[],0\nu{tok,rec,ms}:\n256,64,30000\n",
+    ] {
+        assert!(
+            Request::decode(&decode(input).expect("valid ASON syntax")).is_err(),
+            "unexpected valid request: {input:?}"
+        );
+    }
+}
+
+#[test]
+fn line_reads_are_one_based_and_environment_deltas_are_unique() {
+    assert_eq!(
+        ReadArgs::new(vec!["a".to_owned()], ReadMode::Lines, 0, 1),
+        Err(RequestError::InvalidLimit("o"))
+    );
+    assert!(matches!(
+        ExecArgs::new(
+            "tool",
+            vec![],
+            ".",
+            vec!["A=1".to_owned(), "-A".to_owned()],
+            InputSource::None,
+            0,
+        ),
+        Err(RequestError::InvalidText("e"))
+    ));
+}
+
+#[test]
+fn wrong_argument_column_order_is_rejected_before_dispatch() {
+    let document = Document::new(vec![
+        Field::new(Key::new("t").expect("key"), Value::Scalar(Atom::text("1"))),
+        Field::new(Key::new("i").expect("key"), Value::Scalar(Atom::text("1"))),
+        Field::new(Key::new("o").expect("key"), Value::Scalar(Atom::text("r"))),
+        Field::new(
+            Key::new("a").expect("key"),
+            Value::Record(
+                Record::new(
+                    READ_COLUMNS
+                        .iter()
+                        .rev()
+                        .map(|key| Key::new(*key).expect("key"))
+                        .collect(),
+                    vec![
+                        Cell::Atom(Atom::text("1")),
+                        Cell::Atom(Atom::text("0")),
+                        Cell::Atom(Atom::text("0")),
+                        Cell::Vector(vec![Atom::text("a")]),
+                    ],
+                )
+                .expect("record"),
+            ),
+        ),
+        Field::new(
+            Key::new("u").expect("key"),
+            Value::Record(
+                Record::new(
+                    ["tok", "rec", "ms"]
+                        .into_iter()
+                        .map(|key| Key::new(key).expect("key"))
+                        .collect(),
+                    vec![
+                        Cell::Atom(Atom::text("1")),
+                        Cell::Atom(Atom::text("1")),
+                        Cell::Atom(Atom::text("1")),
+                    ],
+                )
+                .expect("record"),
+            ),
+        ),
+    ])
+    .expect("document");
+    assert_eq!(Request::decode(&document), Err(RequestError::Columns));
+}

@@ -6,6 +6,7 @@ pub mod ason;
 pub mod frame;
 pub mod handshake;
 mod operation;
+pub mod request;
 
 pub use operation::{ALL_OPERATION_MASK, Operation};
 

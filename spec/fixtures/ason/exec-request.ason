@@ -1,0 +1,7 @@
+t:1
+i:18
+o:x
+a{x,v,c,e,in,f}:
+cargo,[test,--locked],.,["RUST_BACKTRACE=1",-SECRET],~,0
+u{tok,rec,ms}:
+512,64,120000
