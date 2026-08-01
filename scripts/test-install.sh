@@ -125,7 +125,13 @@ profile=$fake_home/profile
 mkdir "$fake_home"
 HOME=$fake_home ASH_INSTALL_PROFILE=$profile sh "$installer" --archive "$archive" --sha256 "$archive_sha" --prefix "$path_prefix" --bin-dir "$path_bin" >/dev/null
 path_line="export PATH=\"$path_bin:\$PATH\" # ash-installer"
-[ "$(grep -F -x -c "$path_line" "$profile")" -eq 1 ] || fail 'PATH line was not added exactly once'
+path_count=$(grep -F -x -c "$path_line" "$profile" || true)
+if [ "$path_count" -ne 1 ]; then
+    printf 'expected profile line: <%s>\n' "$path_line" >&2
+    printf '%s\n' 'actual profile bytes:' >&2
+    od -An -tx1 "$profile" >&2
+    fail 'PATH line was not added exactly once'
+fi
 HOME=$fake_home ASH_INSTALL_PROFILE=$profile sh "$installer" --archive "$archive" --sha256 "$archive_sha" --prefix "$path_prefix" --bin-dir "$path_bin" >/dev/null
 [ "$(grep -F -x -c "$path_line" "$profile")" -eq 1 ] || fail 'idempotent reinstall duplicated PATH'
 HOME=$fake_home sh "$installer" --prefix "$path_prefix" --uninstall >/dev/null
