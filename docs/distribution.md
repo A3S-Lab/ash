@@ -1,8 +1,8 @@
 # Cross-platform distribution
 
-Status: architecture baseline
+Status: installer implementation checkpoint; no signed binary release is published
 
-This document defines how `ash` must be built, installed, updated, rolled back, and removed on Linux, macOS, and Windows. Commands described here are release contracts, not currently published installers.
+This document defines how `ash` is built, installed, updated, rolled back, and removed on Linux, macOS, and Windows. The source tree now contains offline-testable `install.sh` and `install.ps1` implementations. The online commands remain release contracts until signed artifacts exist.
 
 ## 1. Distribution goals
 
@@ -95,7 +95,7 @@ Both installers implement the same state machine:
 13. Write an installation receipt atomically.
 14. Remove staging data and print one compact success record.
 
-Failure before activation leaves the active installation untouched. Failure after activation triggers rollback to the prior receipt when possible.
+Failure before activation leaves the active installation untouched. Failure after activation restores the prior launcher, version directory, receipt, and installer-owned PATH state. The CI smoke suite exercises fresh install, idempotent reinstall, forced reinstall, checksum and archive-shape rejection, lock contention, rollback before activation, paths containing spaces and Unicode, PATH ownership, and uninstall.
 
 ## 6. Target detection
 
@@ -127,7 +127,7 @@ ${ASH_HOME:-$HOME/.local/share/ash}/
 ${ASH_BIN_DIR:-$HOME/.local/bin}/ash -> ../share/ash/active/ash
 ```
 
-The exact link target is calculated rather than assumed when custom directories are used. If symbolic links are unavailable, the installer uses an atomic launcher copy and records that strategy.
+The exact link target is calculated rather than assumed when custom directories are used. The current Unix installer requires symbolic-link support and rejects an unowned launcher instead of replacing it.
 
 ### 7.2 Windows
 

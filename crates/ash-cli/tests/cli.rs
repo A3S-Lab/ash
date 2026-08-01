@@ -143,6 +143,18 @@ fn version_is_stable_and_script_friendly() {
 }
 
 #[test]
+fn build_info_is_canonical_machine_metadata() {
+    let output = run(&["--build-info"], b"");
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let metadata = String::from_utf8(output.stdout).expect("UTF-8");
+    assert_eq!(decode(&metadata).expect("ASON").encode(), metadata);
+    assert!(metadata.starts_with("v:0.1.0\nt:"));
+    assert!(metadata.ends_with("\np:1\na:1\n"));
+    assert!(!metadata.contains("unsupported"));
+}
+
+#[test]
 fn ason_command_canonicalizes_stdin_without_decoration() {
     let output = run(&["ason"], b"v:\"safe\"\n");
     assert!(output.status.success());
