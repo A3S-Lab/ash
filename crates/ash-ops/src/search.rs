@@ -18,6 +18,7 @@ use crate::projection::{
 const MAX_SEARCH_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SEARCH_MATCHES: usize = 1_000_000;
 const MAX_MATCHES_PER_FILE: usize = 100_000;
+const MAX_SEARCH_ENTRIES: usize = 1_000_000;
 
 pub async fn execute(
     workspace: &Workspace,
@@ -38,6 +39,7 @@ pub async fn execute(
     let options = WalkOptions {
         max_depth: 64,
         include_hidden: arguments.flags() & SEARCH_INCLUDE_HIDDEN != 0,
+        max_entries: MAX_SEARCH_ENTRIES,
     };
     let batches = program
         .compute_pool()

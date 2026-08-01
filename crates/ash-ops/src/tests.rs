@@ -7,7 +7,8 @@ use ash_platform::Workspace;
 use ash_protocol::request::{
     Arguments, Budget, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource, LIST_FILES_ONLY, ListArgs,
     PatchArgs, PatchContent, PatchEdit, REF_CASE_INSENSITIVE, ReadArgs, ReadMode, RefArgs, RefMode,
-    Request, SEARCH_CASE_INSENSITIVE, SearchArgs,
+    Request, SEARCH_CASE_INSENSITIVE, SNAPSHOT_INCLUDE_HIDDEN, SearchArgs, SnapshotArgs,
+    SnapshotMode,
 };
 
 use super::PortableOperations;
@@ -518,4 +519,73 @@ async fn patch_commits_multi_file_byte_edits_and_rejects_stale_preimages() {
     );
     assert_eq!(fs::read(&first_path).expect("read"), b"external\n");
     assert_eq!(fs::read(&second_path).expect("read"), second_now);
+}
+
+#[tokio::test]
+async fn snapshot_reference_drives_a_compact_workspace_delta() {
+    let directory = TestDirectory::new();
+    fs::write(directory.0.join("modified.txt"), b"before").expect("write");
+    fs::write(directory.0.join("removed.txt"), b"removed").expect("write");
+    let (session, operations) = runtime(&directory);
+    let capture = Request::new(
+        80,
+        Arguments::Snapshot(
+            SnapshotArgs::new(
+                vec![".".to_owned()],
+                64,
+                SnapshotMode::Capture,
+                None,
+                SNAPSHOT_INCLUDE_HIDDEN,
+            )
+            .expect("snapshot"),
+        ),
+        budget(4096, 32),
+    )
+    .expect("request");
+    let program = session.begin(&capture).await.expect("program");
+    let response = operations
+        .execute(&capture, &program)
+        .await
+        .expect("capture");
+    let baseline = response.reference().expect("snapshot reference");
+    assert_ne!(response.flags() & 0b1000, 0);
+    drop(program);
+
+    fs::write(directory.0.join("modified.txt"), b"after").expect("modify");
+    fs::remove_file(directory.0.join("removed.txt")).expect("remove");
+    fs::write(directory.0.join("added.txt"), b"added").expect("add");
+    let delta = Request::new(
+        81,
+        Arguments::Snapshot(
+            SnapshotArgs::new(
+                vec![".".to_owned()],
+                64,
+                SnapshotMode::Delta,
+                Some(baseline),
+                SNAPSHOT_INCLUDE_HIDDEN,
+            )
+            .expect("delta"),
+        ),
+        budget(4096, 32),
+    )
+    .expect("request");
+    let program = session.begin(&delta).await.expect("program");
+    let response = operations.execute(&delta, &program).await.expect("delta");
+    assert!(response.reference().is_some());
+    let encoded = response.encode().expect("encode").encode();
+    assert!(encoded.starts_with("t:3\ni:81\ns:0\n"), "{encoded}");
+    assert!(encoded.contains("d[3]{p,c,k,z,h}:"), "{encoded}");
+    let document = ash_protocol::ason::decode(&encoded).expect("ASON");
+    let ash_protocol::ason::Value::Table(changes) = document.get("d").expect("changes") else {
+        panic!("snapshot result table")
+    };
+    let states: Vec<_> = changes
+        .rows()
+        .iter()
+        .map(|row| match &row[1] {
+            ash_protocol::ason::Cell::Atom(ash_protocol::ason::Atom::Text(state)) => state.as_str(),
+            _ => panic!("state"),
+        })
+        .collect();
+    assert_eq!(states, ["1", "2", "3"]);
 }

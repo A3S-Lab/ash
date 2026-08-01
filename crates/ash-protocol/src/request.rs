@@ -14,6 +14,7 @@ const READ_COLUMNS: &[&str] = &["p", "m", "o", "n"];
 const LIST_COLUMNS: &[&str] = &["p", "d", "f"];
 const SEARCH_COLUMNS: &[&str] = &["q", "p", "f"];
 const PATCH_COLUMNS: &[&str] = &["p", "h", "i", "o", "n", "v", "f"];
+const SNAPSHOT_COLUMNS: &[&str] = &["p", "d", "m", "r", "f"];
 const REF_COLUMNS: &[&str] = &["r", "m", "o", "n", "q", "f"];
 const CANCEL_COLUMNS: &[&str] = &["i"];
 
@@ -31,12 +32,14 @@ pub const SEARCH_CASE_INSENSITIVE: u32 = 1 << 1;
 pub const SEARCH_INCLUDE_HIDDEN: u32 = 1 << 2;
 pub const REF_REGEX: u32 = 1 << 0;
 pub const REF_CASE_INSENSITIVE: u32 = 1 << 1;
+pub const SNAPSHOT_INCLUDE_HIDDEN: u32 = 1 << 0;
 
 const EXEC_FLAGS: u32 = EXEC_CLEAR_ENVIRONMENT;
 const LIST_FLAGS: u32 = LIST_INCLUDE_HIDDEN | LIST_FILES_ONLY | LIST_DIRECTORIES_ONLY;
 const SEARCH_FLAGS: u32 = SEARCH_REGEX | SEARCH_CASE_INSENSITIVE | SEARCH_INCLUDE_HIDDEN;
 const REF_SEARCH_FLAGS: u32 = REF_REGEX | REF_CASE_INSENSITIVE;
 const PATCH_FLAGS: u32 = 0;
+const SNAPSHOT_FLAGS: u32 = SNAPSHOT_INCLUDE_HIDDEN;
 const MAX_REF_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_REF_LINES: u64 = 1_000_000;
 const MAX_PATCH_INLINE_BYTES: usize = 8 * 1024 * 1024;
@@ -194,6 +197,7 @@ pub enum Arguments {
     List(ListArgs),
     Search(SearchArgs),
     Patch(PatchArgs),
+    Snapshot(SnapshotArgs),
     Ref(RefArgs),
     Cancel(CancelArgs),
 }
@@ -207,6 +211,7 @@ impl Arguments {
             Self::List(_) => Operation::List,
             Self::Search(_) => Operation::Search,
             Self::Patch(_) => Operation::Patch,
+            Self::Snapshot(_) => Operation::Snapshot,
             Self::Ref(_) => Operation::Ref,
             Self::Cancel(_) => Operation::Cancel,
         }
@@ -219,6 +224,7 @@ impl Arguments {
             Operation::List => ListArgs::decode(record).map(Self::List),
             Operation::Search => SearchArgs::decode(record).map(Self::Search),
             Operation::Patch => PatchArgs::decode(record).map(Self::Patch),
+            Operation::Snapshot => SnapshotArgs::decode(record).map(Self::Snapshot),
             Operation::Ref => RefArgs::decode(record).map(Self::Ref),
             Operation::Cancel => CancelArgs::decode(record).map(Self::Cancel),
             _ => Err(RequestError::UnsupportedOperation),
@@ -232,6 +238,7 @@ impl Arguments {
             Self::List(arguments) => arguments.encode(),
             Self::Search(arguments) => arguments.encode(),
             Self::Patch(arguments) => arguments.encode(),
+            Self::Snapshot(arguments) => arguments.encode(),
             Self::Ref(arguments) => arguments.encode(),
             Self::Cancel(arguments) => arguments.encode(),
         }
@@ -244,6 +251,7 @@ impl Arguments {
             Self::List(arguments) => arguments.validate(),
             Self::Search(arguments) => arguments.validate(),
             Self::Patch(arguments) => arguments.validate(),
+            Self::Snapshot(arguments) => arguments.validate(),
             Self::Ref(arguments) => arguments.validate(),
             Self::Cancel(arguments) => arguments.validate(),
         }
@@ -863,6 +871,122 @@ impl PatchArgs {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotMode {
+    Capture,
+    Delta,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnapshotArgs {
+    paths: Vec<String>,
+    depth: u16,
+    mode: SnapshotMode,
+    baseline: Option<u64>,
+    flags: u32,
+}
+
+impl SnapshotArgs {
+    pub fn new(
+        paths: Vec<String>,
+        depth: u16,
+        mode: SnapshotMode,
+        baseline: Option<u64>,
+        flags: u32,
+    ) -> Result<Self, RequestError> {
+        let arguments = Self {
+            paths,
+            depth,
+            mode,
+            baseline,
+            flags,
+        };
+        arguments.validate()?;
+        Ok(arguments)
+    }
+
+    fn decode(record: &Record) -> Result<Self, RequestError> {
+        expect_columns(record, SNAPSHOT_COLUMNS)?;
+        let values = record.values();
+        let mode = match unsigned_cell(&values[2], "m")? {
+            0 => SnapshotMode::Capture,
+            1 => SnapshotMode::Delta,
+            _ => return Err(RequestError::UnexpectedValue("m")),
+        };
+        Self::new(
+            text_vector(&values[0], "p")?,
+            narrow_u16(unsigned_cell(&values[1], "d")?, "d")?,
+            mode,
+            optional_reference_cell(&values[3], "r")?,
+            narrow_u32(unsigned_cell(&values[4], "f")?, "f")?,
+        )
+    }
+
+    fn encode(&self) -> Result<Value, BuildError> {
+        Ok(Value::Record(Record::new(
+            keys(SNAPSHOT_COLUMNS)?,
+            vec![
+                text_vector_value(&self.paths),
+                unsigned_value(u64::from(self.depth)),
+                unsigned_value(match self.mode {
+                    SnapshotMode::Capture => 0,
+                    SnapshotMode::Delta => 1,
+                }),
+                self.baseline.map_or_else(null_value, |reference| {
+                    Cell::Atom(Atom::reference(reference))
+                }),
+                unsigned_value(u64::from(self.flags)),
+            ],
+        )?))
+    }
+
+    fn validate(&self) -> Result<(), RequestError> {
+        validate_paths(&self.paths)?;
+        if !self
+            .paths
+            .windows(2)
+            .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+        {
+            return Err(RequestError::UnexpectedValue("p"));
+        }
+        if self.depth > 64 {
+            return Err(RequestError::InvalidLimit("d"));
+        }
+        match (self.mode, self.baseline) {
+            (SnapshotMode::Capture, None) | (SnapshotMode::Delta, Some(1..)) => {}
+            (SnapshotMode::Capture, Some(_)) | (SnapshotMode::Delta, None | Some(0)) => {
+                return Err(RequestError::UnexpectedValue("r"));
+            }
+        }
+        validate_flags(self.flags, SNAPSHOT_FLAGS)
+    }
+
+    #[must_use]
+    pub fn paths(&self) -> &[String] {
+        &self.paths
+    }
+
+    #[must_use]
+    pub const fn depth(&self) -> u16 {
+        self.depth
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> SnapshotMode {
+        self.mode
+    }
+
+    #[must_use]
+    pub const fn baseline(&self) -> Option<u64> {
+        self.baseline
+    }
+
+    #[must_use]
+    pub const fn flags(&self) -> u32 {
+        self.flags
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RefMode {
     Bytes,
     Lines,
@@ -1126,6 +1250,14 @@ fn unsigned_cell(cell: &Cell, field: &'static str) -> Result<u64, RequestError> 
 fn reference_cell(cell: &Cell, field: &'static str) -> Result<u64, RequestError> {
     match cell {
         Cell::Atom(Atom::Reference(reference)) if *reference != 0 => Ok(*reference),
+        Cell::Atom(_) | Cell::Vector(_) => Err(RequestError::InvalidUnsigned(field)),
+    }
+}
+
+fn optional_reference_cell(cell: &Cell, field: &'static str) -> Result<Option<u64>, RequestError> {
+    match cell {
+        Cell::Atom(Atom::Null) => Ok(None),
+        Cell::Atom(Atom::Reference(reference)) if *reference != 0 => Ok(Some(*reference)),
         Cell::Atom(_) | Cell::Vector(_) => Err(RequestError::InvalidUnsigned(field)),
     }
 }

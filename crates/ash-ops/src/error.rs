@@ -39,6 +39,8 @@ pub enum OperationError {
     Cancelled,
     #[error("operation arguments are inconsistent with the observed input")]
     InvalidArgument,
+    #[error("retained snapshot is malformed or has a different capture scope")]
+    InvalidSnapshot,
     #[error("operation input exceeds its bounded work ceiling")]
     WorkLimit,
     #[error("operation requires UTF-8 retained content")]
@@ -91,6 +93,7 @@ impl OperationError {
                 ErrorStage::Execute,
             ),
             Self::InvalidArgument
+            | Self::InvalidSnapshot
             | Self::Platform(PlatformError::InvalidLogicalPath)
             | Self::Regex(_) => (
                 Status::InvalidRequest,
@@ -122,7 +125,10 @@ impl OperationError {
                 RetryClass::CorrectRequest,
                 ErrorStage::Resolve,
             ),
-            Self::Platform(PlatformError::InputTooLarge { .. }) | Self::WorkLimit => (
+            Self::Platform(
+                PlatformError::InputTooLarge { .. } | PlatformError::EntryLimit { .. },
+            )
+            | Self::WorkLimit => (
                 Status::BudgetExceeded,
                 ErrorCode::StorageBudget,
                 RetryClass::CorrectRequest,

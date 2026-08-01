@@ -34,6 +34,7 @@ pub async fn execute(
     let options = WalkOptions {
         max_depth: arguments.depth(),
         include_hidden: arguments.flags() & LIST_INCLUDE_HIDDEN != 0,
+        max_entries: MAX_LIST_ENTRIES,
     };
     let batches = program
         .compute_pool()

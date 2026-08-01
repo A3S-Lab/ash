@@ -2,7 +2,8 @@ use super::{
     Arguments, Budget, CancelArgs, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource,
     LIST_INCLUDE_HIDDEN, ListArgs, PATCH_COLUMNS, PatchArgs, PatchContent, PatchEdit, READ_COLUMNS,
     REF_CASE_INSENSITIVE, REF_REGEX, ReadArgs, ReadMode, RefArgs, RefMode, Request, RequestError,
-    SEARCH_CASE_INSENSITIVE, SEARCH_REGEX, SearchArgs,
+    SEARCH_CASE_INSENSITIVE, SEARCH_REGEX, SNAPSHOT_INCLUDE_HIDDEN, SearchArgs, SnapshotArgs,
+    SnapshotMode,
 };
 use crate::Operation;
 use crate::ason::{Atom, Cell, Document, Field, Key, Record, Value, decode};
@@ -14,6 +15,7 @@ const LIST_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/list-req
 const CANCEL_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/cancel-request.ason");
 const REF_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/ref-request.ason");
 const PATCH_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/patch-request.ason");
+const SNAPSHOT_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/snapshot-request.ason");
 
 fn budget() -> Budget {
     Budget::new(256, 64, 30_000).expect("budget")
@@ -40,6 +42,7 @@ fn all_m1_request_fixtures_are_canonical_typed_messages() {
         (LIST_REQUEST, Operation::List),
         (SEARCH_REQUEST, Operation::Search),
         (PATCH_REQUEST, Operation::Patch),
+        (SNAPSHOT_REQUEST, Operation::Snapshot),
         (REF_REQUEST, Operation::Ref),
         (CANCEL_REQUEST, Operation::Cancel),
     ];
@@ -119,6 +122,21 @@ fn every_m1_argument_schema_round_trips() {
         .expect("request"),
         Request::new(
             6,
+            Arguments::Snapshot(
+                SnapshotArgs::new(
+                    vec![".".to_owned()],
+                    64,
+                    SnapshotMode::Delta,
+                    Some(12),
+                    SNAPSHOT_INCLUDE_HIDDEN,
+                )
+                .expect("snapshot"),
+            ),
+            budget(),
+        )
+        .expect("request"),
+        Request::new(
+            7,
             Arguments::Ref(
                 RefArgs::new(
                     9,
@@ -134,7 +152,7 @@ fn every_m1_argument_schema_round_trips() {
         )
         .expect("request"),
         Request::new(
-            7,
+            8,
             Arguments::Cancel(CancelArgs::new(4).expect("cancel")),
             budget(),
         )
@@ -239,6 +257,10 @@ fn line_reads_are_one_based_and_environment_deltas_are_unique() {
     assert_eq!(
         RefArgs::new(1, RefMode::Release, 0, 1, None, 0),
         Err(RequestError::UnexpectedValue("m"))
+    );
+    assert_eq!(
+        SnapshotArgs::new(vec![".".to_owned()], 64, SnapshotMode::Delta, None, 0),
+        Err(RequestError::UnexpectedValue("r"))
     );
     assert_eq!(
         Request::new(

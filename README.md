@@ -5,7 +5,7 @@
 <p align="center"><strong>AI Native Shell</strong> · typed parallel execution · compact model context</p>
 
 > [!IMPORTANT]
-> `ash` is pre-release. Source builds now execute typed `exec`, `read`, `list`, `search`, and compare-and-swap `patch` requests, inspect retained results, and cancel active work through one-shot or persistent RPC paths; no supported binary release or installer is published yet.
+> `ash` is pre-release. Source builds now execute typed `exec`, `read`, `list`, `search`, compare-and-swap `patch`, and workspace `snapshot/delta` requests, inspect retained results, and cancel active work through one-shot or persistent RPC paths; no supported binary release or installer is published yet.
 
 `ash` is a greenfield shell designed around coding agents rather than terminal users. It turns shell work into typed programs, executes independent work across bounded I/O and CPU planes, and returns only the evidence worth placing in an LLM context.
 
@@ -76,7 +76,7 @@ Run one canonical request from the repository root:
 cargo run -p a3s-ash -- run < spec/fixtures/ason/search-request.ason
 ```
 
-The pinned Rust workspace currently verifies typed M1 schemas, canonical framed handshakes, concurrent `exec/read/list/search/patch`, retained-result slicing/search/release, preemptive cancellation, atomic budgets, hierarchical permits, workspace-confined paths, direct argv launch with timeout-safe process-tree cleanup, deterministic multi-core preparation, and multi-file rollback. `ash rpc` executes independent requests concurrently while emitting final frames in stable input order. This is a development checkpoint, not an installation path.
+The pinned Rust workspace currently verifies typed M1 schemas, canonical framed handshakes, concurrent `exec/read/list/search/patch/snapshot`, retained-result slicing/search/release, chained workspace deltas, preemptive cancellation, atomic budgets, hierarchical permits, workspace-confined paths, direct argv launch with timeout-safe process-tree cleanup, deterministic multi-core preparation, and multi-file rollback. `ash rpc` executes independent requests concurrently while emitting final frames in stable input order. This is a development checkpoint, not an installation path.
 
 ## Release contract
 
@@ -106,7 +106,7 @@ It is a local execution boundary for coding agents. Workspace capabilities, reso
 1. Freeze ASH/1 fixtures and the cross-platform benchmark corpus.
 2. Ship the smallest vertical slice: dual-plane session runtime, `exec`, `read`, `list`, `search`, compare-and-swap `patch`, reducer, and result store.
 3. Release and test all six platform artifacts plus both one-click installers.
-4. Add durable filesystem journals, graph execution, workspace deltas, and approval permits.
+4. Add durable filesystem journals, graph execution, and approval permits.
 5. Gate releases on correctness, token cost, latency, cancellation, installer, and upgrade evidence.
 
 No benchmark number is claimed before a reproducible corpus has been run. The acceptance criteria and accounting rules are defined in [docs/benchmarks.md](./docs/benchmarks.md).

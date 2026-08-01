@@ -20,6 +20,7 @@ const READ_COLUMNS: &[&str] = &["p", "o", "n", "h", "t", "r"];
 const LIST_COLUMNS: &[&str] = &["p", "k", "z", "m"];
 const SEARCH_COLUMNS: &[&str] = &["p", "l", "c", "t"];
 const PATCH_COLUMNS: &[&str] = &["p", "s", "h"];
+const SNAPSHOT_COLUMNS: &[&str] = &["p", "c", "k", "z", "h"];
 const REF_SLICE_COLUMNS: &[&str] = &["o", "n", "p", "h", "t", "b"];
 const REF_SEARCH_COLUMNS: &[&str] = &["o", "l", "c", "t"];
 const REF_RELEASE_COLUMNS: &[&str] = &["r", "z"];
@@ -219,6 +220,9 @@ impl FinalResponse {
                 ResultData::Reference(ReferenceResult::Released(_)) if reference.is_some() => {
                     return Err(ResponseError::InvalidData);
                 }
+                ResultData::Snapshot(_) if reference.is_none() => {
+                    return Err(ResponseError::InvalidData);
+                }
                 _ => {}
             }
         }
@@ -303,6 +307,7 @@ pub enum ResultData {
     List(Vec<ListEntry>),
     Search(Vec<SearchMatch>),
     Patch(Vec<PatchResult>),
+    Snapshot(Vec<SnapshotResult>),
     Reference(ReferenceResult),
     Cancel(CancelResult),
 }
@@ -315,6 +320,7 @@ impl ResultData {
             Self::List(entries) => encode_list(entries),
             Self::Search(matches) => encode_search(matches),
             Self::Patch(results) => encode_patch(results),
+            Self::Snapshot(results) => encode_snapshot(results),
             Self::Reference(result) => result.encode(),
             Self::Cancel(result) => result.encode(),
         }
@@ -329,6 +335,7 @@ impl ResultData {
             Self::List(_)
             | Self::Search(_)
             | Self::Patch(_)
+            | Self::Snapshot(_)
             | Self::Reference(_)
             | Self::Cancel(_) => false,
         }
@@ -390,6 +397,26 @@ impl ResultData {
                         PatchState::Skipped => result.digest.is_none(),
                     };
                     if result.path == 0 || !valid_optional_digest || !valid_state_digest {
+                        return Err(ResponseError::InvalidData);
+                    }
+                }
+            }
+            Self::Snapshot(results) => {
+                let mut paths = HashSet::new();
+                for result in results {
+                    let digest_valid = result.digest.as_deref().is_none_or(valid_digest);
+                    let identity_valid = match result.kind {
+                        FileKind::File => result.digest.is_some(),
+                        FileKind::Symlink => result.digest.is_some() && result.size == 0,
+                        FileKind::Directory | FileKind::Other => {
+                            result.digest.is_none() && result.size == 0
+                        }
+                    };
+                    if result.path == 0
+                        || !paths.insert(result.path)
+                        || !digest_valid
+                        || !identity_valid
+                    {
                         return Err(ResponseError::InvalidData);
                     }
                 }
@@ -639,6 +666,24 @@ pub struct PatchResult {
     pub digest: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SnapshotChange {
+    Present = 0,
+    Added = 1,
+    Modified = 2,
+    Removed = 3,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnapshotResult {
+    pub path: u64,
+    pub change: SnapshotChange,
+    pub kind: FileKind,
+    pub size: u64,
+    pub digest: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ResponseError {
     #[error("response request identifier must be non-zero")]
@@ -741,6 +786,22 @@ fn encode_patch(results: &[PatchResult]) -> Result<Value, BuildError> {
         })
         .collect();
     Ok(Value::Table(Table::new(keys(PATCH_COLUMNS)?, rows)?))
+}
+
+fn encode_snapshot(results: &[SnapshotResult]) -> Result<Value, BuildError> {
+    let rows = results
+        .iter()
+        .map(|result| {
+            vec![
+                unsigned_cell(result.path),
+                unsigned_cell(u64::from(result.change as u8)),
+                unsigned_cell(u64::from(result.kind as u8)),
+                unsigned_cell(result.size),
+                optional_text(result.digest.as_deref()),
+            ]
+        })
+        .collect();
+    Ok(Value::Table(Table::new(keys(SNAPSHOT_COLUMNS)?, rows)?))
 }
 
 fn encode_reference_search(matches: &[ReferenceMatch]) -> Result<Value, BuildError> {

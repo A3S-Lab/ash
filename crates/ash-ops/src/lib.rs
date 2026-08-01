@@ -10,6 +10,7 @@ mod projection;
 mod read;
 mod reference;
 mod search;
+mod snapshot;
 
 use ash_engine::Program;
 use ash_platform::Workspace;
@@ -42,6 +43,7 @@ impl PortableOperations {
             | Operation::Search.mask()
             | Operation::Patch.mask()
             | Operation::Ref.mask()
+            | Operation::Snapshot.mask()
     }
 
     pub async fn execute(
@@ -64,6 +66,9 @@ impl PortableOperations {
             }
             Arguments::Patch(arguments) => {
                 patch::execute(&self.workspace, request, arguments, program).await
+            }
+            Arguments::Snapshot(arguments) => {
+                snapshot::execute(&self.workspace, request, arguments, program).await
             }
             Arguments::Ref(arguments) => reference::execute(request, arguments, program).await,
             Arguments::Cancel(_) => Err(OperationError::Unsupported),

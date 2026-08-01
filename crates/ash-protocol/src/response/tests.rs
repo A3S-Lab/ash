@@ -2,8 +2,8 @@ use super::{
     CancelResult, CancellationState, ErrorCode, ErrorRecord, ErrorStage, FileKind, FinalResponse,
     ListEntry, PatchResult, PatchState, PathMapping, ProcessResult, RESULT_RETAINED,
     RESULT_TRUNCATED, ReadResult, ReferenceMatch, ReferenceResult, ReferenceSlice,
-    ReleasedReference, ResponseError, ResultData, RetryClass, SearchMatch, Status, StreamResult,
-    TerminationKind,
+    ReleasedReference, ResponseError, ResultData, RetryClass, SearchMatch, SnapshotChange,
+    SnapshotResult, Status, StreamResult, TerminationKind,
 };
 use crate::ason::decode;
 
@@ -73,6 +73,13 @@ fn every_m1_result_shape_encodes_as_canonical_ason() {
             state: PatchState::Committed,
             digest: Some("c".repeat(64)),
         }]),
+        ResultData::Snapshot(vec![SnapshotResult {
+            path: 1,
+            change: SnapshotChange::Present,
+            kind: FileKind::File,
+            size: 4,
+            digest: Some("e".repeat(64)),
+        }]),
         ResultData::Reference(ReferenceResult::Slice(ReferenceSlice {
             offset: 4,
             length: 2,
@@ -87,7 +94,7 @@ fn every_m1_result_shape_encodes_as_canonical_ason() {
         }),
     ];
     for (index, data) in results.into_iter().enumerate() {
-        let retained = matches!(&data, ResultData::Reference(_));
+        let retained = matches!(&data, ResultData::Reference(_) | ResultData::Snapshot(_));
         let response = FinalResponse::success(
             index as u64 + 1,
             vec![],
@@ -222,6 +229,24 @@ fn patch_status_and_per_file_states_must_agree() {
             Some(ResultData::Patch(vec![conflict])),
             0,
             None,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn snapshot_results_are_bound_to_a_retained_manifest() {
+    assert_eq!(
+        FinalResponse::success(50, vec![], ResultData::Snapshot(vec![]), 0, None,),
+        Err(ResponseError::InvalidData)
+    );
+    assert!(
+        FinalResponse::success(
+            51,
+            vec![],
+            ResultData::Snapshot(vec![]),
+            RESULT_RETAINED,
+            Some(3),
         )
         .is_ok()
     );

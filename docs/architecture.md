@@ -355,7 +355,11 @@ Single-file replacement uses a same-directory temporary file, permission preserv
 
 The current patch vertical slice accepts sorted, non-overlapping byte splices over multiple existing regular files. It prepares and hashes files in parallel, serializes the commit phase inside the workspace, retains in-memory preimages, and rolls committed files back in reverse order when a later compare-and-swap fails. The filesystem-mutation milestone extends this boundary with a durable journal so an interrupted process can recover after restart.
 
-### 9.3 Path safety
+### 9.3 Snapshots
+
+A snapshot is a canonical, versioned ASON manifest bound to sorted roots, maximum depth, and visibility flags. Regular files carry streaming BLAKE3 identities, symlinks carry a digest of the target representation without traversal, and structural entries carry normalized kinds. Manifests are immutable session references; a delta validates the same capture scope and performs a stable ordered merge to emit only added, modified, and removed paths. Hash work partitions by file on the compute plane while fixed scratch buffers keep memory proportional to worker count rather than repository size.
+
+### 9.4 Path safety
 
 Resolution checks lexical traversal, symlink or reparse-point traversal, workspace escape, and mutation target type. The backend must revalidate at the point of use to reduce time-of-check/time-of-use races.
 

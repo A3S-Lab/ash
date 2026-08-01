@@ -1,6 +1,6 @@
 # ASH/1 protocol and ASON
 
-Status: canonical ASON, framing, handshake, typed M1 schemas, concurrent exec/read/list/search/patch, retained-result inspection, and cancellation runtime paths are implemented
+Status: canonical ASON, framing, handshake, typed M1 schemas, concurrent exec/read/list/search/patch/snapshot, retained-result inspection, and cancellation runtime paths are implemented
 
 ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
 
@@ -169,7 +169,7 @@ d{ap,av,zp,zv,frm,out,ops,cap,os,arch,sid,n}:
 1,0,1,0,1048576,65536,0,0,linux,x86_64,1,nonce-7
 ```
 
-The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises `0x29f`, exactly the implemented `exec`, `read`, `list`, `search`, `patch`, `ref`, and `cancel` bits; later bits remain clear until their complete operation contracts land.
+The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises `0x39f`, exactly the implemented `exec`, `read`, `list`, `search`, `patch`, `ref`, `snapshot`, and `cancel` bits; later bits remain clear until their complete operation contracts land.
 
 The handshake is retained by the adapter and is not repeated in each model-visible result.
 
@@ -271,6 +271,7 @@ Operation argument records are positional only after their declared columns, so 
 | `l` | `a{p,d,f}:` | root path vector, maximum depth, flags |
 | `g` | `a{q,p,f}:` | query, root path vector, flags |
 | `p` | `a{p,h,i,o,n,v,f}:` | sorted paths, expected digests, edit file indexes, byte offsets, delete lengths, replacements, flags |
+| `s` | `a{p,d,m,r,f}:` | sorted roots, maximum depth, capture mode, optional baseline reference, flags |
 | `h` | `a{r,m,o,n,q,f}:` | source reference, mode, offset, range length, optional query, flags |
 | `k` | `a{i}:` | active target request identifier |
 
@@ -281,6 +282,8 @@ Read mode `0` is a zero-based byte range and mode `1` is a one-based line range.
 Patch paths are unique and sorted by UTF-8 bytes. The `h` vector contains one lowercase 64-digit BLAKE3 digest per path. The `i`, `o`, `n`, and `v` vectors are aligned edits: zero-based path index, zero-based byte offset in the original file, deleted byte length, and replacement. A replacement is inline text or an immutable `@reference`, so binary or previously retained content does not need to be repeated. Edits are sorted by file index and offset and cannot overlap. Every path has at least one edit, all paths must already be regular files, and the current flag value is `0`.
 
 Patch preparation reads, hashes, and constructs independent files on the compute plane under aggregate byte ceilings. No file is changed if preflight finds a stale digest. Commit is serialized per workspace and uses same-directory atomic replacement; a later conflict or filesystem failure rolls earlier files back in reverse order. The current source keeps preimages for the live transaction. A process crash can still require the durable recovery journal planned with the filesystem-mutation operation.
+
+Snapshot mode `0` captures current state and requires `r:~`; mode `1` emits a delta from the session-local snapshot `@reference`. The roots, depth, and flags must match the baseline scope exactly. Snapshot flag bit 0 includes hidden entries. Files are streamed through bounded BLAKE3 buffers on the compute plane, symlink targets are hashed without following them, and the canonical manifest is always retained as the response reference so deltas can be chained without resending the tree.
 
 Reference modes are `0` byte slice, `1` line slice, `2` bounded text search, and `3` release. Byte and search offsets are zero-based; line offsets are one-based. Reference-search flag bits are 0 regular expression and 1 case-insensitive. Slice projections return UTF-8 when valid and lowercase hexadecimal otherwise; the full selected range remains identified by its digest and source reference.
 
@@ -307,12 +310,15 @@ M1 result data uses these fixed schemas:
 | `l` | `d[N]{p,k,z,m}:` | path ID, file kind, byte size, optional modified Unix milliseconds |
 | `g` | `d[N]{p,l,c,t}:` | path ID, one-based line and column, matching line projection |
 | `p` | `d[N]{p,s,h}:` | path ID, mutation state, resulting or observed BLAKE3 digest when known |
+| `s` | `d[N]{p,c,k,z,h}:` | path ID, change kind, file kind, byte size, optional BLAKE3 digest |
 | `h` | `d{o,n,p,h,t,b}:`, `d[N]{o,l,c,t}:`, or `d{r,z}:` | slice, in-reference search, or release result selected by request mode |
 | `k` | `d{i,z}:` | target request identifier and cancellation state |
 
 Null (`~`) omits an unavailable projection, code, timestamp, or reference. Result flag bits are 0 truncated, 1 reduced, 2 normalized text, 3 retained evidence, 4 partial completion, and 5 redacted. Unknown bits are invalid. Any truncated result must retain inspectable evidence, and the retained flag must agree with the references actually present.
 
 Patch state values are `0` committed, `1` conflict, `2` rolled back, `3` recovery required, and `4` skipped. A clean stale-preimage result uses status `8` and error `501`. If an atomic outcome is indeterminate or rollback cannot restore a preimage, error `502` and result flag bit 4 make the partial state explicit; retry class `3` requires external inspection or approval rather than an automatic retry.
+
+Snapshot change values are `0` present in a full capture, `1` added, `2` modified, and `3` removed. File kinds reuse the list schema. Every snapshot response sets the retained flag and returns the new manifest reference, even when a delta is empty; truncation therefore never loses the full state transition.
 
 Success with `status-only` output does not repeat empty stdout or stderr fields. Failure reserves a diagnostic budget even if normal output has exhausted its allocation.
 

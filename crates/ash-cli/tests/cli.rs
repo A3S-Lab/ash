@@ -11,7 +11,7 @@ use ash_protocol::ason::decode;
 use ash_protocol::handshake::{HandshakePreferences, HandshakeRequest, HandshakeResponse};
 use ash_protocol::request::{
     Arguments, Budget, CancelArgs, ExecArgs, InputSource, PatchArgs, PatchContent, PatchEdit,
-    ReadArgs, ReadMode, RefArgs, RefMode, Request, SearchArgs,
+    ReadArgs, ReadMode, RefArgs, RefMode, Request, SearchArgs, SnapshotArgs, SnapshotMode,
 };
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -579,6 +579,88 @@ fn rpc_retrieves_and_releases_retained_evidence_across_frames() {
     let release_response = std::str::from_utf8(&release_response).expect("release response");
     assert!(release_response.starts_with("t:3\ni:73\ns:0\n"));
     assert!(release_response.contains(&format!("d{{r,z}}:\n@{reference},1\n")));
+
+    drop(stdin);
+    assert!(child.wait().expect("wait").success());
+    let mut diagnostics = Vec::new();
+    stderr.read_to_end(&mut diagnostics).expect("stderr");
+    assert!(diagnostics.is_empty(), "stderr={diagnostics:?}");
+}
+
+#[test]
+fn rpc_chains_a_snapshot_reference_into_a_workspace_delta() {
+    let directory = TestDirectory::new();
+    fs::write(directory.0.join("tracked.txt"), b"before").expect("write");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ash"))
+        .arg("rpc")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ash");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+    let mut stderr = child.stderr.take().expect("stderr");
+
+    let handshake = HandshakeRequest::new(
+        90,
+        directory.0.to_string_lossy(),
+        "integration-90",
+        HandshakePreferences {
+            operation_mask: u64::MAX,
+            ..HandshakePreferences::default()
+        },
+    )
+    .expect("handshake")
+    .encode()
+    .expect("encode")
+    .encode();
+    exchange_frame(&mut stdin, &mut stdout, &handshake);
+    let capture = Request::new(
+        91,
+        Arguments::Snapshot(
+            SnapshotArgs::new(vec![".".to_owned()], 64, SnapshotMode::Capture, None, 0)
+                .expect("snapshot"),
+        ),
+        Budget::new(2048, 16, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode")
+    .encode();
+    let captured = exchange_frame(&mut stdin, &mut stdout, &capture);
+    let captured = std::str::from_utf8(&captured).expect("capture response");
+    let baseline = captured
+        .lines()
+        .find_map(|line| line.strip_prefix("r:@"))
+        .expect("snapshot reference")
+        .parse::<u64>()
+        .expect("reference number");
+
+    fs::write(directory.0.join("tracked.txt"), b"after").expect("modify");
+    let delta = Request::new(
+        92,
+        Arguments::Snapshot(
+            SnapshotArgs::new(
+                vec![".".to_owned()],
+                64,
+                SnapshotMode::Delta,
+                Some(baseline),
+                0,
+            )
+            .expect("delta"),
+        ),
+        Budget::new(2048, 16, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode")
+    .encode();
+    let changed = exchange_frame(&mut stdin, &mut stdout, &delta);
+    let changed = std::str::from_utf8(&changed).expect("delta response");
+    assert!(changed.starts_with("t:3\ni:92\ns:0\n"), "{changed}");
+    assert!(changed.contains("d[1]{p,c,k,z,h}:"), "{changed}");
+    assert!(changed.contains(",2,0,5,"), "{changed}");
 
     drop(stdin);
     assert!(child.wait().expect("wait").success());

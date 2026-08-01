@@ -2,10 +2,12 @@
 
 //! Native operating-system adapters for ash.
 
+mod identity;
 mod mutation;
 mod process;
 mod workspace;
 
+pub use identity::FileIdentity;
 pub use mutation::{MutationGuard, ReplaceOutcome};
 pub use process::{EnvironmentChange, ProcessExit, ProcessHandle, ProcessSpec};
 pub use workspace::{EntryKind, NativeEntry, ResolvedPath, WalkOptions, Workspace};
@@ -32,6 +34,8 @@ pub enum PlatformError {
     MutationLockPoisoned,
     #[error("input contains {size} bytes, exceeding the operation ceiling of {max}")]
     InputTooLarge { size: u64, max: u64 },
+    #[error("workspace walk exceeds the entry ceiling of {max}")]
+    EntryLimit { max: usize },
     #[error("filesystem or process I/O failed: {0}")]
     Io(#[from] io::Error),
 }

@@ -30,6 +30,7 @@ impl ResolvedPath {
 pub struct WalkOptions {
     pub max_depth: u16,
     pub include_hidden: bool,
+    pub max_entries: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,6 +114,9 @@ impl Workspace {
         root: &ResolvedPath,
         options: WalkOptions,
     ) -> Result<Vec<NativeEntry>, PlatformError> {
+        if options.max_entries == 0 {
+            return Err(PlatformError::EntryLimit { max: 0 });
+        }
         let native = self.revalidate(root)?;
         let mut entries = Vec::new();
         self.walk_inner(&native, 0, options, &mut entries)?;
@@ -132,6 +136,11 @@ impl Workspace {
         let hidden = depth > 0 && is_hidden(native, &metadata);
         if hidden && !options.include_hidden {
             return Ok(());
+        }
+        if output.len() >= options.max_entries {
+            return Err(PlatformError::EntryLimit {
+                max: options.max_entries,
+            });
         }
         let kind = classify(&metadata);
         output.push(NativeEntry {
@@ -178,13 +187,13 @@ impl Workspace {
         Ok(components?.join("/"))
     }
 
-    fn revalidate(&self, path: &ResolvedPath) -> Result<PathBuf, PlatformError> {
+    pub(crate) fn revalidate(&self, path: &ResolvedPath) -> Result<PathBuf, PlatformError> {
         let native = fs::canonicalize(&path.native)?;
         self.ensure_contained(&native)?;
         Ok(native)
     }
 
-    fn ensure_contained(&self, native: &Path) -> Result<(), PlatformError> {
+    pub(crate) fn ensure_contained(&self, native: &Path) -> Result<(), PlatformError> {
         if native.starts_with(&self.root) {
             Ok(())
         } else {
@@ -294,12 +303,24 @@ mod tests {
                 WalkOptions {
                     max_depth: 2,
                     include_hidden: false,
+                    max_entries: 100,
                 },
             )
             .expect("walk");
         let paths: Vec<_> = entries.iter().map(|entry| entry.logical.as_str()).collect();
         assert_eq!(paths, [".", "src", "src/a.rs", "src/b.rs"]);
         assert_eq!(entries[0].kind, EntryKind::Directory);
+        assert!(matches!(
+            workspace.walk(
+                &root,
+                WalkOptions {
+                    max_depth: 2,
+                    include_hidden: false,
+                    max_entries: 1,
+                }
+            ),
+            Err(crate::PlatformError::EntryLimit { max: 1 })
+        ));
     }
 
     #[test]
