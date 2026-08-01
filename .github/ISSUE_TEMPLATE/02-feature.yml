@@ -1,0 +1,68 @@
+name: Feature request
+description: Propose an agent workflow or bounded capability for ash.
+title: "[Feature]: "
+labels: []
+assignees: []
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Process execution
+        - Filesystem operation
+        - Search or reading
+        - Output reduction or references
+        - Cross-platform behavior
+        - Installation or updates
+        - Benchmarking
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Agent problem
+      description: Describe the Coding Agent task that is inefficient, unreliable, or impossible.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe semantics, inputs, outputs, limits, and failure behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: token-impact
+    attributes:
+      label: Token and round-trip impact
+      description: Explain why this reduces total successful-task cost. Do not invent benchmark numbers.
+    validations:
+      required: true
+  - type: textarea
+    id: platform-impact
+    attributes:
+      label: Linux, macOS, and Windows semantics
+      description: Explain how the behavior remains portable or identify the explicit capability boundary.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and non-goals
+      description: Include direct external-tool execution when it is a viable alternative.
+    validations:
+      required: true
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: This proposal keeps Coding Agents as the primary caller.
+          required: true
+        - label: I agree to follow the [Code of Conduct](https://github.com/A3S-Lab/ash/blob/main/CODE_OF_CONDUCT.md).
+          required: true

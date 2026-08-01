@@ -1,0 +1,74 @@
+name: Architecture proposal
+description: Propose a change to ASH/1, ASON, runtime boundaries, or release trust.
+title: "[Architecture]: "
+labels: []
+assignees: []
+body:
+  - type: dropdown
+    id: contract
+    attributes:
+      label: Contract area
+      options:
+        - ASH/1 semantic model
+        - ASON syntax or canonicalization
+        - Execution engine or scheduler
+        - Platform backend
+        - Capability or security boundary
+        - Result store or reducers
+        - Distribution or update trust
+        - Benchmark contract
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and problem
+      description: Identify the current invariant or decision that is insufficient.
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: Proposed decision
+      description: State ownership, invariants, limits, and failure behavior precisely.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and migration
+      description: Cover protocol level, ASON version, fixtures, existing sessions, and rollback.
+    validations:
+      required: true
+  - type: textarea
+    id: ason
+    attributes:
+      label: ASON example
+      description: Include a canonical example when the proposal changes Agent-visible data.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence plan
+      description: Describe correctness, token, latency, safety, and three-platform validation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Submission checks
+      options:
+        - label: I read the current architecture and protocol documents.
+          required: true
+        - label: I have not presented proposed behavior as implemented.
+          required: true
+        - label: I agree to follow the [Code of Conduct](https://github.com/A3S-Lab/ash/blob/main/CODE_OF_CONDUCT.md).
+          required: true

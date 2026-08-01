@@ -87,3 +87,13 @@ It is a local execution boundary for coding agents. Workspace capabilities, reso
 5. Gate releases on correctness, token cost, latency, cancellation, installer, and upgrade evidence.
 
 No benchmark number is claimed before a reproducible corpus has been run. The acceptance criteria and accounting rules are defined in [docs/benchmarks.md](./docs/benchmarks.md).
+
+## Contributing and support
+
+Read [CONTRIBUTING.md](./CONTRIBUTING.md) before proposing behavior or protocol changes. Focused design questions, feature requests, architecture proposals, and reproducible bugs each have a structured issue form. General expectations are documented in [SUPPORT.md](./SUPPORT.md) and the [Code of Conduct](./CODE_OF_CONDUCT.md).
+
+Do not report suspected vulnerabilities in a public issue. Follow the private reporting instructions in [SECURITY.md](./SECURITY.md).
+
+## License
+
+`ash` is available under the [MIT License](./LICENSE).

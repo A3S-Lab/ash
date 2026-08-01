@@ -1,0 +1,82 @@
+name: Bug report
+description: Report reproducible behavior that violates an ash contract.
+title: "[Bug]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. ash has no executable release yet, so
+        reports must identify the repository content or published artifact being tested.
+  - type: input
+    id: revision
+    attributes:
+      label: Revision or version
+      description: Commit SHA, tag, or artifact version where the problem occurs.
+      placeholder: 86d7ab0 or v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Platform-independent
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: architecture
+    attributes:
+      label: Architecture
+      placeholder: x86_64, aarch64, or not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest deterministic sequence that triggers the problem.
+      placeholder: |
+        1. Start from...
+        2. Submit...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected contract
+      description: Link to the relevant design or protocol section when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Explain the difference without including secrets or private data.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: ASON or diagnostic evidence
+      description: Paste the smallest redacted result, error, or log fragment.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: I removed credentials, private data, and sensitive paths.
+          required: true
+        - label: I agree to follow the [Code of Conduct](https://github.com/A3S-Lab/ash/blob/main/CODE_OF_CONDUCT.md).
+          required: true

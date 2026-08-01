@@ -1,0 +1,38 @@
+name: Design question
+description: Ask a focused question about the documented ash design.
+title: "[Question]: "
+labels: []
+assignees: []
+body:
+  - type: input
+    id: document
+    attributes:
+      label: Relevant document or section
+      placeholder: docs/protocol.md — Result references
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: Explain what remains unclear after reading the current documentation.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Agent workflow context
+      description: Describe the task or integration that motivated the question.
+    validations:
+      required: true
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: This is not a security report or a support request for an unpublished binary.
+          required: true
+        - label: I agree to follow the [Code of Conduct](https://github.com/A3S-Lab/ash/blob/main/CODE_OF_CONDUCT.md).
+          required: true
