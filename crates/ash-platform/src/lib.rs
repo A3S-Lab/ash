@@ -2,9 +2,11 @@
 
 //! Native operating-system adapters for ash.
 
+mod mutation;
 mod process;
 mod workspace;
 
+pub use mutation::ReplaceOutcome;
 pub use process::{EnvironmentChange, ProcessExit, ProcessHandle, ProcessSpec};
 pub use workspace::{EntryKind, NativeEntry, ResolvedPath, WalkOptions, Workspace};
 
@@ -24,6 +26,8 @@ pub enum PlatformError {
     NonUtf8Path,
     #[error("process environment contains an invalid name or NUL value")]
     InvalidEnvironment,
+    #[error("mutation target must be a regular file without symlink or reparse traversal")]
+    InvalidMutationTarget,
     #[error("input contains {size} bytes, exceeding the operation ceiling of {max}")]
     InputTooLarge { size: u64, max: u64 },
     #[error("filesystem or process I/O failed: {0}")]

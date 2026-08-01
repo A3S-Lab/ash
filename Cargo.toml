@@ -24,6 +24,7 @@ ash-ops = { package = "a3s-ash-ops", path = "crates/ash-ops" }
 ash-platform = { package = "a3s-ash-platform", path = "crates/ash-platform" }
 ash-protocol = { package = "a3s-ash-protocol", path = "crates/ash-protocol" }
 ash-store = { package = "a3s-ash-store", path = "crates/ash-store" }
+atomicwrites = "0.4.4"
 blake3 = "1.8.5"
 process-wrap = { version = "9.1.0", default-features = false, features = ["job-object", "kill-on-drop", "process-group", "tokio1"] }
 rayon = "1.12.0"

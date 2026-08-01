@@ -10,6 +10,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+atomicwrites.workspace = true
+blake3.workspace = true
 process-wrap.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

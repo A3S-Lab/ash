@@ -13,7 +13,7 @@ pub struct Workspace {
 /// Existing path that was resolved and checked against a workspace root.
 #[derive(Clone, Debug)]
 pub struct ResolvedPath {
-    logical: String,
+    pub(crate) logical: String,
     pub(crate) native: PathBuf,
 }
 
@@ -188,7 +188,7 @@ impl Workspace {
     }
 }
 
-fn validate_logical(logical: &str) -> Result<(), PlatformError> {
+pub(crate) fn validate_logical(logical: &str) -> Result<(), PlatformError> {
     if logical.is_empty()
         || logical.len() > 4096
         || logical.contains(['\0', '\\', ':'])
