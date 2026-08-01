@@ -19,6 +19,9 @@ const EXEC_COLUMNS: &[&str] = &["k", "c", "ms", "o", "e", "ro", "re"];
 const READ_COLUMNS: &[&str] = &["p", "o", "n", "h", "t", "r"];
 const LIST_COLUMNS: &[&str] = &["p", "k", "z", "m"];
 const SEARCH_COLUMNS: &[&str] = &["p", "l", "c", "t"];
+const REF_SLICE_COLUMNS: &[&str] = &["o", "n", "p", "h", "t", "b"];
+const REF_SEARCH_COLUMNS: &[&str] = &["o", "l", "c", "t"];
+const REF_RELEASE_COLUMNS: &[&str] = &["r", "z"];
 const CANCEL_COLUMNS: &[&str] = &["i", "z"];
 const ERROR_COLUMNS: &[&str] = &["c", "q", "p", "x", "a"];
 
@@ -88,6 +91,7 @@ pub enum ErrorCode {
     StorageBudget = 601,
     ConcurrencyBudget = 602,
     UnknownReference = 700,
+    ReferenceBusy = 701,
     Internal = 900,
 }
 
@@ -187,6 +191,17 @@ impl FinalResponse {
         validate_paths(&paths)?;
         if let Some(data) = &data {
             data.validate()?;
+            match data {
+                ResultData::Reference(ReferenceResult::Slice(_) | ReferenceResult::Search(_))
+                    if reference.is_none() =>
+                {
+                    return Err(ResponseError::InvalidData);
+                }
+                ResultData::Reference(ReferenceResult::Released(_)) if reference.is_some() => {
+                    return Err(ResponseError::InvalidData);
+                }
+                _ => {}
+            }
         }
         validate_reference(reference)?;
         if let Some(error) = &error {
@@ -268,6 +283,7 @@ pub enum ResultData {
     Read(Vec<ReadResult>),
     List(Vec<ListEntry>),
     Search(Vec<SearchMatch>),
+    Reference(ReferenceResult),
     Cancel(CancelResult),
 }
 
@@ -278,6 +294,7 @@ impl ResultData {
             Self::Read(results) => encode_read(results),
             Self::List(entries) => encode_list(entries),
             Self::Search(matches) => encode_search(matches),
+            Self::Reference(result) => result.encode(),
             Self::Cancel(result) => result.encode(),
         }
     }
@@ -288,7 +305,7 @@ impl ResultData {
                 result.stdout.reference.is_some() || result.stderr.reference.is_some()
             }
             Self::Read(results) => results.iter().any(|result| result.reference.is_some()),
-            Self::List(_) | Self::Search(_) | Self::Cancel(_) => false,
+            Self::List(_) | Self::Search(_) | Self::Reference(_) | Self::Cancel(_) => false,
         }
     }
 
@@ -333,6 +350,7 @@ impl ResultData {
                     return Err(ResponseError::InvalidData);
                 }
             }
+            Self::Reference(result) => result.validate()?,
             Self::Cancel(result) => {
                 if result.target_id == 0 {
                     return Err(ResponseError::InvalidData);
@@ -340,6 +358,121 @@ impl ResultData {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReferenceResult {
+    Slice(ReferenceSlice),
+    Search(Vec<ReferenceMatch>),
+    Released(ReleasedReference),
+}
+
+impl ReferenceResult {
+    fn encode(&self) -> Result<Value, BuildError> {
+        match self {
+            Self::Slice(result) => result.encode(),
+            Self::Search(matches) => encode_reference_search(matches),
+            Self::Released(result) => result.encode(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), ResponseError> {
+        match self {
+            Self::Slice(result) => result.validate(),
+            Self::Search(matches) => {
+                if matches
+                    .iter()
+                    .any(|entry| entry.line == 0 || entry.column == 0)
+                {
+                    Err(ResponseError::InvalidData)
+                } else {
+                    Ok(())
+                }
+            }
+            Self::Released(result) => {
+                if result.reference == 0 {
+                    Err(ResponseError::InvalidData)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferenceSlice {
+    pub offset: u64,
+    pub length: u64,
+    pub projected_bytes: u64,
+    pub digest: String,
+    pub text: Option<String>,
+    pub hex: Option<String>,
+}
+
+impl ReferenceSlice {
+    fn encode(&self) -> Result<Value, BuildError> {
+        Ok(Value::Record(Record::new(
+            keys(REF_SLICE_COLUMNS)?,
+            vec![
+                unsigned_cell(self.offset),
+                unsigned_cell(self.length),
+                unsigned_cell(self.projected_bytes),
+                text_cell(&self.digest),
+                optional_text(self.text.as_deref()),
+                optional_text(self.hex.as_deref()),
+            ],
+        )?))
+    }
+
+    fn validate(&self) -> Result<(), ResponseError> {
+        let projected = usize::try_from(self.projected_bytes).ok();
+        let text_matches = self
+            .text
+            .as_ref()
+            .is_some_and(|text| Some(text.len()) == projected);
+        let hex_matches = self.hex.as_ref().is_some_and(|hex| {
+            projected
+                .and_then(|length| length.checked_mul(2))
+                .is_some_and(|length| length == hex.len())
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+        if self.projected_bytes > self.length
+            || !valid_digest(&self.digest)
+            || text_matches == hex_matches
+        {
+            Err(ResponseError::InvalidData)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferenceMatch {
+    pub offset: u64,
+    pub line: u64,
+    pub column: u64,
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReleasedReference {
+    pub reference: u64,
+}
+
+impl ReleasedReference {
+    fn encode(self) -> Result<Value, BuildError> {
+        Ok(Value::Record(Record::new(
+            keys(REF_RELEASE_COLUMNS)?,
+            vec![
+                Cell::Atom(Atom::reference(self.reference)),
+                unsigned_cell(1),
+            ],
+        )?))
     }
 }
 
@@ -533,6 +666,28 @@ fn encode_search(matches: &[SearchMatch]) -> Result<Value, BuildError> {
         })
         .collect();
     Ok(Value::Table(Table::new(keys(SEARCH_COLUMNS)?, rows)?))
+}
+
+fn encode_reference_search(matches: &[ReferenceMatch]) -> Result<Value, BuildError> {
+    let rows = matches
+        .iter()
+        .map(|entry| {
+            vec![
+                unsigned_cell(entry.offset),
+                unsigned_cell(entry.line),
+                unsigned_cell(entry.column),
+                text_cell(&entry.text),
+            ]
+        })
+        .collect();
+    Ok(Value::Table(Table::new(keys(REF_SEARCH_COLUMNS)?, rows)?))
+}
+
+fn valid_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_paths(paths: &[PathMapping]) -> Result<(), ResponseError> {

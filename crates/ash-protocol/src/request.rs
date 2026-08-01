@@ -13,6 +13,7 @@ const EXEC_COLUMNS: &[&str] = &["x", "v", "c", "e", "in", "f"];
 const READ_COLUMNS: &[&str] = &["p", "m", "o", "n"];
 const LIST_COLUMNS: &[&str] = &["p", "d", "f"];
 const SEARCH_COLUMNS: &[&str] = &["q", "p", "f"];
+const REF_COLUMNS: &[&str] = &["r", "m", "o", "n", "q", "f"];
 const CANCEL_COLUMNS: &[&str] = &["i"];
 
 pub const MAX_REQUEST_TOKENS: u32 = 1_048_576;
@@ -27,10 +28,15 @@ pub const LIST_DIRECTORIES_ONLY: u32 = 1 << 2;
 pub const SEARCH_REGEX: u32 = 1 << 0;
 pub const SEARCH_CASE_INSENSITIVE: u32 = 1 << 1;
 pub const SEARCH_INCLUDE_HIDDEN: u32 = 1 << 2;
+pub const REF_REGEX: u32 = 1 << 0;
+pub const REF_CASE_INSENSITIVE: u32 = 1 << 1;
 
 const EXEC_FLAGS: u32 = EXEC_CLEAR_ENVIRONMENT;
 const LIST_FLAGS: u32 = LIST_INCLUDE_HIDDEN | LIST_FILES_ONLY | LIST_DIRECTORIES_ONLY;
 const SEARCH_FLAGS: u32 = SEARCH_REGEX | SEARCH_CASE_INSENSITIVE | SEARCH_INCLUDE_HIDDEN;
+const REF_SEARCH_FLAGS: u32 = REF_REGEX | REF_CASE_INSENSITIVE;
+const MAX_REF_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_REF_LINES: u64 = 1_000_000;
 
 /// Per-request presentation and wall-clock ceilings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -184,6 +190,7 @@ pub enum Arguments {
     Read(ReadArgs),
     List(ListArgs),
     Search(SearchArgs),
+    Ref(RefArgs),
     Cancel(CancelArgs),
 }
 
@@ -195,6 +202,7 @@ impl Arguments {
             Self::Read(_) => Operation::Read,
             Self::List(_) => Operation::List,
             Self::Search(_) => Operation::Search,
+            Self::Ref(_) => Operation::Ref,
             Self::Cancel(_) => Operation::Cancel,
         }
     }
@@ -205,6 +213,7 @@ impl Arguments {
             Operation::Read => ReadArgs::decode(record).map(Self::Read),
             Operation::List => ListArgs::decode(record).map(Self::List),
             Operation::Search => SearchArgs::decode(record).map(Self::Search),
+            Operation::Ref => RefArgs::decode(record).map(Self::Ref),
             Operation::Cancel => CancelArgs::decode(record).map(Self::Cancel),
             _ => Err(RequestError::UnsupportedOperation),
         }
@@ -216,6 +225,7 @@ impl Arguments {
             Self::Read(arguments) => arguments.encode(),
             Self::List(arguments) => arguments.encode(),
             Self::Search(arguments) => arguments.encode(),
+            Self::Ref(arguments) => arguments.encode(),
             Self::Cancel(arguments) => arguments.encode(),
         }
     }
@@ -226,6 +236,7 @@ impl Arguments {
             Self::Read(arguments) => arguments.validate(),
             Self::List(arguments) => arguments.validate(),
             Self::Search(arguments) => arguments.validate(),
+            Self::Ref(arguments) => arguments.validate(),
             Self::Cancel(arguments) => arguments.validate(),
         }
     }
@@ -296,6 +307,8 @@ impl ExecArgs {
         validate_environment(&self.environment)?;
         if let InputSource::Inline(value) = &self.stdin {
             validate_bounded_text(value, "in", 1024 * 1024)?;
+        } else if matches!(self.stdin, InputSource::Reference(0)) {
+            return Err(RequestError::InvalidUnsigned("in"));
         }
         validate_flags(self.flags, EXEC_FLAGS)
     }
@@ -584,6 +597,161 @@ impl SearchArgs {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RefMode {
+    Bytes,
+    Lines,
+    Search,
+    Release,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefArgs {
+    reference: u64,
+    mode: RefMode,
+    offset: u64,
+    length: u64,
+    query: Option<String>,
+    flags: u32,
+}
+
+impl RefArgs {
+    pub fn new(
+        reference: u64,
+        mode: RefMode,
+        offset: u64,
+        length: u64,
+        query: Option<String>,
+        flags: u32,
+    ) -> Result<Self, RequestError> {
+        let arguments = Self {
+            reference,
+            mode,
+            offset,
+            length,
+            query,
+            flags,
+        };
+        arguments.validate()?;
+        Ok(arguments)
+    }
+
+    fn decode(record: &Record) -> Result<Self, RequestError> {
+        expect_columns(record, REF_COLUMNS)?;
+        let values = record.values();
+        let mode = match unsigned_cell(&values[1], "m")? {
+            0 => RefMode::Bytes,
+            1 => RefMode::Lines,
+            2 => RefMode::Search,
+            3 => RefMode::Release,
+            _ => return Err(RequestError::UnexpectedValue("m")),
+        };
+        Self::new(
+            reference_cell(&values[0], "r")?,
+            mode,
+            unsigned_cell(&values[2], "o")?,
+            unsigned_cell(&values[3], "n")?,
+            optional_text_cell(&values[4], "q")?,
+            narrow_u32(unsigned_cell(&values[5], "f")?, "f")?,
+        )
+    }
+
+    fn encode(&self) -> Result<Value, BuildError> {
+        Ok(Value::Record(Record::new(
+            keys(REF_COLUMNS)?,
+            vec![
+                Cell::Atom(Atom::reference(self.reference)),
+                unsigned_value(match self.mode {
+                    RefMode::Bytes => 0,
+                    RefMode::Lines => 1,
+                    RefMode::Search => 2,
+                    RefMode::Release => 3,
+                }),
+                unsigned_value(self.offset),
+                unsigned_value(self.length),
+                self.query.as_deref().map_or_else(null_value, text_value),
+                unsigned_value(u64::from(self.flags)),
+            ],
+        )?))
+    }
+
+    fn validate(&self) -> Result<(), RequestError> {
+        if self.reference == 0 {
+            return Err(RequestError::InvalidUnsigned("r"));
+        }
+        match self.mode {
+            RefMode::Bytes => {
+                if self.length == 0 || self.length > MAX_REF_BYTES {
+                    return Err(RequestError::InvalidLimit("n"));
+                }
+                if self.query.is_some() {
+                    return Err(RequestError::UnexpectedValue("q"));
+                }
+                validate_flags(self.flags, 0)?;
+            }
+            RefMode::Lines => {
+                if self.offset == 0 {
+                    return Err(RequestError::InvalidLimit("o"));
+                }
+                if self.length == 0 || self.length > MAX_REF_LINES {
+                    return Err(RequestError::InvalidLimit("n"));
+                }
+                if self.query.is_some() {
+                    return Err(RequestError::UnexpectedValue("q"));
+                }
+                validate_flags(self.flags, 0)?;
+            }
+            RefMode::Search => {
+                if self.length == 0 || self.length > MAX_REF_BYTES {
+                    return Err(RequestError::InvalidLimit("n"));
+                }
+                let query = self
+                    .query
+                    .as_deref()
+                    .ok_or(RequestError::InvalidText("q"))?;
+                validate_text(query, "q", 1024 * 1024)?;
+                validate_flags(self.flags, REF_SEARCH_FLAGS)?;
+            }
+            RefMode::Release => {
+                if self.offset != 0 || self.length != 0 || self.query.is_some() || self.flags != 0 {
+                    return Err(RequestError::UnexpectedValue("m"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn reference(&self) -> u64 {
+        self.reference
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> RefMode {
+        self.mode
+    }
+
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    #[must_use]
+    pub const fn length(&self) -> u64 {
+        self.length
+    }
+
+    #[must_use]
+    pub fn query(&self) -> Option<&str> {
+        self.query.as_deref()
+    }
+
+    #[must_use]
+    pub const fn flags(&self) -> u32 {
+        self.flags
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CancelArgs {
     target_id: u64,
 }
@@ -689,6 +857,13 @@ fn unsigned_cell(cell: &Cell, field: &'static str) -> Result<u64, RequestError> 
     }
 }
 
+fn reference_cell(cell: &Cell, field: &'static str) -> Result<u64, RequestError> {
+    match cell {
+        Cell::Atom(Atom::Reference(reference)) if *reference != 0 => Ok(*reference),
+        Cell::Atom(_) | Cell::Vector(_) => Err(RequestError::InvalidUnsigned(field)),
+    }
+}
+
 fn unsigned_atom(atom: &Atom, field: &'static str) -> Result<u64, RequestError> {
     let Atom::Text(value) = atom else {
         return Err(RequestError::InvalidUnsigned(field));
@@ -727,6 +902,16 @@ fn text_cell<'a>(cell: &'a Cell, field: &'static str) -> Result<&'a str, Request
     match cell {
         Cell::Atom(Atom::Text(value)) => Ok(value),
         Cell::Atom(Atom::Null | Atom::Reference(_)) | Cell::Vector(_) => {
+            Err(RequestError::ExpectedScalar(field))
+        }
+    }
+}
+
+fn optional_text_cell(cell: &Cell, field: &'static str) -> Result<Option<String>, RequestError> {
+    match cell {
+        Cell::Atom(Atom::Null) => Ok(None),
+        Cell::Atom(Atom::Text(value)) => Ok(Some(value.clone())),
+        Cell::Atom(Atom::Reference(_)) | Cell::Vector(_) => {
             Err(RequestError::ExpectedScalar(field))
         }
     }
@@ -774,6 +959,10 @@ fn unsigned_value(value: u64) -> Cell {
 
 fn text_value(value: &str) -> Cell {
     Cell::Atom(Atom::text(value))
+}
+
+fn null_value() -> Cell {
+    Cell::Atom(Atom::Null)
 }
 
 fn text_vector_value(values: &[String]) -> Cell {

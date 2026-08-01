@@ -1,7 +1,8 @@
 use super::{
     Arguments, Budget, CancelArgs, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource,
-    LIST_INCLUDE_HIDDEN, ListArgs, READ_COLUMNS, ReadArgs, ReadMode, Request, RequestError,
-    SEARCH_CASE_INSENSITIVE, SEARCH_REGEX, SearchArgs,
+    LIST_INCLUDE_HIDDEN, ListArgs, READ_COLUMNS, REF_CASE_INSENSITIVE, REF_REGEX, ReadArgs,
+    ReadMode, RefArgs, RefMode, Request, RequestError, SEARCH_CASE_INSENSITIVE, SEARCH_REGEX,
+    SearchArgs,
 };
 use crate::Operation;
 use crate::ason::{Atom, Cell, Document, Field, Key, Record, Value, decode};
@@ -11,6 +12,7 @@ const EXEC_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/exec-req
 const READ_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/read-request.ason");
 const LIST_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/list-request.ason");
 const CANCEL_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/cancel-request.ason");
+const REF_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/ref-request.ason");
 
 fn budget() -> Budget {
     Budget::new(256, 64, 30_000).expect("budget")
@@ -36,6 +38,7 @@ fn all_m1_request_fixtures_are_canonical_typed_messages() {
         (READ_REQUEST, Operation::Read),
         (LIST_REQUEST, Operation::List),
         (SEARCH_REQUEST, Operation::Search),
+        (REF_REQUEST, Operation::Ref),
         (CANCEL_REQUEST, Operation::Cancel),
     ];
     for (fixture, operation) in expected {
@@ -96,6 +99,22 @@ fn every_m1_argument_schema_round_trips() {
         .expect("request"),
         Request::new(
             5,
+            Arguments::Ref(
+                RefArgs::new(
+                    9,
+                    RefMode::Search,
+                    0,
+                    1_048_576,
+                    Some("error|warning".to_owned()),
+                    REF_REGEX | REF_CASE_INSENSITIVE,
+                )
+                .expect("reference"),
+            ),
+            budget(),
+        )
+        .expect("request"),
+        Request::new(
+            6,
             Arguments::Cancel(CancelArgs::new(4).expect("cancel")),
             budget(),
         )
@@ -143,6 +162,14 @@ fn line_reads_are_one_based_and_environment_deltas_are_unique() {
         Err(RequestError::InvalidText("e"))
     ));
     assert_eq!(CancelArgs::new(0), Err(RequestError::InvalidUnsigned("i")));
+    assert_eq!(
+        RefArgs::new(0, RefMode::Bytes, 0, 1, None, 0),
+        Err(RequestError::InvalidUnsigned("r"))
+    );
+    assert_eq!(
+        RefArgs::new(1, RefMode::Release, 0, 1, None, 0),
+        Err(RequestError::UnexpectedValue("m"))
+    );
     assert_eq!(
         Request::new(
             7,

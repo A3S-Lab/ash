@@ -1,7 +1,8 @@
 use super::{
     CancelResult, CancellationState, ErrorCode, ErrorRecord, ErrorStage, FileKind, FinalResponse,
     ListEntry, PathMapping, ProcessResult, RESULT_RETAINED, RESULT_TRUNCATED, ReadResult,
-    ResponseError, ResultData, RetryClass, SearchMatch, Status, StreamResult, TerminationKind,
+    ReferenceMatch, ReferenceResult, ReferenceSlice, ReleasedReference, ResponseError, ResultData,
+    RetryClass, SearchMatch, Status, StreamResult, TerminationKind,
 };
 use crate::ason::decode;
 
@@ -66,20 +67,77 @@ fn every_m1_result_shape_encodes_as_canonical_ason() {
             modified_millis: None,
         }]),
         ResultData::Search(vec![]),
+        ResultData::Reference(ReferenceResult::Slice(ReferenceSlice {
+            offset: 4,
+            length: 2,
+            projected_bytes: 2,
+            digest: "b".repeat(64),
+            text: Some("ok".to_owned()),
+            hex: None,
+        })),
         ResultData::Cancel(CancelResult {
             target_id: 7,
             state: CancellationState::Signaled,
         }),
     ];
     for (index, data) in results.into_iter().enumerate() {
-        let response =
-            FinalResponse::success(index as u64 + 1, vec![], data, 0, None).expect("response");
+        let retained = matches!(&data, ResultData::Reference(_));
+        let response = FinalResponse::success(
+            index as u64 + 1,
+            vec![],
+            data,
+            if retained { RESULT_RETAINED } else { 0 },
+            retained.then_some(7),
+        )
+        .expect("response");
         let encoded = response.encode().expect("encode").encode();
         assert_eq!(
             decode(&encoded).expect("canonical result").encode(),
             encoded
         );
     }
+}
+
+#[test]
+fn every_reference_result_shape_is_typed_and_source_bound() {
+    let search = FinalResponse::success(
+        31,
+        vec![],
+        ResultData::Reference(ReferenceResult::Search(vec![ReferenceMatch {
+            offset: 8,
+            line: 2,
+            column: 3,
+            text: "needle".to_owned(),
+        }])),
+        RESULT_RETAINED,
+        Some(4),
+    )
+    .expect("search");
+    let released = FinalResponse::success(
+        32,
+        vec![],
+        ResultData::Reference(ReferenceResult::Released(ReleasedReference {
+            reference: 4,
+        })),
+        0,
+        None,
+    )
+    .expect("release");
+    for response in [search, released] {
+        let encoded = response.encode().expect("encode").encode();
+        assert_eq!(decode(&encoded).expect("canonical").encode(), encoded);
+    }
+
+    assert_eq!(
+        FinalResponse::success(
+            33,
+            vec![],
+            ResultData::Reference(ReferenceResult::Search(vec![])),
+            0,
+            None,
+        ),
+        Err(ResponseError::InvalidData)
+    );
 }
 
 #[test]

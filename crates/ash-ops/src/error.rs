@@ -39,6 +39,8 @@ pub enum OperationError {
     Cancelled,
     #[error("operation input exceeds its bounded work ceiling")]
     WorkLimit,
+    #[error("operation requires UTF-8 retained content")]
+    WrongFileType,
     #[error("immediate response cannot fit the negotiated output budget")]
     OutputBudget,
 }
@@ -92,6 +94,12 @@ impl OperationError {
                 RetryClass::CorrectRequest,
                 ErrorStage::Validate,
             ),
+            Self::WrongFileType => (
+                Status::Failed,
+                ErrorCode::WrongFileType,
+                RetryClass::CorrectRequest,
+                ErrorStage::Execute,
+            ),
             Self::Platform(PlatformError::WorkspaceEscape) => (
                 Status::Denied,
                 ErrorCode::WorkspaceEscape,
@@ -123,6 +131,18 @@ impl OperationError {
                 Status::BudgetExceeded,
                 ErrorCode::StorageBudget,
                 RetryClass::CorrectRequest,
+                ErrorStage::Retain,
+            ),
+            Self::Store(StoreError::UnknownAlias(_)) => (
+                Status::NotFound,
+                ErrorCode::UnknownReference,
+                RetryClass::CorrectRequest,
+                ErrorStage::Resolve,
+            ),
+            Self::Store(StoreError::InUse(_)) => (
+                Status::Conflict,
+                ErrorCode::ReferenceBusy,
+                RetryClass::RetrySame,
                 ErrorStage::Retain,
             ),
             Self::Platform(_) => (

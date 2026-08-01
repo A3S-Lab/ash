@@ -309,6 +309,8 @@ The program budget is allocated across nodes by explicit priority and determinis
 
 If output is reduced or truncated, the response carries a numeric session reference. Follow-up `ref` operations can fetch a slice, search within it, apply another reducer, or materialize it as an artifact. Binary data is never embedded as Base64 in the default LLM response.
 
+Reference readers hold short-lived leases. Early release is atomic and returns a typed conflict while any operation still owns a lease, preventing a concurrent inspection from emitting an alias that has already been retired.
+
 ## 8. Process execution
 
 `exec` starts an executable directly with an argument vector. It never silently inserts `sh -c`, `cmd /c`, or `pwsh -Command`.

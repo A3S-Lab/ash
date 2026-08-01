@@ -7,6 +7,7 @@ mod exec;
 mod list;
 mod projection;
 mod read;
+mod reference;
 mod search;
 
 use ash_engine::Program;
@@ -38,6 +39,7 @@ impl PortableOperations {
             | Operation::Read.mask()
             | Operation::List.mask()
             | Operation::Search.mask()
+            | Operation::Ref.mask()
     }
 
     pub async fn execute(
@@ -58,6 +60,7 @@ impl PortableOperations {
             Arguments::Search(arguments) => {
                 search::execute(&self.workspace, request, arguments, program).await
             }
+            Arguments::Ref(arguments) => reference::execute(request, arguments, program).await,
             Arguments::Cancel(_) => Err(OperationError::Unsupported),
         };
         match result {

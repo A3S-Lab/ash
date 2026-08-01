@@ -149,8 +149,12 @@ impl ResultStore {
         let mut state = self.lock()?;
         let entry = state
             .by_alias
-            .remove(&alias)
+            .get(&alias)
             .ok_or(StoreError::UnknownAlias(alias))?;
+        if Arc::strong_count(&entry.bytes) != 1 {
+            return Err(StoreError::InUse(alias));
+        }
+        let entry = state.by_alias.remove(&alias).ok_or(StoreError::Invariant)?;
         state.by_content.remove(&entry.content_id);
         state.bytes = state
             .bytes
@@ -210,6 +214,8 @@ pub enum StoreError {
     AliasExhausted,
     #[error("unknown retained result alias {0}")]
     UnknownAlias(u64),
+    #[error("retained result alias {0} is in use")]
+    InUse(u64),
     #[error("a BLAKE3 digest collision was detected")]
     DigestCollision,
     #[error("result-store lock was poisoned")]
@@ -279,5 +285,15 @@ mod tests {
         assert!(aliases.iter().all(|alias| *alias == aliases[0]));
         assert_eq!(store.usage().expect("usage").entries, 1);
         assert_eq!(store.limits(), StoreLimits::default());
+    }
+
+    #[test]
+    fn active_readers_prevent_release() {
+        let store = ResultStore::default();
+        let alias = store.retain(b"leased".to_vec()).expect("retain");
+        let reader = store.get(alias).expect("reader");
+        assert_eq!(store.release(alias), Err(StoreError::InUse(alias)));
+        drop(reader);
+        store.release(alias).expect("release after reader");
     }
 }

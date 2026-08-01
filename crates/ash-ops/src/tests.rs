@@ -6,7 +6,8 @@ use ash_engine::{Engine, Parallelism, SessionConfig};
 use ash_platform::Workspace;
 use ash_protocol::request::{
     Arguments, Budget, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource, LIST_FILES_ONLY, ListArgs,
-    ReadArgs, ReadMode, Request, SEARCH_CASE_INSENSITIVE, SearchArgs,
+    REF_CASE_INSENSITIVE, ReadArgs, ReadMode, RefArgs, RefMode, Request, SEARCH_CASE_INSENSITIVE,
+    SearchArgs,
 };
 
 use super::PortableOperations;
@@ -282,6 +283,138 @@ async fn low_projection_budget_retains_complete_search_evidence() {
     let evidence = std::str::from_utf8(&evidence).expect("ASON evidence");
     assert!(evidence.contains("d[20]{p,l,c,t}:"));
     assert!(evidence.contains("needle-19"));
+}
+
+#[tokio::test]
+async fn retained_results_support_slice_search_binary_and_release() {
+    let directory = TestDirectory::new();
+    let (session, operations) = runtime(&directory);
+    let reference = session
+        .store()
+        .retain(b"zero\r\nNeedle alpha\nlast\n".to_vec())
+        .expect("retain text");
+
+    let lines = Request::new(
+        20,
+        Arguments::Ref(RefArgs::new(reference, RefMode::Lines, 2, 1, None, 0).expect("lines")),
+        budget(256, 8),
+    )
+    .expect("request");
+    let program = session.begin(&lines).await.expect("program");
+    let response = operations
+        .execute(&lines, &program)
+        .await
+        .expect("response");
+    assert_eq!(response.reference(), Some(reference));
+    let encoded = response.encode().expect("encode").encode();
+    assert!(encoded.contains("d{o,n,p,h,t,b}:\n2,13,13,"), "{encoded}");
+    assert!(encoded.contains("\"Needle alpha\\n\",~"), "{encoded}");
+    drop(program);
+
+    let search = Request::new(
+        21,
+        Arguments::Ref(
+            RefArgs::new(
+                reference,
+                RefMode::Search,
+                0,
+                1024,
+                Some("needle".to_owned()),
+                REF_CASE_INSENSITIVE,
+            )
+            .expect("search"),
+        ),
+        budget(256, 8),
+    )
+    .expect("request");
+    let program = session.begin(&search).await.expect("program");
+    let encoded = operations
+        .execute(&search, &program)
+        .await
+        .expect("response")
+        .encode()
+        .expect("encode")
+        .encode();
+    assert!(
+        encoded.contains("d[1]{o,l,c,t}:\n6,2,1,\"Needle alpha\"\n"),
+        "{encoded}"
+    );
+    assert!(encoded.ends_with(&format!("z:8\nr:@{reference}\n")));
+    drop(program);
+
+    let binary_reference = session
+        .store()
+        .retain(vec![0xff, 0x00, 0x10])
+        .expect("retain binary");
+    let binary = Request::new(
+        22,
+        Arguments::Ref(
+            RefArgs::new(binary_reference, RefMode::Bytes, 0, 3, None, 0).expect("bytes"),
+        ),
+        budget(256, 8),
+    )
+    .expect("request");
+    let program = session.begin(&binary).await.expect("program");
+    let encoded = operations
+        .execute(&binary, &program)
+        .await
+        .expect("response")
+        .encode()
+        .expect("encode")
+        .encode();
+    assert!(encoded.contains(",~,ff0010\n"), "{encoded}");
+    drop(program);
+
+    let long_reference = session
+        .store()
+        .retain("澶氭牳".repeat(5_000).into_bytes())
+        .expect("retain long text");
+    let projected = Request::new(
+        24,
+        Arguments::Ref(
+            RefArgs::new(long_reference, RefMode::Bytes, 0, 128 * 1024, None, 0).expect("bytes"),
+        ),
+        budget(128, 1),
+    )
+    .expect("request");
+    let program = session.begin(&projected).await.expect("program");
+    let response = operations
+        .execute(&projected, &program)
+        .await
+        .expect("response");
+    assert_eq!(response.flags() & 0b1011, 0b1011);
+    assert_eq!(response.reference(), Some(long_reference));
+    assert!(response.encode().expect("encode").encode().len() <= 512);
+    drop(program);
+
+    let release = Request::new(
+        23,
+        Arguments::Ref(RefArgs::new(reference, RefMode::Release, 0, 0, None, 0).expect("release")),
+        budget(64, 1),
+    )
+    .expect("request");
+    let program = session.begin(&release).await.expect("program");
+    let encoded = operations
+        .execute(&release, &program)
+        .await
+        .expect("response")
+        .encode()
+        .expect("encode")
+        .encode();
+    assert!(encoded.contains(&format!("d{{r,z}}:\n@{reference},1\n")));
+    drop(program);
+    assert!(session.store().get(reference).is_err());
+
+    let program = session.begin(&release).await.expect("program");
+    let encoded = operations
+        .execute(&release, &program)
+        .await
+        .expect("typed failure")
+        .encode()
+        .expect("encode")
+        .encode();
+    assert!(encoded.starts_with("t:3\ni:23\ns:4\n"));
+    assert!(encoded.contains("e{c,q,p,x,a}:\n700,1,2,~,~\n"));
 }
 
 #[tokio::test]

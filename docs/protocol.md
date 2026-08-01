@@ -1,6 +1,6 @@
 # ASH/1 protocol and ASON
 
-Status: canonical ASON, framing, handshake, typed M1 schemas, concurrent exec/read/list/search, and cancellation runtime paths are implemented
+Status: canonical ASON, framing, handshake, typed M1 schemas, concurrent exec/read/list/search, retained-result inspection, and cancellation runtime paths are implemented
 
 ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
 
@@ -169,7 +169,7 @@ d{ap,av,zp,zv,frm,out,ops,cap,os,arch,sid,n}:
 1,0,1,0,1048576,65536,0,0,linux,x86_64,1,nonce-7
 ```
 
-The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises `0x20f`, exactly the implemented `exec`, `read`, `list`, `search`, and `cancel` bits; later bits remain clear until their complete operation contracts land.
+The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises `0x28f`, exactly the implemented `exec`, `read`, `list`, `search`, `ref`, and `cancel` bits; later bits remain clear until their complete operation contracts land.
 
 The handshake is retained by the adapter and is not repeated in each model-visible result.
 
@@ -270,11 +270,14 @@ Operation argument records are positional only after their declared columns, so 
 | `r` | `a{p,m,o,n}:` | path vector, range mode, offset, length |
 | `l` | `a{p,d,f}:` | root path vector, maximum depth, flags |
 | `g` | `a{q,p,f}:` | query, root path vector, flags |
+| `h` | `a{r,m,o,n,q,f}:` | source reference, mode, offset, range length, optional query, flags |
 | `k` | `a{i}:` | active target request identifier |
 
 `exec` invokes `x` directly. Environment entries use `NAME=value` to set and `-NAME` to remove; duplicate names are invalid. `in` is `~`, inline text, or a retained `@reference`. Exec flag bit 0 clears the inherited environment before applying deltas.
 
 Read mode `0` is a zero-based byte range and mode `1` is a one-based line range. A zero length is invalid. List flag bits are 0 include hidden, 1 files only, and 2 directories only. Search flag bits are 0 regular expression, 1 case-insensitive, and 2 include hidden. Unknown flag bits fail schema validation rather than being silently ignored.
+
+Reference modes are `0` byte slice, `1` line slice, `2` bounded text search, and `3` release. Byte and search offsets are zero-based; line offsets are one-based. Reference-search flag bits are 0 regular expression and 1 case-insensitive. Slice projections return UTF-8 when valid and lowercase hexadecimal otherwise; the full selected range remains identified by its digest and source reference.
 
 `cancel` is a control-plane request. Its own request identifier must differ from the target. State `1` means cancellation was signaled to queued or running work; state `0` means the target was no longer active. Both are successful, idempotent outcomes.
 
@@ -298,6 +301,7 @@ M1 result data uses these fixed schemas:
 | `r` | `d[N]{p,o,n,h,t,r}:` | path ID, actual offset and length, BLAKE3 digest, text projection, retained reference |
 | `l` | `d[N]{p,k,z,m}:` | path ID, file kind, byte size, optional modified Unix milliseconds |
 | `g` | `d[N]{p,l,c,t}:` | path ID, one-based line and column, matching line projection |
+| `h` | `d{o,n,p,h,t,b}:`, `d[N]{o,l,c,t}:`, or `d{r,z}:` | slice, in-reference search, or release result selected by request mode |
 | `k` | `d{i,z}:` | target request identifier and cancellation state |
 
 Null (`~`) omits an unavailable projection, code, timestamp, or reference. Result flag bits are 0 truncated, 1 reduced, 2 normalized text, 3 retained evidence, 4 partial completion, and 5 redacted. Unknown bits are invalid. Any truncated result must retain inspectable evidence, and the retained flag must agree with the references actually present.
@@ -338,7 +342,7 @@ The dictionary maps a logical workspace path, not an unchecked native path. Opaq
 
 Result references identify immutable retained content or structured record sets. The store tracks full content digests internally; the short ASON identifier is only an alias.
 
-The `h` operation can:
+The `h` operation family is designed to:
 
 - fetch byte, line, or record ranges;
 - search within a retained value;
@@ -347,7 +351,9 @@ The `h` operation can:
 - materialize binary content as a workspace artifact;
 - release retained content early.
 
-References carry expiry and size metadata when introduced. Expired or foreign-session identifiers return a stable reference error.
+The current ASH/1.0 source accepts byte slices, line slices, literal or regex search, and release. Deterministic structured projection and workspace materialization are reserved for later typed modes alongside the mutation workflow; unimplemented mode values are rejected rather than silently degraded. Slice field `p` is the number of projected source bytes, while `n` is the full selected byte length. A busy reference cannot be released until active readers drop their leases.
+
+References are immutable and session-local. The current store enforces byte and entry quotas, never reuses a retired alias, and supports explicit release; TTL metadata is reserved for a later negotiated extension. Unknown, retired, or foreign-session identifiers return a stable reference error.
 
 ## 15. Errors
 
@@ -365,7 +371,7 @@ r:@10
 
 The schema negotiated for error code `31` defines the meanings and types of its payload slots. Agent instructions need describe each stable code only once.
 
-Error code families reserve ranges for protocol, validation, capability, path, process, filesystem, budget, reference, and internal failures. Budget codes `600`, `601`, and `602` identify immediate output, retained storage, and in-flight concurrency ceilings respectively. New minor protocol levels may add codes but cannot change an existing code's meaning.
+Error code families reserve ranges for protocol, validation, capability, path, process, filesystem, budget, reference, and internal failures. Budget codes `600`, `601`, and `602` identify immediate output, retained storage, and in-flight concurrency ceilings respectively. Reference codes `700` and `701` identify unknown and currently leased aliases. New minor protocol levels may add codes but cannot change an existing code's meaning.
 
 Before a request identifier exists, CLI bootstrap failures are written to stderr as bare ASON rather than prose:
 

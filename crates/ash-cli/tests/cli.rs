@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,7 +10,8 @@ use ash_protocol::Operation;
 use ash_protocol::ason::decode;
 use ash_protocol::handshake::{HandshakePreferences, HandshakeRequest, HandshakeResponse};
 use ash_protocol::request::{
-    Arguments, Budget, CancelArgs, ExecArgs, InputSource, ReadArgs, ReadMode, Request,
+    Arguments, Budget, CancelArgs, ExecArgs, InputSource, ReadArgs, ReadMode, RefArgs, RefMode,
+    Request, SearchArgs,
 };
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -116,6 +117,18 @@ fn split_frames(mut bytes: &[u8]) -> Vec<&[u8]> {
         bytes = &bytes[length + 4..];
     }
     frames
+}
+
+fn exchange_frame(stdin: &mut impl Write, stdout: &mut impl Read, payload: &str) -> Vec<u8> {
+    stdin
+        .write_all(&frame(payload.as_bytes()))
+        .expect("write frame");
+    stdin.flush().expect("flush frame");
+    let mut prefix = [0_u8; 4];
+    stdout.read_exact(&mut prefix).expect("read frame prefix");
+    let mut payload = vec![0_u8; u32::from_be_bytes(prefix) as usize];
+    stdout.read_exact(&mut payload).expect("read frame payload");
+    payload
 }
 
 #[test]
@@ -417,4 +430,108 @@ fn rpc_cancel_preempts_an_active_process() {
     assert!(exec.contains("e{c,q,p,x,a}:\n403,0,4,~,~\n"), "{exec}");
     assert!(cancel.starts_with("t:3\ni:62\ns:0\n"), "{cancel}");
     assert!(cancel.contains("d{i,z}:\n61,1\n"), "{cancel}");
+}
+
+#[test]
+fn rpc_retrieves_and_releases_retained_evidence_across_frames() {
+    let directory = TestDirectory::new();
+    fs::write(
+        directory.0.join("many.txt"),
+        (0..20)
+            .map(|index| format!("needle-{index:02}\n"))
+            .collect::<String>(),
+    )
+    .expect("write fixture");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ash"))
+        .arg("rpc")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ash");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+    let mut stderr = child.stderr.take().expect("stderr");
+
+    let handshake = HandshakeRequest::new(
+        70,
+        directory.0.to_string_lossy(),
+        "integration-70",
+        HandshakePreferences {
+            operation_mask: u64::MAX,
+            ..HandshakePreferences::default()
+        },
+    )
+    .expect("handshake")
+    .encode()
+    .expect("encode")
+    .encode();
+    let handshake_response = exchange_frame(&mut stdin, &mut stdout, &handshake);
+    assert!(
+        std::str::from_utf8(&handshake_response)
+            .expect("handshake response")
+            .starts_with("t:0\ni:70\n")
+    );
+
+    let search = Request::new(
+        71,
+        Arguments::Search(SearchArgs::new("needle", vec![".".to_owned()], 0).expect("search")),
+        Budget::new(32, 20, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode")
+    .encode();
+    let search_response = exchange_frame(&mut stdin, &mut stdout, &search);
+    let search_response = std::str::from_utf8(&search_response).expect("search response");
+    let reference = search_response
+        .lines()
+        .find_map(|line| line.strip_prefix("r:@"))
+        .expect("retained reference")
+        .parse::<u64>()
+        .expect("reference number");
+
+    let inspect = Request::new(
+        72,
+        Arguments::Ref(
+            RefArgs::new(
+                reference,
+                RefMode::Search,
+                0,
+                1024 * 1024,
+                Some("needle-19".to_owned()),
+                0,
+            )
+            .expect("reference search"),
+        ),
+        Budget::new(256, 8, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode")
+    .encode();
+    let inspect_response = exchange_frame(&mut stdin, &mut stdout, &inspect);
+    let inspect_response = std::str::from_utf8(&inspect_response).expect("inspect response");
+    assert!(inspect_response.starts_with("t:3\ni:72\ns:0\n"));
+    assert!(inspect_response.contains("needle-19"));
+
+    let release = Request::new(
+        73,
+        Arguments::Ref(RefArgs::new(reference, RefMode::Release, 0, 0, None, 0).expect("release")),
+        Budget::new(64, 1, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode")
+    .encode();
+    let release_response = exchange_frame(&mut stdin, &mut stdout, &release);
+    let release_response = std::str::from_utf8(&release_response).expect("release response");
+    assert!(release_response.starts_with("t:3\ni:73\ns:0\n"));
+    assert!(release_response.contains(&format!("d{{r,z}}:\n@{reference},1\n")));
+
+    drop(stdin);
+    assert!(child.wait().expect("wait").success());
+    let mut diagnostics = Vec::new();
+    stderr.read_to_end(&mut diagnostics).expect("stderr");
+    assert!(diagnostics.is_empty(), "stderr={diagnostics:?}");
 }
