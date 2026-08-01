@@ -42,11 +42,12 @@ expect_failure() {
     }
 }
 
-temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/ash-installer-smoke.XXXXXX") || exit 1
+temporary_base=$(CDPATH= cd "${TMPDIR:-/tmp}" && pwd -P)
+temporary_root=$(mktemp -d "$temporary_base/ash-installer-smoke.XXXXXX") || exit 1
 temporary_root=$(CDPATH= cd "$temporary_root" && pwd -P)
 cleanup() {
     case $temporary_root in
-        "${TMPDIR:-/tmp}"/ash-installer-smoke.*) rm -rf "$temporary_root" ;;
+        "$temporary_base"/ash-installer-smoke.*) rm -rf "$temporary_root" ;;
         *) fail 'unsafe temporary path' ;;
     esac
 }
