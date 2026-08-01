@@ -1,8 +1,8 @@
 # Cross-platform distribution
 
-Status: installer implementation checkpoint; no signed binary release is published
+Status: installer plus signed release-verification checkpoint; activation and a published signed binary release remain open
 
-This document defines how `ash` is built, installed, updated, rolled back, and removed on Linux, macOS, and Windows. The source tree now contains offline-testable `install.sh` and `install.ps1` implementations. The online commands remain release contracts until signed artifacts exist.
+This document defines how `ash` is built, installed, updated, rolled back, and removed on Linux, macOS, and Windows. The source tree contains offline-testable `install.sh` and `install.ps1` implementations plus an `ash-update` trust core that strictly verifies canonical Ed25519-signed metadata and bounded release archives. Activation, online orchestration, and the online installation commands remain release contracts until signed artifacts exist.
 
 ## 1. Distribution goals
 

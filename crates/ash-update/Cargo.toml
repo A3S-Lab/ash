@@ -1,0 +1,32 @@
+[package]
+name = "a3s-ash-update"
+description = "Signed release verification and safe activation for ash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+atomicwrites.workspace = true
+ed25519-dalek.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+flate2.workspace = true
+tar.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+flate2.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true, features = ["zeroize"] }
+
