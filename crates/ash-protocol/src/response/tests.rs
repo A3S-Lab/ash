@@ -1,7 +1,7 @@
 use super::{
-    ErrorCode, ErrorRecord, ErrorStage, FileKind, FinalResponse, ListEntry, PathMapping,
-    ProcessResult, RESULT_RETAINED, RESULT_TRUNCATED, ReadResult, ResponseError, ResultData,
-    RetryClass, SearchMatch, Status, StreamResult, TerminationKind,
+    CancelResult, CancellationState, ErrorCode, ErrorRecord, ErrorStage, FileKind, FinalResponse,
+    ListEntry, PathMapping, ProcessResult, RESULT_RETAINED, RESULT_TRUNCATED, ReadResult,
+    ResponseError, ResultData, RetryClass, SearchMatch, Status, StreamResult, TerminationKind,
 };
 use crate::ason::decode;
 
@@ -66,6 +66,10 @@ fn every_m1_result_shape_encodes_as_canonical_ason() {
             modified_millis: None,
         }]),
         ResultData::Search(vec![]),
+        ResultData::Cancel(CancelResult {
+            target_id: 7,
+            state: CancellationState::Signaled,
+        }),
     ];
     for (index, data) in results.into_iter().enumerate() {
         let response =

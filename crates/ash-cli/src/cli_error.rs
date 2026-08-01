@@ -44,6 +44,8 @@ pub enum CliError {
     MissingHandshake,
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error(transparent)]
+    Task(#[from] tokio::task::JoinError),
 }
 
 impl CliError {
@@ -73,6 +75,7 @@ impl CliError {
             | Self::Response(_)
             | Self::Engine(_)
             | Self::Operation(_)
+            | Self::Task(_)
             | Self::Platform(_) => 10,
         }
     }
@@ -96,7 +99,8 @@ impl CliError {
             | Self::Response(_)
             | Self::Engine(_)
             | Self::Platform(_)
-            | Self::Operation(_) => 70,
+            | Self::Operation(_)
+            | Self::Task(_) => 70,
         }
     }
 

@@ -1,6 +1,6 @@
 # ASH/1 protocol and ASON
 
-Status: canonical ASON, framing, handshake, typed M1 schemas, and exec/read/list/search runtime paths are implemented
+Status: canonical ASON, framing, handshake, typed M1 schemas, concurrent exec/read/list/search, and cancellation runtime paths are implemented
 
 ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
 
@@ -169,7 +169,7 @@ d{ap,av,zp,zv,frm,out,ops,cap,os,arch,sid,n}:
 1,0,1,0,1048576,65536,0,0,linux,x86_64,1,nonce-7
 ```
 
-The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises `0x0f`, exactly the implemented `exec`, `read`, `list`, and `search` bits; later bits remain clear until their complete operation contracts land.
+The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises `0x20f`, exactly the implemented `exec`, `read`, `list`, `search`, and `cancel` bits; later bits remain clear until their complete operation contracts land.
 
 The handshake is retained by the adapter and is not repeated in each model-visible result.
 
@@ -270,10 +270,13 @@ Operation argument records are positional only after their declared columns, so 
 | `r` | `a{p,m,o,n}:` | path vector, range mode, offset, length |
 | `l` | `a{p,d,f}:` | root path vector, maximum depth, flags |
 | `g` | `a{q,p,f}:` | query, root path vector, flags |
+| `k` | `a{i}:` | active target request identifier |
 
 `exec` invokes `x` directly. Environment entries use `NAME=value` to set and `-NAME` to remove; duplicate names are invalid. `in` is `~`, inline text, or a retained `@reference`. Exec flag bit 0 clears the inherited environment before applying deltas.
 
 Read mode `0` is a zero-based byte range and mode `1` is a one-based line range. A zero length is invalid. List flag bits are 0 include hidden, 1 files only, and 2 directories only. Search flag bits are 0 regular expression, 1 case-insensitive, and 2 include hidden. Unknown flag bits fail schema validation rather than being silently ignored.
+
+`cancel` is a control-plane request. Its own request identifier must differ from the target. State `1` means cancellation was signaled to queued or running work; state `0` means the target was no longer active. Both are successful, idempotent outcomes.
 
 ## 10. Process result
 
@@ -295,6 +298,7 @@ M1 result data uses these fixed schemas:
 | `r` | `d[N]{p,o,n,h,t,r}:` | path ID, actual offset and length, BLAKE3 digest, text projection, retained reference |
 | `l` | `d[N]{p,k,z,m}:` | path ID, file kind, byte size, optional modified Unix milliseconds |
 | `g` | `d[N]{p,l,c,t}:` | path ID, one-based line and column, matching line projection |
+| `k` | `d{i,z}:` | target request identifier and cancellation state |
 
 Null (`~`) omits an unavailable projection, code, timestamp, or reference. Result flag bits are 0 truncated, 1 reduced, 2 normalized text, 3 retained evidence, 4 partial completion, and 5 redacted. Unknown bits are invalid. Any truncated result must retain inspectable evidence, and the retained flag must agree with the references actually present.
 
@@ -307,6 +311,8 @@ Long-running operations may emit event frames. Events are typed as lifecycle, pr
 Each event has a monotonically increasing sequence number per request. A final result reports the last sequence number so the adapter can detect loss. Events are advisory unless their schema marks them as retained evidence.
 
 Output events respect the same total budget as the final projection. A caller cannot evade a token ceiling by requesting many small stream frames.
+
+The RPC transport registers each data-plane request before reading the next frame, executes independent requests concurrently under the session governor, and processes cancellation frames without waiting for earlier work to finish. Final response frames are emitted in request-input order, so scheduling completion order cannot change the byte stream. Both executing requests and the not-yet-emitted response window are bounded; once the latter is full, framed input receives transport backpressure until its leading request completes.
 
 ## 12. Budgets and truncation
 
@@ -359,7 +365,7 @@ r:@10
 
 The schema negotiated for error code `31` defines the meanings and types of its payload slots. Agent instructions need describe each stable code only once.
 
-Error code families reserve ranges for protocol, validation, capability, path, process, filesystem, budget, reference, and internal failures. New minor protocol levels may add codes but cannot change an existing code's meaning.
+Error code families reserve ranges for protocol, validation, capability, path, process, filesystem, budget, reference, and internal failures. Budget codes `600`, `601`, and `602` identify immediate output, retained storage, and in-flight concurrency ceilings respectively. New minor protocol levels may add codes but cannot change an existing code's meaning.
 
 Before a request identifier exists, CLI bootstrap failures are written to stderr as bare ASON rather than prose:
 

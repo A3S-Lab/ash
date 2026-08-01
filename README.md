@@ -5,7 +5,7 @@
 <p align="center"><strong>AI Native Shell</strong> · typed parallel execution · compact model context</p>
 
 > [!IMPORTANT]
-> `ash` is pre-release. Source builds now execute typed `exec`, `read`, `list`, and `search` requests through one-shot or persistent RPC paths; no supported binary release or installer is published yet.
+> `ash` is pre-release. Source builds now execute typed `exec`, `read`, `list`, and `search` requests plus active-request cancellation through one-shot or persistent RPC paths; no supported binary release or installer is published yet.
 
 `ash` is a greenfield shell designed around coding agents rather than terminal users. It turns shell work into typed programs, executes independent work across bounded I/O and CPU planes, and returns only the evidence worth placing in an LLM context.
 
@@ -76,7 +76,7 @@ Run one canonical request from the repository root:
 cargo run -p a3s-ash -- run < spec/fixtures/ason/search-request.ason
 ```
 
-The pinned Rust workspace currently verifies typed M1 schemas, canonical framed handshakes, executable `exec/read/list/search`, bounded retention, atomic budgets, hierarchical permits, cancellation-safe sessions, workspace-confined paths, direct argv launch with timeout-safe process-tree cleanup, and deterministic multi-core collection. `ash rpc` uses the same engine behind a warm length-framed session. This is a development checkpoint, not an installation path.
+The pinned Rust workspace currently verifies typed M1 schemas, canonical framed handshakes, concurrent `exec/read/list/search`, preemptive cancellation, bounded retention, atomic budgets, hierarchical permits, workspace-confined paths, direct argv launch with timeout-safe process-tree cleanup, and deterministic multi-core collection. `ash rpc` executes independent requests concurrently while emitting final frames in stable input order. This is a development checkpoint, not an installation path.
 
 ## Release contract
 

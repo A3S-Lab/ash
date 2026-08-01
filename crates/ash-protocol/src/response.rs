@@ -19,6 +19,7 @@ const EXEC_COLUMNS: &[&str] = &["k", "c", "ms", "o", "e", "ro", "re"];
 const READ_COLUMNS: &[&str] = &["p", "o", "n", "h", "t", "r"];
 const LIST_COLUMNS: &[&str] = &["p", "k", "z", "m"];
 const SEARCH_COLUMNS: &[&str] = &["p", "l", "c", "t"];
+const CANCEL_COLUMNS: &[&str] = &["i", "z"];
 const ERROR_COLUMNS: &[&str] = &["c", "q", "p", "x", "a"];
 
 /// Stable final status discriminants.
@@ -85,6 +86,7 @@ pub enum ErrorCode {
     Filesystem = 500,
     OutputBudget = 600,
     StorageBudget = 601,
+    ConcurrencyBudget = 602,
     UnknownReference = 700,
     Internal = 900,
 }
@@ -266,6 +268,7 @@ pub enum ResultData {
     Read(Vec<ReadResult>),
     List(Vec<ListEntry>),
     Search(Vec<SearchMatch>),
+    Cancel(CancelResult),
 }
 
 impl ResultData {
@@ -275,6 +278,7 @@ impl ResultData {
             Self::Read(results) => encode_read(results),
             Self::List(entries) => encode_list(entries),
             Self::Search(matches) => encode_search(matches),
+            Self::Cancel(result) => result.encode(),
         }
     }
 
@@ -284,7 +288,7 @@ impl ResultData {
                 result.stdout.reference.is_some() || result.stderr.reference.is_some()
             }
             Self::Read(results) => results.iter().any(|result| result.reference.is_some()),
-            Self::List(_) | Self::Search(_) => false,
+            Self::List(_) | Self::Search(_) | Self::Cancel(_) => false,
         }
     }
 
@@ -329,8 +333,38 @@ impl ResultData {
                     return Err(ResponseError::InvalidData);
                 }
             }
+            Self::Cancel(result) => {
+                if result.target_id == 0 {
+                    return Err(ResponseError::InvalidData);
+                }
+            }
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum CancellationState {
+    NotActive = 0,
+    Signaled = 1,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CancelResult {
+    pub target_id: u64,
+    pub state: CancellationState,
+}
+
+impl CancelResult {
+    fn encode(self) -> Result<Value, BuildError> {
+        Ok(Value::Record(Record::new(
+            keys(CANCEL_COLUMNS)?,
+            vec![
+                unsigned_cell(self.target_id),
+                unsigned_cell(u64::from(self.state as u8)),
+            ],
+        )?))
     }
 }
 

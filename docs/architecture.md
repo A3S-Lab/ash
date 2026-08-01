@@ -61,7 +61,7 @@ Reduction may omit data from the immediate response, but it must never silently 
 
 ### 2.7 Parallelize work, not observable order
 
-Independent graph nodes and splittable operations use all available CPU cores when the workload is large enough to repay scheduling cost. I/O readiness and CPU work run on separate executors so repository scans cannot delay pipe draining, cancellation, or RPC progress. Parallel completion order is never protocol order: records pass through a stable merge before reduction and ASON encoding.
+Independent graph nodes and splittable operations use all available CPU cores when the workload is large enough to repay scheduling cost. I/O readiness and CPU work run on separate executors so repository scans cannot delay pipe draining, cancellation, or RPC progress. Parallel completion order is never protocol order: records pass through a stable merge before reduction and ASON encoding, and concurrent request finals are sequenced by input order.
 
 ## 3. System context
 

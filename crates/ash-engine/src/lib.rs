@@ -14,4 +14,4 @@ pub use governor::{
     Governor, GovernorError, GovernorLimits, HierarchicalGovernor, HierarchicalPermit, PermitKind,
 };
 pub use parallel::{ComputePool, Parallelism, ParallelismError};
-pub use runtime::{Engine, EngineError, Program, Session, SessionConfig};
+pub use runtime::{Engine, EngineError, Program, RegisteredProgram, Session, SessionConfig};

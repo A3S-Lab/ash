@@ -116,10 +116,23 @@ struct SessionInner {
 
 impl Session {
     pub async fn begin(&self, request: &Request) -> Result<Program, EngineError> {
+        self.register(request)?.start().await
+    }
+
+    /// Registers a request synchronously before it is scheduled.
+    ///
+    /// The split registration/start lifecycle lets the transport keep reading
+    /// control frames while a request waits for a program permit. A cancel
+    /// request can therefore target queued work as well as running work.
+    pub fn register(&self, request: &Request) -> Result<RegisteredProgram, EngineError> {
         if self.inner.closed.load(Ordering::Acquire) {
             return Err(EngineError::SessionClosed);
         }
         let cancellation = CancellationToken::default();
+        let budget = Arc::new(BudgetTracker::new(
+            request.budget(),
+            self.inner.max_output_bytes,
+        )?);
         {
             let mut active = self.inner.lock_active()?;
             if self.inner.closed.load(Ordering::Acquire) {
@@ -130,33 +143,12 @@ impl Session {
             }
             active.insert(request.id(), cancellation.clone());
         }
-
-        let budget = match BudgetTracker::new(request.budget(), self.inner.max_output_bytes) {
-            Ok(budget) => Arc::new(budget),
-            Err(error) => {
-                self.inner.unregister(request.id());
-                return Err(error.into());
-            }
-        };
-        let permit = match self
-            .inner
-            .governor
-            .acquire(PermitKind::Program, budget.deadline(), &cancellation)
-            .await
-        {
-            Ok(permit) => permit,
-            Err(error) => {
-                self.inner.unregister(request.id());
-                return Err(error.into());
-            }
-        };
-
-        Ok(Program {
+        Ok(RegisteredProgram {
             session: Arc::clone(&self.inner),
             request_id: request.id(),
             cancellation,
             budget,
-            _program_permit: permit,
+            registered: true,
         })
     }
 
@@ -194,6 +186,45 @@ impl Session {
     #[must_use]
     pub fn paths(&self) -> &Arc<PathDictionary> {
         &self.inner.paths
+    }
+}
+
+pub struct RegisteredProgram {
+    session: Arc<SessionInner>,
+    request_id: u64,
+    cancellation: CancellationToken,
+    budget: Arc<BudgetTracker>,
+    registered: bool,
+}
+
+impl RegisteredProgram {
+    pub async fn start(mut self) -> Result<Program, EngineError> {
+        let permit = self
+            .session
+            .governor
+            .acquire(
+                PermitKind::Program,
+                self.budget.deadline(),
+                &self.cancellation,
+            )
+            .await?;
+        let program = Program {
+            session: Arc::clone(&self.session),
+            request_id: self.request_id,
+            cancellation: self.cancellation.clone(),
+            budget: Arc::clone(&self.budget),
+            _program_permit: permit,
+        };
+        self.registered = false;
+        Ok(program)
+    }
+}
+
+impl Drop for RegisteredProgram {
+    fn drop(&mut self) {
+        if self.registered {
+            self.session.unregister(self.request_id);
+        }
     }
 }
 
@@ -301,7 +332,7 @@ mod tests {
     use ash_protocol::request::{Arguments, Budget, Request, SearchArgs};
 
     use super::{Engine, EngineError, SessionConfig};
-    use crate::Parallelism;
+    use crate::{GovernorError, Parallelism};
 
     fn request(id: u64) -> Request {
         Request::new(
@@ -346,5 +377,21 @@ mod tests {
             session.begin(&request(3)).await,
             Err(EngineError::SessionClosed)
         ));
+    }
+
+    #[tokio::test]
+    async fn registered_work_can_be_cancelled_before_it_starts() {
+        let parallelism = Parallelism::for_available_cpus(2);
+        let engine = Engine::new(parallelism).expect("engine");
+        let session = engine
+            .open_session(SessionConfig::new(1, ".", 4096, parallelism))
+            .expect("session");
+        let registered = session.register(&request(9)).expect("register");
+        assert!(session.cancel(9).expect("cancel"));
+        assert!(matches!(
+            registered.start().await,
+            Err(EngineError::Governor(GovernorError::Cancelled))
+        ));
+        assert!(!session.cancel(9).expect("registration released"));
     }
 }

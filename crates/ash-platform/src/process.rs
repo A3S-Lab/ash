@@ -139,6 +139,15 @@ impl ProcessHandle {
     }
 }
 
+impl Drop for ProcessHandle {
+    fn drop(&mut self) {
+        // `start_kill` is overridden by the Unix process-group and Windows
+        // Job Object wrappers, so aborting an async request cannot orphan its
+        // descendants even though Drop itself cannot await reaping.
+        let _ = self.child.start_kill();
+    }
+}
+
 #[cfg(unix)]
 fn normalize_exit(status: std::process::ExitStatus) -> ProcessExit {
     use std::os::unix::process::ExitStatusExt;
@@ -309,6 +318,42 @@ fn main() {
         assert!(
             !directory.0.join("escaped").exists(),
             "descendant survived process-tree termination"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_a_process_handle_terminates_its_descendants() {
+        let directory = TestDirectory::new();
+        let executable = compile_process_tree_helper(&directory);
+        let workspace = Workspace::new(&directory.0).expect("workspace");
+        let process = workspace
+            .spawn(&ProcessSpec {
+                executable,
+                argv: vec![
+                    "parent".to_owned(),
+                    "ready".to_owned(),
+                    "escaped".to_owned(),
+                ],
+                cwd: ".".to_owned(),
+                environment: vec![],
+                clear_environment: false,
+                pipe_stdin: false,
+            })
+            .expect("spawn process tree");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !directory.0.join("ready").is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("descendant should start");
+        drop(process);
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+        assert!(
+            !directory.0.join("escaped").exists(),
+            "descendant survived process-handle drop"
         );
     }
 }

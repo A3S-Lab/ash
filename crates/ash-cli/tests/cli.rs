@@ -1,12 +1,86 @@
+use std::fs;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use ash_ops::PortableOperations;
+use ash_protocol::Operation;
 use ash_protocol::ason::decode;
 use ash_protocol::handshake::{HandshakePreferences, HandshakeRequest, HandshakeResponse};
 use ash_protocol::request::{
-    Arguments, Budget, ExecArgs, InputSource, ReadArgs, ReadMode, Request,
+    Arguments, Budget, CancelArgs, ExecArgs, InputSource, ReadArgs, ReadMode, Request,
 };
+
+static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+struct TestDirectory(PathBuf);
+
+impl TestDirectory {
+    fn new() -> Self {
+        let id = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("ash-cli-{}-{id}", std::process::id()));
+        fs::create_dir(&path).expect("create test directory");
+        Self(path)
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn compile_rpc_helper(directory: &TestDirectory) -> String {
+    let bin_directory = directory.0.join("bin");
+    fs::create_dir(&bin_directory).expect("create bin directory");
+    let source = directory.0.join("rpc-helper.rs");
+    fs::write(
+        &source,
+        r#"
+use std::{env, fs, process, thread, time::{Duration, Instant}};
+
+fn main() {
+    let mut arguments = env::args().skip(1);
+    match arguments.next().as_deref() {
+        Some("sleep") => {
+            let millis = arguments.next().expect("milliseconds").parse().expect("number");
+            thread::sleep(Duration::from_millis(millis));
+        }
+        Some("gate") => {
+            let own = arguments.next().expect("own marker");
+            let peer = arguments.next().expect("peer marker");
+            fs::write(own, b"ready").expect("write marker");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !std::path::Path::new(&peer).is_file() {
+                if Instant::now() >= deadline {
+                    process::exit(9);
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            println!("ready");
+        }
+        _ => process::exit(2),
+    }
+}
+"#,
+    )
+    .expect("write helper source");
+    let executable_name = if cfg!(windows) {
+        "rpc-helper.exe"
+    } else {
+        "rpc-helper"
+    };
+    let status = Command::new("rustc")
+        .arg(&source)
+        .arg("-o")
+        .arg(bin_directory.join(executable_name))
+        .status()
+        .expect("run rustc");
+    assert!(status.success(), "compile RPC helper");
+    format!("bin/{executable_name}")
+}
 
 fn run(arguments: &[&str], input: &[u8]) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ash"))
@@ -185,7 +259,7 @@ fn rpc_negotiates_one_canonical_framed_session() {
     assert_eq!(response.nonce(), "integration-17");
     assert_eq!(
         response.operation_mask(),
-        PortableOperations::operation_mask()
+        PortableOperations::operation_mask() | Operation::Cancel.mask()
     );
 }
 
@@ -226,4 +300,121 @@ fn rpc_executes_a_request_after_the_handshake() {
     assert_eq!(decode(result).expect("result ASON").encode(), result);
     assert!(result.starts_with("t:3\ni:41\ns:0\n"));
     assert!(result.contains("Cargo.toml"));
+}
+
+#[test]
+fn rpc_executes_independent_requests_concurrently_in_input_order() {
+    let directory = TestDirectory::new();
+    let executable = compile_rpc_helper(&directory);
+    let handshake = HandshakeRequest::new(
+        50,
+        directory.0.to_string_lossy(),
+        "integration-50",
+        HandshakePreferences {
+            operation_mask: u64::MAX,
+            ..HandshakePreferences::default()
+        },
+    )
+    .expect("handshake")
+    .encode()
+    .expect("encode handshake")
+    .encode();
+    let request = |id, own: &str, peer: &str| {
+        Request::new(
+            id,
+            Arguments::Exec(
+                ExecArgs::new(
+                    &executable,
+                    vec!["gate".to_owned(), own.to_owned(), peer.to_owned()],
+                    ".",
+                    vec![],
+                    InputSource::None,
+                    0,
+                )
+                .expect("exec"),
+            ),
+            Budget::new(1_024, 8, 10_000).expect("budget"),
+        )
+        .expect("request")
+        .encode()
+        .expect("encode")
+        .encode()
+    };
+    let first = request(51, "first", "second");
+    let second = request(52, "second", "first");
+    let mut input = frame(handshake.as_bytes());
+    input.extend(frame(first.as_bytes()));
+    input.extend(frame(second.as_bytes()));
+
+    let output = run(&["rpc"], &input);
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    let frames = split_frames(&output.stdout);
+    assert_eq!(frames.len(), 3);
+    let first = std::str::from_utf8(frames[1]).expect("first response");
+    let second = std::str::from_utf8(frames[2]).expect("second response");
+    assert!(first.starts_with("t:3\ni:51\ns:0\n"), "{first}");
+    assert!(second.starts_with("t:3\ni:52\ns:0\n"), "{second}");
+}
+
+#[test]
+fn rpc_cancel_preempts_an_active_process() {
+    let directory = TestDirectory::new();
+    let executable = compile_rpc_helper(&directory);
+    let handshake = HandshakeRequest::new(
+        60,
+        directory.0.to_string_lossy(),
+        "integration-60",
+        HandshakePreferences {
+            operation_mask: u64::MAX,
+            ..HandshakePreferences::default()
+        },
+    )
+    .expect("handshake")
+    .encode()
+    .expect("encode handshake")
+    .encode();
+    let exec = Request::new(
+        61,
+        Arguments::Exec(
+            ExecArgs::new(
+                executable,
+                vec!["sleep".to_owned(), "10000".to_owned()],
+                ".",
+                vec![],
+                InputSource::None,
+                0,
+            )
+            .expect("exec"),
+        ),
+        Budget::new(1_024, 8, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode")
+    .encode();
+    let cancel = Request::new(
+        62,
+        Arguments::Cancel(CancelArgs::new(61).expect("cancel")),
+        Budget::new(64, 1, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode")
+    .encode();
+    let mut input = frame(handshake.as_bytes());
+    input.extend(frame(exec.as_bytes()));
+    input.extend(frame(cancel.as_bytes()));
+
+    let started = Instant::now();
+    let output = run(&["rpc"], &input);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    let frames = split_frames(&output.stdout);
+    assert_eq!(frames.len(), 3);
+    let exec = std::str::from_utf8(frames[1]).expect("exec response");
+    let cancel = std::str::from_utf8(frames[2]).expect("cancel response");
+    assert!(exec.starts_with("t:3\ni:61\ns:7\n"), "{exec}");
+    assert!(exec.contains("e{c,q,p,x,a}:\n403,0,4,~,~\n"), "{exec}");
+    assert!(cancel.starts_with("t:3\ni:62\ns:0\n"), "{cancel}");
+    assert!(cancel.contains("d{i,z}:\n61,1\n"), "{cancel}");
 }

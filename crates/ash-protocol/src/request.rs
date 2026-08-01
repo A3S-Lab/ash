@@ -13,6 +13,7 @@ const EXEC_COLUMNS: &[&str] = &["x", "v", "c", "e", "in", "f"];
 const READ_COLUMNS: &[&str] = &["p", "m", "o", "n"];
 const LIST_COLUMNS: &[&str] = &["p", "d", "f"];
 const SEARCH_COLUMNS: &[&str] = &["q", "p", "f"];
+const CANCEL_COLUMNS: &[&str] = &["i"];
 
 pub const MAX_REQUEST_TOKENS: u32 = 1_048_576;
 pub const MAX_REQUEST_RECORDS: u32 = 1_000_000;
@@ -91,6 +92,9 @@ impl Request {
     pub fn new(id: u64, arguments: Arguments, budget: Budget) -> Result<Self, RequestError> {
         if id == 0 {
             return Err(RequestError::InvalidUnsigned("i"));
+        }
+        if matches!(&arguments, Arguments::Cancel(cancel) if cancel.target_id() == id) {
+            return Err(RequestError::UnexpectedValue("i"));
         }
         arguments.validate()?;
         budget.validate()?;
@@ -180,6 +184,7 @@ pub enum Arguments {
     Read(ReadArgs),
     List(ListArgs),
     Search(SearchArgs),
+    Cancel(CancelArgs),
 }
 
 impl Arguments {
@@ -190,6 +195,7 @@ impl Arguments {
             Self::Read(_) => Operation::Read,
             Self::List(_) => Operation::List,
             Self::Search(_) => Operation::Search,
+            Self::Cancel(_) => Operation::Cancel,
         }
     }
 
@@ -199,6 +205,7 @@ impl Arguments {
             Operation::Read => ReadArgs::decode(record).map(Self::Read),
             Operation::List => ListArgs::decode(record).map(Self::List),
             Operation::Search => SearchArgs::decode(record).map(Self::Search),
+            Operation::Cancel => CancelArgs::decode(record).map(Self::Cancel),
             _ => Err(RequestError::UnsupportedOperation),
         }
     }
@@ -209,6 +216,7 @@ impl Arguments {
             Self::Read(arguments) => arguments.encode(),
             Self::List(arguments) => arguments.encode(),
             Self::Search(arguments) => arguments.encode(),
+            Self::Cancel(arguments) => arguments.encode(),
         }
     }
 
@@ -218,6 +226,7 @@ impl Arguments {
             Self::Read(arguments) => arguments.validate(),
             Self::List(arguments) => arguments.validate(),
             Self::Search(arguments) => arguments.validate(),
+            Self::Cancel(arguments) => arguments.validate(),
         }
     }
 }
@@ -571,6 +580,44 @@ impl SearchArgs {
     #[must_use]
     pub const fn flags(&self) -> u32 {
         self.flags
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CancelArgs {
+    target_id: u64,
+}
+
+impl CancelArgs {
+    pub fn new(target_id: u64) -> Result<Self, RequestError> {
+        let arguments = Self { target_id };
+        arguments.validate()?;
+        Ok(arguments)
+    }
+
+    fn decode(record: &Record) -> Result<Self, RequestError> {
+        expect_columns(record, CANCEL_COLUMNS)?;
+        Self::new(unsigned_cell(&record.values()[0], "i")?)
+    }
+
+    fn encode(self) -> Result<Value, BuildError> {
+        Ok(Value::Record(Record::new(
+            keys(CANCEL_COLUMNS)?,
+            vec![unsigned_value(self.target_id)],
+        )?))
+    }
+
+    fn validate(self) -> Result<(), RequestError> {
+        if self.target_id == 0 {
+            Err(RequestError::InvalidUnsigned("i"))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[must_use]
+    pub const fn target_id(self) -> u64 {
+        self.target_id
     }
 }
 

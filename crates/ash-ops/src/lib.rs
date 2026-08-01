@@ -58,6 +58,7 @@ impl PortableOperations {
             Arguments::Search(arguments) => {
                 search::execute(&self.workspace, request, arguments, program).await
             }
+            Arguments::Cancel(_) => Err(OperationError::Unsupported),
         };
         match result {
             Ok(response) => Ok(response),

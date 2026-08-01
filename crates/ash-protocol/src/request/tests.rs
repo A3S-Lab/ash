@@ -1,7 +1,7 @@
 use super::{
-    Arguments, Budget, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource, LIST_INCLUDE_HIDDEN,
-    ListArgs, READ_COLUMNS, ReadArgs, ReadMode, Request, RequestError, SEARCH_CASE_INSENSITIVE,
-    SEARCH_REGEX, SearchArgs,
+    Arguments, Budget, CancelArgs, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource,
+    LIST_INCLUDE_HIDDEN, ListArgs, READ_COLUMNS, ReadArgs, ReadMode, Request, RequestError,
+    SEARCH_CASE_INSENSITIVE, SEARCH_REGEX, SearchArgs,
 };
 use crate::Operation;
 use crate::ason::{Atom, Cell, Document, Field, Key, Record, Value, decode};
@@ -10,6 +10,7 @@ const SEARCH_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/search
 const EXEC_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/exec-request.ason");
 const READ_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/read-request.ason");
 const LIST_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/list-request.ason");
+const CANCEL_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/cancel-request.ason");
 
 fn budget() -> Budget {
     Budget::new(256, 64, 30_000).expect("budget")
@@ -35,6 +36,7 @@ fn all_m1_request_fixtures_are_canonical_typed_messages() {
         (READ_REQUEST, Operation::Read),
         (LIST_REQUEST, Operation::List),
         (SEARCH_REQUEST, Operation::Search),
+        (CANCEL_REQUEST, Operation::Cancel),
     ];
     for (fixture, operation) in expected {
         let request = Request::decode(&decode(fixture).expect("ASON")).expect("schema");
@@ -92,6 +94,12 @@ fn every_m1_argument_schema_round_trips() {
             budget(),
         )
         .expect("request"),
+        Request::new(
+            5,
+            Arguments::Cancel(CancelArgs::new(4).expect("cancel")),
+            budget(),
+        )
+        .expect("request"),
     ];
 
     for request in requests {
@@ -134,6 +142,15 @@ fn line_reads_are_one_based_and_environment_deltas_are_unique() {
         ),
         Err(RequestError::InvalidText("e"))
     ));
+    assert_eq!(CancelArgs::new(0), Err(RequestError::InvalidUnsigned("i")));
+    assert_eq!(
+        Request::new(
+            7,
+            Arguments::Cancel(CancelArgs::new(7).expect("cancel")),
+            budget(),
+        ),
+        Err(RequestError::UnexpectedValue("i"))
+    );
 }
 
 #[test]
