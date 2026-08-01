@@ -1,0 +1,323 @@
+# ASH/1 protocol and ASON
+
+Status: architecture baseline
+
+ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
+
+## 1. Protocol layers
+
+ASH/1 separates three concerns:
+
+1. **Semantic model** — typed requests, programs, events, results, errors, references, and capabilities.
+2. **Framing** — message boundaries on a persistent byte stream.
+3. **ASON encoding** — canonical text presented to the agent and carried by the initial stdio transport.
+
+The same semantic request is used by persistent sessions and one-shot CLI calls. One-shot arguments are decoded directly into a request; stdout contains one bare ASON result document terminated by EOF.
+
+## 2. ASON goals
+
+ASON means **Agent Serialized Object Notation**. It is optimized for model accuracy per completed task, not for human readability.
+
+The format is designed to:
+
+- declare repeated field names once;
+- use operation schemas instead of repeating type information;
+- avoid object braces, closing tags, comments, and decorative whitespace;
+- represent homogeneous records as compact tables;
+- reuse session-local path and result identifiers;
+- keep errors structural and stable;
+- remain incrementally parseable with hard resource limits;
+- produce exactly one canonical encoding for a typed value.
+
+ASON is not intended to replace JSON in public APIs, configuration files, release manifests, or databases. It is the native Agent-to-`ash` notation.
+
+## 3. Core syntax
+
+ASON is UTF-8. `LF` is the only encoded line separator. A canonical document has no blank lines, comments, indentation, or trailing spaces.
+
+### 3.1 Scalar field
+
+```ason
+key:value
+```
+
+The schema defines the value type. ASON does not guess dates, numbers, booleans, paths, or identifiers from a string.
+
+### 3.2 Record
+
+```ason
+key{field_a,field_b,field_c}:
+value_a,value_b,value_c
+```
+
+The header declares fields once. Exactly one row follows.
+
+### 3.3 Homogeneous table
+
+```ason
+key[2]{field_a,field_b}:
+a1,b1
+a2,b2
+```
+
+The declared row count is mandatory. Exactly that number of rows follows, allowing a parser to find the next top-level field without indentation or closing syntax. Streaming operations emit several independently framed tables rather than an unknown-length table.
+
+### 3.4 Vector
+
+```ason
+key:[a,b,c]
+```
+
+Vectors contain values of the element type declared by the schema. Nested unbounded vectors are prohibited.
+
+### 3.5 Null and references
+
+```ason
+value:~
+result:@7
+```
+
+`~` is explicit null. `@` followed by an unsigned decimal session identifier is a typed reference. References are meaningful only in the session that issued them.
+
+### 3.6 Strings
+
+A string may be bare only when every byte is valid UTF-8 and every character is in this set:
+
+```text
+A-Z a-z 0-9 _ . / @ + -
+```
+
+All other strings use double quotes with `\\`, `\"`, `\n`, `\r`, `\t`, and `\u{...}` escapes. The encoder quotes a string whenever a bare representation could conflict with a reserved scalar in its schema position.
+
+Large strings are not serialized inline. They are retained and represented by a result reference plus a bounded excerpt.
+
+### 3.7 Numbers and booleans
+
+- Signed and unsigned integers use canonical base-10 notation with no leading zeroes.
+- Floating-point fields use the shortest finite decimal that round-trips to the declared type.
+- Non-finite floats are rejected unless an operation defines a dedicated enum value.
+- Booleans encode as `0` and `1` because the schema carries the boolean type.
+- Enums use stable non-negative integer discriminants.
+
+### 3.8 Binary values
+
+Binary values are never Base64-encoded in the default Agent response. A small binary field may use lowercase hexadecimal only when its operation schema explicitly permits it. All other binary data is retained as an artifact reference.
+
+## 4. Canonicalization
+
+Canonical ASON is required for fixtures, digest binding, permits, and token benchmarks.
+
+- Top-level fields follow the order defined by the message schema.
+- Record and table columns follow schema order.
+- Optional absent fields are omitted; explicit null remains `~`.
+- Maps whose keys are not statically known are sorted by UTF-8 byte order.
+- Strings use the shortest valid escaped representation.
+- No insignificant whitespace is emitted.
+- A document ends with exactly one `LF` in text mode.
+- Duplicate fields, duplicate dynamic-map keys, and extra table cells are errors.
+
+Canonicalization is performed from typed values. Text received from a caller is parsed and then re-encoded before it is used in a permit digest.
+
+## 5. Framing
+
+Persistent `ash rpc` uses:
+
+```text
+4-byte unsigned big-endian payload length
+N bytes canonical ASON payload
+```
+
+The length prefix is transport metadata and is never shown to the LLM. The initial hard payload ceiling is 8 MiB, with a lower negotiated session default. Large content must use streaming events or result references.
+
+A receiver must reject a frame before allocation when its declared length exceeds the negotiated ceiling. Zero-length frames are invalid. EOF inside a frame terminates the session with a framing error and cancels owned programs.
+
+## 6. Handshake
+
+The client opens a session with a handshake containing:
+
+- ASH protocol major and supported minor range;
+- ASON format major and supported minor range;
+- maximum frame and desired output budgets;
+- supported operation and reducer capabilities;
+- optional tokenizer profile identifier;
+- workspace capability request;
+- client session nonce.
+
+The server returns the selected versions, effective limits, operation capability bitmap, platform identifiers, session identifier, and the compact field dictionary.
+
+The handshake is retained by the adapter and is not repeated in each model-visible result.
+
+## 7. Message envelope
+
+Every message begins with a type, request identifier, and type-specific fields. Core field names are deliberately short and stable:
+
+| Field | Meaning |
+| --- | --- |
+| `t` | message type |
+| `i` | request or program identifier |
+| `o` | operation identifier |
+| `a` | typed operation arguments |
+| `u` | resource and output budget |
+| `s` | final status |
+| `p` | path dictionary delta |
+| `d` | result data |
+| `e` | structured error |
+| `z` | result flags |
+| `r` | retained result reference |
+
+Message types are numeric enums:
+
+| Value | Type |
+| ---: | --- |
+| `0` | handshake |
+| `1` | request |
+| `2` | event |
+| `3` | final result |
+| `4` | cancellation |
+
+## 8. Example request and result
+
+Search request:
+
+```ason
+t:1
+i:17
+o:g
+a{q,p,f}:
+TODO,[src],0
+u{tok,rec,ms}:
+256,64,30000
+```
+
+Search result:
+
+```ason
+t:3
+i:17
+s:0
+p[1]{i,v}:
+1,src/lib.rs
+d[2]{p,l,c,t}:
+1,42,7,"TODO item"
+1,87,3,"FIXME item"
+z:0
+r:~
+```
+
+The path `src/lib.rs` is introduced once with identifier `1`. Later messages in the same session emit only `1`. If the search is reduced, `z` contains the reduction flag and `r` points to the retained full result.
+
+## 9. Core operation identifiers
+
+The first protocol level reserves single-character presentation identifiers:
+
+| Identifier | Operation | Required result behavior |
+| --- | --- | --- |
+| `x` | direct process execution | normalized termination plus bounded stream projections |
+| `r` | file read | explicit ranges, digests, and path identifiers |
+| `l` | list, glob, or stat | compact paths and typed metadata |
+| `g` | literal or regex search | homogeneous match records |
+| `p` | compare-and-swap patch | per-file commit or conflict records |
+| `f` | filesystem mutation | journaled mutation outcomes |
+| `b` | batch or dependency graph | node-status table and selected outputs |
+| `h` | retained result operation | slice, search, project, or materialize |
+| `s` | workspace snapshot or delta | versioned file-change records |
+| `k` | cancellation | acknowledged target and final cancellation state |
+
+These identifiers are stable within ASH/1. Internal Rust enum ordering is not part of the protocol.
+
+## 10. Process result
+
+A process result contains:
+
+- normalized termination kind;
+- exit code or platform signal code when applicable;
+- elapsed monotonic time;
+- stdout and stderr projections;
+- stdout and stderr retained references when present;
+- truncation and redaction flags;
+- observed workspace delta when requested.
+
+Success with `status-only` output does not repeat empty stdout or stderr fields. Failure reserves a diagnostic budget even if normal output has exhausted its allocation.
+
+## 11. Events and streaming
+
+Long-running operations may emit event frames. Events are typed as lifecycle, progress counters, projected output, diagnostic records, or artifact availability. Human prose progress messages are not a core event type.
+
+Each event has a monotonically increasing sequence number per request. A final result reports the last sequence number so the adapter can detect loss. Events are advisory unless their schema marks them as retained evidence.
+
+Output events respect the same total budget as the final projection. A caller cannot evade a token ceiling by requesting many small stream frames.
+
+## 12. Budgets and truncation
+
+Core budgets include:
+
+- wall-clock milliseconds;
+- maximum parallel nodes and child processes;
+- bytes captured per stream;
+- bytes retained per program and session;
+- records emitted;
+- estimated or negotiated model tokens;
+- maximum path dictionary growth.
+
+Result flag bits identify truncation, reduction, redaction, normalized text, partial graph completion, and retained full evidence. A truncation flag without either a retained reference or an explicit `retain=0` request is an internal error.
+
+## 13. Path dictionary
+
+Paths are normalized once and assigned increasing unsigned session identifiers. A response carries only new entries. Identifiers are never reused during a session, even after the referenced path disappears.
+
+The dictionary maps a logical workspace path, not an unchecked native path. Opaque non-UTF-8 Unix paths receive identifiers but no lossy text value.
+
+## 14. Result references
+
+Result references identify immutable retained content or structured record sets. The store tracks full content digests internally; the short ASON identifier is only an alias.
+
+The `h` operation can:
+
+- fetch byte, line, or record ranges;
+- search within a retained value;
+- apply a different deterministic reducer;
+- project selected table columns;
+- materialize binary content as a workspace artifact;
+- release retained content early.
+
+References carry expiry and size metadata when introduced. Expired or foreign-session identifiers return a stable reference error.
+
+## 15. Errors
+
+Errors are typed records, not prose. The core error record includes numeric code, retry class, operation stage, compact arguments, and optional evidence reference.
+
+```ason
+t:3
+i:21
+s:5
+e{c,q,p,x,a}:
+31,0,4,@8,@9
+z:0
+r:@10
+```
+
+The schema negotiated for error code `31` defines the meanings and types of its payload slots. Agent instructions need describe each stable code only once.
+
+Error code families reserve ranges for protocol, validation, capability, path, process, filesystem, budget, reference, and internal failures. New minor protocol levels may add codes but cannot change an existing code's meaning.
+
+## 16. Parser security
+
+The parser enforces limits before or during allocation:
+
+- frame bytes;
+- document lines;
+- fields per record;
+- table rows and columns;
+- vector length and nesting depth;
+- decoded string bytes;
+- escape length;
+- path dictionary entries;
+- total typed values per message.
+
+Malformed input never produces a partially executable program. Decoding, schema validation, canonicalization, and capability validation all complete before side effects begin.
+
+## 17. Compatibility
+
+ASH protocol and ASON format versions are negotiated independently. An ASH minor release may add optional fields or operations. An ASON minor release may add canonical scalar forms or table features without changing operation semantics.
+
+Major changes require new canonical fixtures. Implementations must keep fixtures for every supported major version and verify that one-shot and persistent encodings produce the same typed result.
