@@ -1,6 +1,6 @@
 # ASH/1 protocol and ASON
 
-Status: architecture baseline
+Status: architecture baseline; canonical ASON syntax and framing implemented
 
 ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
 
@@ -34,6 +34,8 @@ ASON is not intended to replace JSON in public APIs, configuration files, releas
 ## 3. Core syntax
 
 ASON is UTF-8. `LF` is the only encoded line separator. A canonical document has no blank lines, comments, indentation, or trailing spaces.
+
+Field and column keys begin with an ASCII letter or `_`; remaining bytes are ASCII letters, digits, `_`, `.`, or `-`. Keys are case-sensitive. Protocol-defined keys use lowercase ASCII. A parser rejects duplicate top-level fields and duplicate columns before schema validation.
 
 ### 3.1 Scalar field
 
@@ -118,6 +120,8 @@ Canonical ASON is required for fixtures, digest binding, permits, and token benc
 
 Canonicalization is performed from typed values. Text received from a caller is parsed and then re-encoded before it is used in a permit digest.
 
+The syntax decoder preserves non-reserved atoms as text and does not infer a number, boolean, enum, path, or identifier. Operation-schema decoding performs those conversions and enforces their canonical numeric form. This keeps lexical parsing deterministic without guessing a field's type.
+
 ## 5. Framing
 
 Persistent `ash rpc` uses:
@@ -128,6 +132,8 @@ N bytes canonical ASON payload
 ```
 
 The length prefix is transport metadata and is never shown to the LLM. The initial hard payload ceiling is 8 MiB, with a lower negotiated session default. Large content must use streaming events or result references.
+
+Before handshake negotiation, the implementation accepts at most 1 MiB per frame. Negotiation may lower or raise that limit but can never exceed the 8 MiB hard ceiling.
 
 A receiver must reject a frame before allocation when its declared length exceeds the negotiated ceiling. Zero-length frames are invalid. EOF inside a frame terminates the session with a framing error and cancels owned programs.
 

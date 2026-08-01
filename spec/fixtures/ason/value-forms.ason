@@ -1,0 +1,7 @@
+empty:""
+text:"line 1\nline 2"
+unicode:"中"
+values:[a,"b,c",~,@7]
+record{name,paths}:
+ash,[src,docs]
+empty_table[0]{p,l}:

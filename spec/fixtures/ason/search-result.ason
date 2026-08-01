@@ -1,0 +1,10 @@
+t:3
+i:17
+s:0
+p[1]{i,v}:
+1,src/lib.rs
+d[2]{p,l,c,t}:
+1,42,7,"TODO item"
+1,87,3,"FIXME item"
+z:0
+r:~

@@ -70,7 +70,7 @@ cd ash
 cargo test --workspace --all-targets
 ```
 
-The pinned Rust workspace currently verifies the crate boundaries, stable ASH/1 operation identifiers, detected worker limits, and deterministic ordered collection from the multi-core compute pool. This is a development checkpoint, not an installation path.
+The pinned Rust workspace currently verifies crate boundaries, stable ASH/1 operation identifiers, canonical ASON fixtures, bounded frame decoding, detected worker limits, and deterministic ordered collection from the multi-core compute pool. This is a development checkpoint, not an installation path.
 
 ## Release contract
 

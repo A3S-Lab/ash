@@ -44,6 +44,7 @@ name = "a3s-ash-protocol"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

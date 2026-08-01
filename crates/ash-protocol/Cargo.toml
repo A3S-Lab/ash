@@ -11,3 +11,4 @@ homepage.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+tokio.workspace = true
