@@ -843,7 +843,11 @@ fn rpc_cancel_propagates_through_a_batch_and_skips_its_descendants() {
             Arguments::Exec(
                 ExecArgs::new(
                     executable,
-                    vec!["sleep".to_owned(), "10000".to_owned()],
+                    vec![
+                        "gate".to_owned(),
+                        "batch-node-ready".to_owned(),
+                        "batch-node-release".to_owned(),
+                    ],
                     ".",
                     vec![],
                     InputSource::None,
@@ -880,12 +884,33 @@ fn rpc_cancel_propagates_through_a_batch_and_skips_its_descendants() {
     .encode()
     .expect("encode")
     .encode();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ash"))
+        .arg("rpc")
+        .current_dir(&directory.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ash");
+    let mut stdin = child.stdin.take().expect("ash stdin");
     let mut input = frame(handshake.as_bytes());
     input.extend(frame(batch.as_bytes()));
-    input.extend(frame(cancel.as_bytes()));
-
     let started = Instant::now();
-    let output = run(&["rpc"], &input);
+    stdin.write_all(&input).expect("write handshake and batch");
+    stdin.flush().expect("flush handshake and batch");
+    let marker = directory.0.join("batch-node-ready");
+    while !marker.is_file() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "batch node did not start"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    stdin
+        .write_all(&frame(cancel.as_bytes()))
+        .expect("write cancel");
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for ash");
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(output.status.success(), "stderr={:?}", output.stderr);
     let frames = split_frames(&output.stdout);

@@ -32,6 +32,8 @@ jobs:
       - name: Check third-party license inventory
         shell: pwsh
         run: ./scripts/check-third-party-licenses.ps1
+      - name: Verify deterministic token evidence
+        run: cargo run -p a3s-ash-bench --locked -- --check benches/reports/v0.1.0/format.json
       - name: Lint all targets
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 

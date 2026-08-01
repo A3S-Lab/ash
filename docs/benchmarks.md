@@ -1,10 +1,27 @@
 # Token-efficiency benchmark contract
 
-Status: architecture baseline
+Status: deterministic format corpus and two-tokenizer regression evidence implemented; agent-task and runtime reports remain open
 
 Token reduction is the primary performance objective of `ash`. This document defines how it is measured without trading away task correctness or hiding protocol overhead.
 
-No benchmark result exists until a versioned corpus, runner, raw traces, tokenizer set, and native-shell baselines are published together.
+The checked-in [v0.1.0 format report](../benches/reports/v0.1.0/format.json) is generated from a versioned synthetic corpus and pinned `cl100k_base` and `o200k_base` vocabularies. It compares canonical ASON with semantically equivalent compact row-object and columnar JSON. It is deliberately limited to representation cost: no agent success, native-shell task, latency, or multi-core claim is inferred from it.
+
+The current corpus records 6,313 `cl100k_base` tokens and 6,312 `o200k_base` tokens for ASON, versus 10,192 and 10,198 for compact row-object JSON. That rounds up to 62% in both profiles. The checked gate is a 65% regression ceiling; the proposed 50% release target below remains unachieved and unchanged. Columnar JSON is also reported rather than hidden, and is closer at 6,807 and 6,909 tokens.
+
+Reproduce the byte-identical report with:
+
+```sh
+cargo run -p a3s-ash-bench --release --locked -- \
+  --check benches/reports/v0.1.0/format.json
+```
+
+The same runner can emit host-local ordered compute-plane measurements at 1, 2, 4, 8, and host-available worker counts:
+
+```sh
+cargo run -p a3s-ash-bench --release --locked -- --runtime
+```
+
+That report includes every raw observation, median nanoseconds, integer throughput, speedup in basis points, worker count, available CPU count, and a common output digest. It is not checked in or gated because shared-runner timing is not portable; differing output digests fail immediately.
 
 ## 1. Optimization target
 
@@ -238,19 +255,18 @@ A gate is promoted from target to requirement only after the benchmark runner pr
 
 ```text
 benches/
+|-- corpus/v1.json
+|-- runner/
+|-- reports/v0.1.0/
+|   |-- format.json
+|   `-- README.md
 |-- tasks/<task-id>/
 |   |-- task.json
 |   |-- workspace.tar.zst
 |   |-- verify/
 |   `-- baselines/
 |-- tokenizers/<profile>/
-|-- runner/
-|-- schemas/
-`-- reports/<version>/
-    |-- summary.json
-    |-- runs.jsonl
-    |-- environment.json
-    `-- README.md
+`-- schemas/
 ```
 
-Published summaries link to raw versioned evidence. README marketing copy may quote a benchmark only after the corresponding report is available and reproducible.
+Future task and runtime reports add `summary.json`, `runs.jsonl`, and `environment.json` beside their versioned report README. Published summaries link to raw versioned evidence. README marketing copy may quote a benchmark only after the corresponding report is available and reproducible.

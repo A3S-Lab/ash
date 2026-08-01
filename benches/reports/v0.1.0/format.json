@@ -1,0 +1,120 @@
+{
+  "schema": 1,
+  "corpus": "benches/corpus/v1.json",
+  "corpus_sha256": "a8f043656e10a1b72af64648bf111fce27024670e27b591657c853707c23bd70",
+  "workspace_lock_sha256": "09c2ec8b76f8451384b767afd588cfb412086e142291afe819f79ec2bbea0f9a",
+  "tokenizers": [
+    "tiktoken-rs/0.12.0:cl100k_base",
+    "tiktoken-rs/0.12.0:o200k_base"
+  ],
+  "datasets": [
+    {
+      "id": "search-dense",
+      "rows": 128,
+      "encodings": {
+        "ason": {
+          "bytes": 7860,
+          "cl100k_tokens": 2030,
+          "o200k_tokens": 2030
+        },
+        "json_records": {
+          "bytes": 11034,
+          "cl100k_tokens": 3075,
+          "o200k_tokens": 3077
+        },
+        "json_columns": {
+          "bytes": 8970,
+          "cl100k_tokens": 2042,
+          "o200k_tokens": 2051
+        }
+      }
+    },
+    {
+      "id": "diagnostics",
+      "rows": 64,
+      "encodings": {
+        "ason": {
+          "bytes": 5241,
+          "cl100k_tokens": 1627,
+          "o200k_tokens": 1627
+        },
+        "json_records": {
+          "bytes": 7317,
+          "cl100k_tokens": 2495,
+          "o200k_tokens": 2497
+        },
+        "json_columns": {
+          "bytes": 5993,
+          "cl100k_tokens": 1832,
+          "o200k_tokens": 1845
+        }
+      }
+    },
+    {
+      "id": "workspace-tree",
+      "rows": 128,
+      "encodings": {
+        "ason": {
+          "bytes": 4290,
+          "cl100k_tokens": 2065,
+          "o200k_tokens": 2064
+        },
+        "json_records": {
+          "bytes": 7831,
+          "cl100k_tokens": 3270,
+          "o200k_tokens": 3271
+        },
+        "json_columns": {
+          "bytes": 5703,
+          "cl100k_tokens": 2205,
+          "o200k_tokens": 2221
+        }
+      }
+    },
+    {
+      "id": "batch-results",
+      "rows": 64,
+      "encodings": {
+        "ason": {
+          "bytes": 942,
+          "cl100k_tokens": 591,
+          "o200k_tokens": 591
+        },
+        "json_records": {
+          "bytes": 2984,
+          "cl100k_tokens": 1352,
+          "o200k_tokens": 1353
+        },
+        "json_columns": {
+          "bytes": 1736,
+          "cl100k_tokens": 728,
+          "o200k_tokens": 792
+        }
+      }
+    }
+  ],
+  "aggregate": {
+    "ason": {
+      "bytes": 18333,
+      "cl100k_tokens": 6313,
+      "o200k_tokens": 6312
+    },
+    "json_records": {
+      "bytes": 29166,
+      "cl100k_tokens": 10192,
+      "o200k_tokens": 10198
+    },
+    "json_columns": {
+      "bytes": 22402,
+      "cl100k_tokens": 6807,
+      "o200k_tokens": 6909
+    }
+  },
+  "gates": {
+    "semantic_round_trip": true,
+    "ason_vs_record_json_cl100k_percent": 62,
+    "ason_vs_record_json_o200k_percent": 62,
+    "required_max_percent": 65,
+    "passed": true
+  }
+}

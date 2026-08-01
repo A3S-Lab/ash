@@ -1,0 +1,19 @@
+[package]
+name = "a3s-ash-bench"
+description = "Reproducible token-efficiency evidence for ash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+ash-engine.workspace = true
+ash-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tiktoken-rs.workspace = true

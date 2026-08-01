@@ -924,8 +924,8 @@ mod tests {
     #[cfg(windows)]
     use super::complete_pending_activation;
     use super::{
-        ActivationOutcome, InstallReceipt, UpdateState, inspect_installation, install_release,
-        rollback_installation, write_json,
+        ActivationOutcome, InstallReceipt, UpdateJournal, UpdateState, inspect_installation,
+        install_release, rollback_installation, write_json,
     };
     use crate::manifest::RELEASE_TARGETS;
     use crate::{
@@ -1023,6 +1023,23 @@ mod tests {
         }
     }
 
+    fn pending_journal(prefix: &Path, target: &str) -> UpdateJournal {
+        let context = super::load_context(prefix, target, false).expect("context");
+        let journal = UpdateJournal {
+            schema: 1,
+            target: target.to_owned(),
+            old_version: "1.0.0".to_owned(),
+            new_version: "2.0.0".to_owned(),
+            sequence: 8,
+            manifest_sha256: "c".repeat(64),
+            prior_previous: context.state.previous.clone(),
+            prior_highest_sequence: context.state.highest_sequence,
+            prior_manifest_sha256: context.state.highest_manifest_sha256.clone(),
+        };
+        write_json(&context.journal_path, &journal).expect("journal");
+        journal
+    }
+
     #[test]
     fn rollback_is_journaled_activated_and_reversible() {
         let (_temporary, target, prefix) = installation();
@@ -1088,6 +1105,48 @@ mod tests {
         ));
         drop(first);
         super::InstallLock::acquire(temporary.path()).expect("reused lock");
+    }
+
+    #[test]
+    fn recovery_handles_crash_cutpoints_and_failed_health() {
+        let (_temporary, target, prefix) = installation();
+        pending_journal(&prefix, &target);
+        assert_eq!(
+            super::recover_installation(&prefix, &target, health).expect("pre-activation recovery"),
+            super::RecoveryOutcome::RolledBack {
+                version: "1.0.0".to_owned()
+            }
+        );
+
+        let journal = pending_journal(&prefix, &target);
+        let context = super::load_context(&prefix, &target, true).expect("pending context");
+        super::activate_version(&context, &journal.new_version).expect("activation cutpoint");
+        assert_eq!(
+            super::recover_installation(&prefix, &target, health)
+                .expect("post-activation recovery"),
+            super::RecoveryOutcome::Finalized {
+                version: "2.0.0".to_owned()
+            }
+        );
+
+        let (_temporary, target, prefix) = installation();
+        let journal = pending_journal(&prefix, &target);
+        let context = super::load_context(&prefix, &target, true).expect("pending context");
+        super::activate_version(&context, &journal.new_version).expect("activation cutpoint");
+        let reject_new = |path: &Path, version: &str, target: &str| {
+            if version == "2.0.0" {
+                Err(UpdateError::Health)
+            } else {
+                health(path, version, target)
+            }
+        };
+        assert_eq!(
+            super::recover_installation(&prefix, &target, reject_new)
+                .expect("failed health recovery"),
+            super::RecoveryOutcome::RolledBack {
+                version: "1.0.0".to_owned()
+            }
+        );
     }
 
     #[test]

@@ -1,0 +1,30 @@
+[package]
+name = "ash-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+ash-protocol = { package = "a3s-ash-protocol", path = "../crates/ash-protocol" }
+ash-update = { package = "a3s-ash-update", path = "../crates/ash-update" }
+libfuzzer-sys = "0.4.13"
+
+[[bin]]
+name = "ason_decode"
+path = "fuzz_targets/ason_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_metadata"
+path = "fuzz_targets/update_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

@@ -1,0 +1,1 @@
+{"schema":1,"datasets":[{"id":"search-dense","kind":"search","rows":128,"paths":8},{"id":"diagnostics","kind":"diagnostic","rows":64,"paths":12},{"id":"workspace-tree","kind":"tree","rows":128,"paths":16},{"id":"batch-results","kind":"batch","rows":64,"paths":0}]}

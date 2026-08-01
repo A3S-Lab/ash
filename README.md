@@ -68,6 +68,8 @@ Read the complete contracts:
 git clone https://github.com/A3S-Lab/ash.git
 cd ash
 cargo test --workspace --all-targets
+cargo run -p a3s-ash-bench --release --locked -- \
+  --check benches/reports/v0.1.0/format.json
 ```
 
 Run one canonical request from the repository root:
@@ -109,7 +111,7 @@ It is a local execution boundary for coding agents. Workspace capabilities, reso
 4. Build, sign, and clean-host test all six platform artifacts plus both one-click installers.
 5. Gate release promotion on correctness, token cost, latency, cancellation, installer, upgrade, and benchmark evidence, then pin the proven commit in the A3S submodule.
 
-No benchmark number is claimed before a reproducible corpus has been run. The acceptance criteria and accounting rules are defined in [docs/benchmarks.md](./docs/benchmarks.md).
+The first checked-in evidence is intentionally format-only: on its deterministic corpus, canonical ASON uses 62% of compact row-object JSON tokens under both pinned tokenizer profiles, while the closer columnar JSON baseline is reported alongside it. This is a regression datum, not an agent-task or runtime-performance claim. The report, reproduction command, remaining acceptance criteria, and accounting rules are defined in [docs/benchmarks.md](./docs/benchmarks.md).
 
 ## Contributing and support
 
