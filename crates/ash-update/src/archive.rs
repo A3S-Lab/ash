@@ -369,6 +369,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
     use std::io::Write;
     use std::path::Path;
 

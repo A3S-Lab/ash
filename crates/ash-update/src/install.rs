@@ -914,6 +914,7 @@ impl Drop for InstallLock {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(windows)]
     use std::io::Write;
     use std::path::{Path, PathBuf};
 
