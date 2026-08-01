@@ -43,6 +43,7 @@ expect_failure() {
 }
 
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/ash-installer-smoke.XXXXXX") || exit 1
+temporary_root=$(CDPATH= cd "$temporary_root" && pwd -P)
 cleanup() {
     case $temporary_root in
         "${TMPDIR:-/tmp}"/ash-installer-smoke.*) rm -rf "$temporary_root" ;;
