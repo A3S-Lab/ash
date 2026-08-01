@@ -110,7 +110,7 @@ It is a local execution boundary for coding agents. Workspace capabilities, reso
 2. Integrate the implemented capability-scoped permit API with trusted harness policy providers and freeze compatibility fixtures.
 3. Harden parser, recovery, and scheduling paths with fuzzing and fault injection.
 4. Provision protected release credentials and execute the implemented six-target signing, notarization, attestation, clean-host upgrade/rollback, and installer gates.
-5. Gate release promotion on correctness, token cost, latency, cancellation, installer, upgrade, and benchmark evidence, then pin the proven commit in the A3S submodule.
+5. Gate release promotion on correctness, token cost, latency, cancellation, installer, upgrade, and benchmark evidence, and keep every proven integration revision pinned in the A3S submodule.
 
 The first checked-in evidence is intentionally format-only: on its deterministic corpus, canonical ASON uses 62% of compact row-object JSON tokens under both pinned tokenizer profiles, while the closer columnar JSON baseline is reported alongside it. This is a regression datum, not an agent-task or runtime-performance claim. The report, reproduction command, remaining acceptance criteria, and accounting rules are defined in [docs/benchmarks.md](./docs/benchmarks.md).
 

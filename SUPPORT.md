@@ -1,7 +1,8 @@
 # Support
 
-`ash` is currently an architecture-stage project with no published executable
-release. Installation and runtime support are therefore not available yet.
+`ash` is a pre-release implementation with no published supported executable
+release. Source builds and repository test fixtures are available for
+development, but installation and runtime support are not offered yet.
 
 ## Where to ask
 

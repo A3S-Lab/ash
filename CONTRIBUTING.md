@@ -2,10 +2,10 @@
 
 Thank you for improving `ash`.
 
-The project is currently architecture-first. Contributions should preserve the
-product position **AI Native Shell** and make Coding Agent task completion,
-token efficiency, deterministic behavior, and cross-platform semantics more
-concrete.
+The project is currently pre-release. Contributions should preserve the product
+position **AI Native Shell** and improve Coding Agent task completion, token
+efficiency, deterministic behavior, and cross-platform semantics with measured
+evidence.
 
 ## Before opening a change
 
@@ -50,18 +50,29 @@ and explanations in Markdown rather than images.
 
 ## Code changes
 
-The implementation workspace has not been scaffolded yet. Once Rust crates are
-present, code changes are expected to run at least:
+The repository pins its Rust toolchain and dependency graph. Code changes are
+expected to pass the same locked quality gates used by CI:
 
 ```sh
 cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo test --workspace
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+cargo run -p a3s-ash-bench --locked -- --check benches/reports/v0.1.0/format.json
 ```
 
-Protocol parsers, path handling, process lifecycle, and installer changes also
-require focused integration, malformed-input, and platform contract coverage.
-Follow repository-local commands when they become stricter than this baseline.
+When dependencies change, run the license inventory with PowerShell Core or
+Windows PowerShell:
+
+```powershell
+pwsh -NoProfile -File ./scripts/check-third-party-licenses.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check-third-party-licenses.ps1
+```
+
+Protocol parsers, update metadata, path handling, process lifecycle, and
+installer changes also require their focused fuzz, malformed-input,
+integration, and platform-contract coverage. Follow repository-local commands
+when they become stricter than this baseline.
 
 ## Pull requests
 
