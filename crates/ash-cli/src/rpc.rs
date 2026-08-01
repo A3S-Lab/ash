@@ -32,6 +32,7 @@ pub async fn run() -> Result<(), CliError> {
     let parallelism = Parallelism::detected();
     let response = ServerHandshake {
         operation_mask: ExecutionSession::operation_mask(),
+        capability_mask: ExecutionSession::capability_mask(),
         ..ServerHandshake::default()
     }
     .negotiate(&request, 1)?;
@@ -40,6 +41,7 @@ pub async fn run() -> Result<(), CliError> {
         request.workspace(),
         u64::from(response.output_bytes()),
         parallelism,
+        response.capability_mask(),
     )?);
     let response_document = response.encode()?;
     bootstrap_codec

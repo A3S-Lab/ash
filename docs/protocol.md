@@ -1,6 +1,6 @@
 # ASH/1 protocol and ASON
 
-Status: canonical ASON, framing, handshake, typed exec/read/list/search/patch/fs/batch/ref/snapshot/cancel schemas, durable file transactions, bounded DAG execution, retained-result inspection, and runtime paths are implemented
+Status: canonical ASON, framing, capability negotiation, action-bound approval permits, typed exec/read/list/search/patch/fs/batch/ref/snapshot/cancel schemas, durable file transactions, bounded DAG execution, retained-result inspection, and runtime paths are implemented
 
 ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
 
@@ -154,7 +154,7 @@ The ASH/1.0 client request is encoded with this exact core schema:
 t:0
 i:7
 a{ap,al,ah,zp,zl,zh,frm,out,ops,cap,root,n}:
-1,0,0,1,0,0,1048576,65536,1023,0,.,nonce-7
+1,0,0,1,0,0,1048576,65536,1023,15,.,nonce-7
 ```
 
 `ap` and `zp` are the ASH and ASON major versions; `al..ah` and `zl..zh` are supported minor ranges. `frm` and `out` request frame and immediate-output byte ceilings. `ops` and `cap` are unsigned capability masks. `root` is the requested logical workspace root, and `n` is a client nonce of at most 128 bytes.
@@ -166,10 +166,10 @@ t:0
 i:7
 s:0
 d{ap,av,zp,zv,frm,out,ops,cap,os,arch,sid,n}:
-1,0,1,0,1048576,65536,0,0,linux,x86_64,1,nonce-7
+1,0,1,0,1048576,65536,1023,15,linux,x86_64,1,nonce-7
 ```
 
-The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises `0x3ff`, exactly all ten ASH/1.0 operation bits: `exec`, `read`, `list`, `search`, `patch`, `fs`, `batch`, `ref`, `snapshot`, and `cancel`.
+The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises operation mask `0x3ff`, exactly all ten ASH/1.0 operation bits: `exec`, `read`, `list`, `search`, `patch`, `fs`, `batch`, `ref`, `snapshot`, and `cancel`. Its capability mask is `0x0f`: bit 0 workspace read, bit 1 workspace write, bit 2 direct host-process execution, and bit 3 retained-result access. Unknown response capability bits are invalid. A client that requests no capability receives a structurally valid session in which only capability-free control operations can run.
 
 The handshake is retained by the adapter and is not repeated in each model-visible result.
 
@@ -184,6 +184,7 @@ Every message begins with a type, request identifier, and type-specific fields. 
 | `o` | operation identifier |
 | `a` | typed operation arguments |
 | `u` | resource and output budget |
+| `v` | optional opaque approval permit |
 | `s` | final status |
 | `p` | path dictionary delta |
 | `d` | result data |
@@ -253,7 +254,7 @@ These identifiers are stable within ASH/1. Internal Rust enum ordering is not pa
 
 ### 9.1 Core request schemas
 
-Every core request uses the exact envelope order `t,i,o,a,u`. The budget record is always:
+Every core request uses the exact envelope order `t,i,o,a,u`, or `t,i,o,a,u,v` when retrying with an approval permit. No other optional or reordered envelope shape is valid. The budget record is always:
 
 ```ason
 u{tok,rec,ms}:
@@ -298,6 +299,18 @@ Snapshot mode `0` captures current state and requires `r:~`; mode `1` emits a de
 Reference modes are `0` byte slice, `1` line slice, `2` bounded text search, and `3` release. Byte and search offsets are zero-based; line offsets are one-based. Reference-search flag bits are 0 regular expression and 1 case-insensitive. Slice projections return UTF-8 when valid and lowercase hexadecimal otherwise; the full selected range remains identified by its digest and source reference.
 
 `cancel` is a control-plane request. Its own request identifier must differ from the target. State `1` means cancellation was signaled to queued or running work; state `0` means the target was no longer active. Both are successful, idempotent outcomes.
+
+### 9.2 Capability and approval binding
+
+Required capabilities are derived from typed arguments rather than supplied by the caller: `exec` requires host process; `read`, `list`, `search`, and `snapshot` require workspace read; `patch` and `fs` require workspace write; `ref` requires retained-result access; a batch requires the union of its leaves. Cancellation deliberately requires no capability so gated or queued work can always be stopped. Workspace write authorizes the reads necessary to validate a guarded mutation. Host-process execution is a stronger boundary: the child inherits the operating-system access of `ash`, so it is not constrained by the workspace read/write bits.
+
+A session policy splits the negotiated mask into direct grants and capabilities that require per-action approval. A missing permit returns status `3`, error `301`, retry class `3`, authorization stage `3`, and a retained evidence reference. Invalid, expired, mismatched, or replayed permits return error `302` and a fresh challenge. A capability outside the policy returns error `300` with retry class `0` and no side effect.
+
+The retained challenge is canonical ASON with exact field order `v,s,c,e,b,p,h,n`: challenge version, session ID, required capability mask, Unix expiry in milliseconds, 16-byte session binding, 16-byte policy digest, 32-byte normalized-action digest, and 16-byte nonce. Binary fields are lowercase hexadecimal. The normalized action is independently re-encoded as the exact document `v,o,a,c`; it excludes request ID, budget, and permit so a semantic retry may change transport identity or budget without changing the approved action.
+
+The `v` request field is a fixed 48-byte opaque token encoded as 96 lowercase hexadecimal characters: the 16-byte nonce plus a 32-byte domain-separated keyed BLAKE3 authenticator. The authority keeps the corresponding 105-byte challenge signing value in a bounded, expiring pending map, avoiding repetition of that value in the LLM-facing retry. Verification binds the permit to the action, required capabilities, session ID, fresh session binding, policy identity, expiry, and nonce. A successful verification removes the pending challenge and consumes the nonce in a bounded replay cache before execution, so a permit is one-shot even when the operation later fails.
+
+The trusted embedding harness supplies the 32-byte authority key and a fresh 16-byte session binding; neither crosses ASH/1. The harness retrieves the challenge, obtains external approval, and calls the issuer only after approval. A policy that expects challenge retrieval through ASH must directly grant retained-result access. The standalone CLI has no approval UI or secret-key input and directly grants only the capability intersection selected by its handshake; embedders opt into approval policy through `ash-ops`.
 
 ## 10. Process result
 
@@ -399,7 +412,7 @@ r:@10
 
 The schema negotiated for error code `31` defines the meanings and types of its payload slots. Agent instructions need describe each stable code only once.
 
-Error code families reserve ranges for protocol, validation, capability, path, process, filesystem, budget, reference, and internal failures. Filesystem codes `501` and `502` identify a compare-and-swap content conflict and a mutation requiring recovery. Budget codes `600`, `601`, and `602` identify immediate output, retained storage, and in-flight concurrency ceilings respectively. Reference codes `700` and `701` identify unknown and currently leased aliases. New minor protocol levels may add codes but cannot change an existing code's meaning.
+Error code families reserve ranges for protocol, validation, capability, path, process, filesystem, budget, reference, and internal failures. Capability codes `300`, `301`, and `302` identify policy denial, a required approval permit, and an invalid or consumed permit. Filesystem codes `501` and `502` identify a compare-and-swap content conflict and a mutation requiring recovery. Budget codes `600`, `601`, and `602` identify immediate output, retained storage, and in-flight concurrency ceilings respectively. Reference codes `700` and `701` identify unknown and currently leased aliases. New minor protocol levels may add codes but cannot change an existing code's meaning.
 
 Before a request identifier exists, CLI bootstrap failures are written to stderr as bare ASON rather than prose:
 

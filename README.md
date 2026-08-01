@@ -5,7 +5,7 @@
 <p align="center"><strong>AI Native Shell</strong> · typed parallel execution · compact model context</p>
 
 > [!IMPORTANT]
-> `ash` is pre-release. Source builds now execute typed `exec`, `read`, `list`, `search`, compare-and-swap `patch`, durable file-only `fs` transactions, workspace `snapshot/delta`, and bounded dependency-graph `batch` requests; they also inspect retained results and cancel active work through one-shot or persistent RPC paths. Cross-platform installers are implemented and tested offline; no supported signed binary release is published yet.
+> `ash` is pre-release. Source builds now execute typed `exec`, `read`, `list`, `search`, compare-and-swap `patch`, durable file-only `fs` transactions, workspace `snapshot/delta`, and bounded dependency-graph `batch` requests; they also negotiate least-privilege capabilities, enforce session/action-bound one-time approval permits, inspect retained results, and cancel active work through one-shot or persistent RPC paths. Cross-platform installers are implemented and tested offline; no supported signed binary release is published yet.
 
 `ash` is a greenfield shell designed around coding agents rather than terminal users. It turns shell work into typed programs, executes independent work across bounded I/O and CPU planes, and returns only the evidence worth placing in an LLM context.
 
@@ -76,7 +76,7 @@ Run one canonical request from the repository root:
 cargo run -p a3s-ash -- run < spec/fixtures/ason/search-request.ason
 ```
 
-The pinned Rust workspace currently verifies typed ASH/1 schemas, canonical framed handshakes, concurrent `exec/read/list/search/patch/fs/snapshot`, acyclic batch graphs, dependency-failure skipping, stable child-response references, retained-result slicing/search/release, chained workspace deltas, preemptive cancellation, atomic budgets, hierarchical permits, workspace-confined paths, direct argv launch with timeout-safe process-tree cleanup, deterministic multi-core preparation, and multi-file rollback. File-only create, copy, move, and remove transactions add digest guards, no-overwrite semantics, a checksummed on-disk journal, cross-process serialization, reverse rollback, and restart recovery. `ash rpc` executes independent requests concurrently while emitting final frames in stable input order. Offline installer smoke tests cover installation, integrity rejection, idempotent and forced reinstall, lock ownership, PATH ownership, rollback, and uninstall. This is still a development checkpoint, not a supported installation path.
+The pinned Rust workspace currently verifies typed ASH/1 schemas, canonical framed handshakes, negotiated capability masks, action/session/policy/expiry-bound approval permits, replay rejection, concurrent `exec/read/list/search/patch/fs/snapshot`, acyclic batch graphs, dependency-failure skipping, stable child-response references, retained-result slicing/search/release, chained workspace deltas, preemptive cancellation, atomic budgets, hierarchical permits, workspace-confined paths, direct argv launch with timeout-safe process-tree cleanup, deterministic multi-core preparation, and multi-file rollback. File-only create, copy, move, and remove transactions add digest guards, no-overwrite semantics, a checksummed on-disk journal, cross-process serialization, reverse rollback, and restart recovery. `ash rpc` executes independent requests concurrently while emitting final frames in stable input order. Offline installer smoke tests cover installation, integrity rejection, idempotent and forced reinstall, lock ownership, PATH ownership, rollback, and uninstall. This is still a development checkpoint, not a supported installation path.
 
 ## Release contract
 
@@ -104,7 +104,7 @@ It is a local execution boundary for coding agents. Workspace capabilities, reso
 ## Delivery order
 
 1. Stabilize the implemented vertical slice and its ASH/1 fixtures across Linux, macOS, and Windows.
-2. Add capability-scoped approval permits for sensitive mutations and process execution.
+2. Integrate the implemented capability-scoped permit API with trusted harness policy providers and freeze compatibility fixtures.
 3. Build, sign, and clean-host test all six platform artifacts plus both one-click installers.
 4. Add self-update and signed rollback, then harden recovery and scheduling with fault injection.
 5. Gate release promotion on correctness, token cost, latency, cancellation, installer, upgrade, and benchmark evidence.

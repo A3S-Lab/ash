@@ -26,7 +26,13 @@ pub async fn run() -> Result<(), CliError> {
     let response = match Request::decode(&document) {
         Ok(request) => {
             let parallelism = Parallelism::detected();
-            let execution = ExecutionSession::open(1, ".", 1024 * 1024, parallelism)?;
+            let execution = ExecutionSession::open(
+                1,
+                ".",
+                1024 * 1024,
+                parallelism,
+                ExecutionSession::capability_mask(),
+            )?;
             execution.execute(&request).await?
         }
         Err(error) => match Request::id_hint(&document) {

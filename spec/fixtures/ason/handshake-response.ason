@@ -2,4 +2,4 @@ t:0
 i:7
 s:0
 d{ap,av,zp,zv,frm,out,ops,cap,os,arch,sid,n}:
-1,0,1,0,1048576,65536,0,0,linux,x86_64,1,nonce-7
+1,0,1,0,1048576,65536,1023,15,linux,x86_64,1,nonce-7

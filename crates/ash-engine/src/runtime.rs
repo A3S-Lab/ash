@@ -261,6 +261,11 @@ impl Program {
     }
 
     #[must_use]
+    pub fn session_id(&self) -> u64 {
+        self.lease.session.id
+    }
+
+    #[must_use]
     pub fn workspace(&self) -> &str {
         &self.lease.session.workspace
     }

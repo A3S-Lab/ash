@@ -5,8 +5,8 @@ use thiserror::Error;
 use crate::ason::{Atom, BuildError, Cell, Document, Field, Key, Record, Value};
 use crate::frame::{DEFAULT_MAX_FRAME_BYTES, HARD_MAX_FRAME_BYTES};
 use crate::{
-    ALL_OPERATION_MASK, ASH_PROTOCOL_MAJOR, ASH_PROTOCOL_MINOR, ASON_FORMAT_MAJOR,
-    ASON_FORMAT_MINOR,
+    ALL_CAPABILITY_MASK, ALL_OPERATION_MASK, ASH_PROTOCOL_MAJOR, ASH_PROTOCOL_MINOR,
+    ASON_FORMAT_MAJOR, ASON_FORMAT_MINOR,
 };
 
 const MAX_WORKSPACE_BYTES: usize = 4096;
@@ -241,7 +241,9 @@ impl ServerHandshake {
                 .min(self.max_output_bytes)
                 .min(frame_bytes),
             operation_mask: preferences.operation_mask & self.operation_mask & ALL_OPERATION_MASK,
-            capability_mask: preferences.capability_mask & self.capability_mask,
+            capability_mask: preferences.capability_mask
+                & self.capability_mask
+                & ALL_CAPABILITY_MASK,
             os: self.os.clone(),
             arch: self.arch.clone(),
             session_id,
@@ -331,6 +333,11 @@ impl HandshakeResponse {
     }
 
     #[must_use]
+    pub const fn capability_mask(&self) -> u64 {
+        self.capability_mask
+    }
+
+    #[must_use]
     pub const fn output_bytes(&self) -> u32 {
         self.output_bytes
     }
@@ -362,6 +369,9 @@ impl HandshakeResponse {
         }
         if self.operation_mask & !ALL_OPERATION_MASK != 0 {
             return Err(SchemaError::UnexpectedValue("ops"));
+        }
+        if self.capability_mask & !ALL_CAPABILITY_MASK != 0 {
+            return Err(SchemaError::UnexpectedValue("cap"));
         }
         if !valid_platform_name(&self.os) {
             return Err(SchemaError::InvalidText("os"));

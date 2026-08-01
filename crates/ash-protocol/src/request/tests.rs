@@ -5,8 +5,8 @@ use super::{
     ReadMode, RefArgs, RefMode, Request, RequestError, SEARCH_CASE_INSENSITIVE, SEARCH_REGEX,
     SNAPSHOT_INCLUDE_HIDDEN, SearchArgs, SnapshotArgs, SnapshotMode,
 };
-use crate::Operation;
 use crate::ason::{Atom, Cell, Document, Field, Key, Record, Value, decode};
+use crate::{APPROVAL_TOKEN_BYTES, ApprovalToken, Capability, Operation};
 
 const SEARCH_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/search-request.ason");
 const EXEC_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/exec-request.ason");
@@ -54,6 +54,47 @@ fn all_core_request_fixtures_are_canonical_typed_messages() {
         let request = Request::decode(&decode(fixture).expect("ASON")).expect("schema");
         assert_eq!(request.operation(), operation);
         assert_eq!(request.encode().expect("encode").encode(), fixture);
+    }
+}
+
+#[test]
+fn permits_bind_canonical_actions_and_capabilities() {
+    let request = Request::decode(&decode(SEARCH_REQUEST).expect("ASON")).expect("request");
+    let token = ApprovalToken::from_bytes([0xab; APPROVAL_TOKEN_BYTES]);
+    let permitted = request.clone().with_permit(token.clone());
+    let encoded = permitted.encode().expect("encode").encode();
+    assert!(encoded.ends_with(&format!("v:{}\n", token.encode())));
+    assert_eq!(
+        Request::decode(&decode(&encoded).expect("ASON")).expect("permitted request"),
+        permitted
+    );
+
+    let retry = Request::new(
+        99,
+        request.arguments().clone(),
+        Budget::new(512, 32, 1_000).expect("retry budget"),
+    )
+    .expect("retry");
+    assert_eq!(
+        request.authorization_target().expect("target").encode(),
+        retry.authorization_target().expect("target").encode()
+    );
+
+    let expected = [
+        (EXEC_REQUEST, Capability::HostProcess.mask()),
+        (READ_REQUEST, Capability::WorkspaceRead.mask()),
+        (LIST_REQUEST, Capability::WorkspaceRead.mask()),
+        (SEARCH_REQUEST, Capability::WorkspaceRead.mask()),
+        (PATCH_REQUEST, Capability::WorkspaceWrite.mask()),
+        (FS_REQUEST, Capability::WorkspaceWrite.mask()),
+        (BATCH_REQUEST, Capability::WorkspaceRead.mask()),
+        (SNAPSHOT_REQUEST, Capability::WorkspaceRead.mask()),
+        (REF_REQUEST, Capability::RetainedResult.mask()),
+        (CANCEL_REQUEST, 0),
+    ];
+    for (fixture, capabilities) in expected {
+        let request = Request::decode(&decode(fixture).expect("ASON")).expect("request");
+        assert_eq!(request.required_capabilities(), capabilities);
     }
 }
 

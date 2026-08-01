@@ -4,7 +4,7 @@ Status: architecture baseline plus implementation checkpoint
 
 This document defines the intended architecture of `ash` and is normative for component ownership and runtime boundaries. Statements explicitly labeled as the current source checkpoint describe implemented behavior; the remaining contracts are design targets rather than release claims.
 
-The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, dual Tokio/Rayon runtime, hierarchical governor, direct process execution, bounded read/list/search, compare-and-swap patching with live rollback, durable file-only filesystem transactions with restart recovery, retained-result inspection, workspace snapshot/delta, cancellation, and bounded batch DAGs with stable retained child evidence. Approval permits, signed online releases, self-update, fuzz infrastructure, and published benchmark evidence remain open.
+The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution, bounded read/list/search, compare-and-swap patching with live rollback, durable file-only filesystem transactions with restart recovery, retained-result inspection, workspace snapshot/delta, cancellation, and bounded batch DAGs with stable retained child evidence. Signed online releases, self-update, fuzz infrastructure, and published benchmark evidence remain open.
 
 ## 1. Product definition
 
@@ -104,6 +104,7 @@ Owns:
 - operation identifiers and typed arguments;
 - stable status and error codes;
 - program, node, edge, budget, capability, and result schemas;
+- canonical approval challenges and opaque permit wire values;
 - the canonical ASON codec and stdio framing;
 - framing, handshake, capability negotiation, and compatibility fixtures.
 
@@ -140,6 +141,7 @@ Owns portable operation semantics:
 - `snapshot` — workspace state and deltas;
 - `ref` — slice, filter, search, and project stored results;
 - `cancel` — explicit cancellation of a program or node.
+- capability policy, approval challenge retention, permit verification, and replay rejection.
 
 Operation implementations may use platform traits but cannot inspect the host shell or emit presentation text.
 
@@ -377,18 +379,13 @@ Resolution checks lexical traversal, symlink or reparse-point traversal, workspa
 
 `ash` is a policy enforcement point for its own operations, not a claim of complete child-process isolation.
 
-Capabilities are explicit and scoped, for example:
+ASH/1.0 has four explicit capability bits: workspace read, workspace write, direct host-process execution, and retained-result access. The handshake intersects the caller request with the server mask, then the session policy splits that result into direct grants and approval-required grants. Required bits are derived from the typed operation, and a batch is authorized once against the union of all leaf requirements before any node starts. Cancellation remains capability-free.
 
-- workspace read;
-- workspace write;
-- create process;
-- access outside workspace;
-- recursive delete;
-- environment secret access;
-- network-capable process approval;
-- non-portable host-shell execution.
+An operation that requires external approval returns a compact structured denial with a retained canonical challenge. The normalized action digest covers the operation, typed arguments, and required capability mask while excluding request ID, budget, and permit. The trusted harness obtains approval and resubmits a fixed-size opaque permit bound by keyed BLAKE3 to that action, session ID, fresh per-session binding, expiry, policy identity, capabilities, and nonce. Successful verification consumes the nonce before dispatch; expiry, alteration, cross-session use, cross-action use, and replay fail closed without invoking the operation.
 
-An operation that requires external approval returns a compact `permit_required` error with a digest of the normalized action. The harness obtains approval and resubmits an opaque permit bound to that digest, session, expiry, and policy identity. `ash` itself does not display a human approval UI.
+The authority secret and fresh session binding are injected by the embedding harness and never cross ASH/1. `ash` does not display a human approval UI. The standalone CLI directly grants only negotiated capabilities; embedders select approval-required capabilities through the public `ash-ops` policy API. Policies that retrieve challenges through the protocol also grant retained-result access.
+
+These capabilities constrain native ASH operations, not arbitrary syscalls made by a child. In particular, host-process capability gives the child the operating-system authority inherited from `ash`; callers that need stronger isolation must deny or externally approve it and place `ash` inside an OS sandbox or container.
 
 Secrets configured for redaction are removed from LLM projections before encoding. Retention of unredacted raw output is an independent policy choice and defaults to the narrowest local access permissions.
 
@@ -558,7 +555,7 @@ The benchmark contract in [benchmarks.md](./benchmarks.md) measures correctness,
 - filesystem mutation journals (implemented in the source checkpoint);
 - snapshots and changed-file deltas (implemented in the source checkpoint);
 - batch programs and control dependency edges (implemented in the source checkpoint);
-- permit binding and structured conflict recovery.
+- permit binding (implemented in the source checkpoint) and structured conflict recovery.
 
 ### M3: release hardening
 

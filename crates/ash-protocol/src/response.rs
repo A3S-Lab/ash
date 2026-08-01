@@ -88,6 +88,8 @@ pub enum ErrorCode {
     PathNotFound = 201,
     WrongFileType = 202,
     CapabilityDenied = 300,
+    PermitRequired = 301,
+    PermitInvalid = 302,
     SpawnFailed = 400,
     ProcessFailed = 401,
     ProcessTimedOut = 402,
@@ -321,6 +323,11 @@ impl FinalResponse {
     #[must_use]
     pub const fn flags(&self) -> u32 {
         self.flags
+    }
+
+    #[must_use]
+    pub const fn error(&self) -> Option<&ErrorRecord> {
+        self.error.as_ref()
     }
 
     #[must_use]

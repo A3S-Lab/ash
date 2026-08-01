@@ -4,14 +4,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ash_engine::{Engine, Parallelism, SessionConfig};
 use ash_platform::Workspace;
+use ash_protocol::ason::decode;
 use ash_protocol::request::{
     Arguments, BatchArgs, BatchNode, Budget, EXEC_CLEAR_ENVIRONMENT, ExecArgs, FsAction,
     FsActionKind, FsArgs, InputSource, LIST_FILES_ONLY, ListArgs, PatchArgs, PatchContent,
     PatchEdit, REF_CASE_INSENSITIVE, ReadArgs, ReadMode, RefArgs, RefMode, Request,
     SEARCH_CASE_INSENSITIVE, SNAPSHOT_INCLUDE_HIDDEN, SearchArgs, SnapshotArgs, SnapshotMode,
 };
+use ash_protocol::response::{ErrorCode, RESULT_RETAINED, Status};
+use ash_protocol::{ApprovalChallenge, Capability};
 
-use super::PortableOperations;
+use super::{AuthorizationPolicy, PermitAuthority, PortableOperations};
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -44,6 +47,127 @@ fn runtime(directory: &TestDirectory) -> (ash_engine::Session, PortableOperation
 
 fn budget(tokens: u32, records: u32) -> Budget {
     Budget::new(tokens, records, 30_000).expect("budget")
+}
+
+#[tokio::test]
+async fn capability_policy_requires_one_time_action_bound_approval() {
+    let directory = TestDirectory::new();
+    let parallelism = Parallelism::for_available_cpus(2);
+    let engine = Engine::new(parallelism).expect("engine");
+    let session = engine
+        .open_session(SessionConfig::new(1, ".", 64 * 1024, parallelism))
+        .expect("session");
+
+    let denied_arguments = Arguments::Fs(
+        FsArgs::new(vec![
+            FsAction::new(
+                1,
+                FsActionKind::Create,
+                "denied.txt",
+                None,
+                None,
+                Some(PatchContent::Inline("denied".to_owned())),
+            )
+            .expect("create"),
+        ])
+        .expect("filesystem arguments"),
+    );
+    let denied = Request::new(91, denied_arguments, budget(1024, 8)).expect("request");
+    let operations = PortableOperations::with_authorization(
+        Workspace::new(&directory.0).expect("workspace"),
+        AuthorizationPolicy::allow(Capability::WorkspaceRead.mask()).expect("read-only policy"),
+    );
+    let program = session.begin(&denied).await.expect("program");
+    let response = operations
+        .execute(&denied, &program)
+        .await
+        .expect("denied response");
+    assert_eq!(response.status(), Status::Denied);
+    assert_eq!(
+        response.error().expect("error").code,
+        ErrorCode::CapabilityDenied
+    );
+    assert!(!directory.0.join("denied.txt").exists());
+    drop(program);
+
+    let authority =
+        PermitAuthority::new([7; 32], [8; 16], "test-policy").expect("permit authority");
+    let policy = AuthorizationPolicy::with_approvals(
+        "test-policy",
+        Capability::RetainedResult.mask(),
+        Capability::WorkspaceWrite.mask(),
+        authority.clone(),
+    )
+    .expect("approval policy");
+    let operations = PortableOperations::with_authorization(
+        Workspace::new(&directory.0).expect("workspace"),
+        policy,
+    );
+    let approved_arguments = Arguments::Fs(
+        FsArgs::new(vec![
+            FsAction::new(
+                1,
+                FsActionKind::Create,
+                "approved.txt",
+                None,
+                None,
+                Some(PatchContent::Inline("approved".to_owned())),
+            )
+            .expect("create"),
+        ])
+        .expect("filesystem arguments"),
+    );
+    let first =
+        Request::new(92, approved_arguments.clone(), budget(1024, 8)).expect("first request");
+    let program = session.begin(&first).await.expect("program");
+    let response = operations
+        .execute(&first, &program)
+        .await
+        .expect("approval response");
+    assert_eq!(response.status(), Status::Denied);
+    assert_eq!(response.flags(), RESULT_RETAINED);
+    let error = response.error().expect("approval error");
+    assert_eq!(error.code, ErrorCode::PermitRequired);
+    let evidence = program
+        .store()
+        .get(error.evidence.expect("challenge reference"))
+        .expect("challenge evidence");
+    let challenge = ApprovalChallenge::decode(
+        &decode(std::str::from_utf8(&evidence).expect("challenge UTF-8")).expect("challenge ASON"),
+    )
+    .expect("challenge schema");
+    let token = authority.issue(&challenge).expect("approved token");
+    assert!(!directory.0.join("approved.txt").exists());
+    drop(program);
+
+    let retry = Request::new(93, approved_arguments.clone(), budget(2048, 16))
+        .expect("retry")
+        .with_permit(token.clone());
+    let program = session.begin(&retry).await.expect("program");
+    let response = operations
+        .execute(&retry, &program)
+        .await
+        .expect("successful retry");
+    assert_eq!(response.status(), Status::Success);
+    assert_eq!(
+        fs::read(directory.0.join("approved.txt")).expect("created file"),
+        b"approved"
+    );
+    drop(program);
+
+    let replay = Request::new(94, approved_arguments, budget(1024, 8))
+        .expect("replay")
+        .with_permit(token);
+    let program = session.begin(&replay).await.expect("program");
+    let response = operations
+        .execute(&replay, &program)
+        .await
+        .expect("replay response");
+    assert_eq!(response.status(), Status::Denied);
+    assert_eq!(
+        response.error().expect("replay error").code,
+        ErrorCode::PermitInvalid
+    );
 }
 
 fn compile_helper(directory: &TestDirectory) -> String {

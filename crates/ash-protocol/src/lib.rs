@@ -3,12 +3,17 @@
 //! Stable ASH protocol identifiers, canonical ASON, and stream framing.
 
 pub mod ason;
+mod capability;
 pub mod frame;
 pub mod handshake;
 mod operation;
 pub mod request;
 pub mod response;
 
+pub use capability::{
+    ALL_CAPABILITY_MASK, APPROVAL_CHALLENGE_VERSION, APPROVAL_SIGNING_BYTES, APPROVAL_TOKEN_BYTES,
+    APPROVAL_TOKEN_HEX_BYTES, ApprovalChallenge, ApprovalToken, ApprovalValueError, Capability,
+};
 pub use operation::{ALL_OPERATION_MASK, Operation};
 
 /// The current ASH protocol major version.

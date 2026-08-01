@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use ash_ops::PortableOperations;
-use ash_protocol::Operation;
 use ash_protocol::ason::decode;
 use ash_protocol::handshake::{HandshakePreferences, HandshakeRequest, HandshakeResponse};
 use ash_protocol::request::{
@@ -14,6 +13,7 @@ use ash_protocol::request::{
     InputSource, PatchArgs, PatchContent, PatchEdit, ReadArgs, ReadMode, RefArgs, RefMode, Request,
     SearchArgs, SnapshotArgs, SnapshotMode,
 };
+use ash_protocol::{Capability, Operation};
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -358,6 +358,7 @@ fn rpc_negotiates_one_canonical_framed_session() {
         "integration-17",
         HandshakePreferences {
             operation_mask: u64::MAX,
+            capability_mask: u64::MAX,
             ..HandshakePreferences::default()
         },
     )
@@ -380,6 +381,58 @@ fn rpc_negotiates_one_canonical_framed_session() {
         response.operation_mask(),
         PortableOperations::operation_mask() | Operation::Cancel.mask()
     );
+    assert_eq!(
+        response.capability_mask(),
+        PortableOperations::capability_mask()
+    );
+}
+
+#[test]
+fn rpc_enforces_the_negotiated_capability_mask() {
+    let handshake = HandshakeRequest::new(
+        30,
+        ".",
+        "integration-30",
+        HandshakePreferences {
+            operation_mask: u64::MAX,
+            capability_mask: Capability::WorkspaceRead.mask(),
+            ..HandshakePreferences::default()
+        },
+    )
+    .expect("handshake")
+    .encode()
+    .expect("encode handshake")
+    .encode();
+    let request = Request::new(
+        31,
+        Arguments::Exec(
+            ExecArgs::new(
+                "unreachable-program",
+                vec![],
+                ".",
+                vec![],
+                InputSource::None,
+                0,
+            )
+            .expect("exec"),
+        ),
+        Budget::new(1024, 8, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode request")
+    .encode();
+    let mut input = frame(handshake.as_bytes());
+    input.extend(frame(request.as_bytes()));
+
+    let output = run(&["rpc"], &input);
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert!(output.stderr.is_empty());
+    let frames = split_frames(&output.stdout);
+    assert_eq!(frames.len(), 2);
+    let result = std::str::from_utf8(frames[1]).expect("result UTF-8");
+    assert!(result.starts_with("t:3\ni:31\ns:3\n"), "{result}");
+    assert!(result.contains("e{c,q,p,x,a}:\n300,0,3,~,~\n"), "{result}");
 }
 
 #[test]
@@ -390,6 +443,7 @@ fn rpc_executes_a_request_after_the_handshake() {
         "integration-40",
         HandshakePreferences {
             operation_mask: u64::MAX,
+            capability_mask: u64::MAX,
             ..HandshakePreferences::default()
         },
     )
@@ -432,6 +486,7 @@ fn rpc_executes_a_compare_and_swap_patch() {
         "integration-45",
         HandshakePreferences {
             operation_mask: u64::MAX,
+            capability_mask: u64::MAX,
             ..HandshakePreferences::default()
         },
     )
@@ -482,6 +537,7 @@ fn rpc_executes_a_durable_fs_transaction() {
         "integration-47",
         HandshakePreferences {
             operation_mask: u64::MAX,
+            capability_mask: u64::MAX,
             ..HandshakePreferences::default()
         },
     )
@@ -538,6 +594,7 @@ fn rpc_executes_independent_requests_concurrently_in_input_order() {
         "integration-50",
         HandshakePreferences {
             operation_mask: u64::MAX,
+            capability_mask: u64::MAX,
             ..HandshakePreferences::default()
         },
     )
@@ -592,6 +649,7 @@ fn rpc_cancel_preempts_an_active_process() {
         "integration-60",
         HandshakePreferences {
             operation_mask: u64::MAX,
+            capability_mask: u64::MAX,
             ..HandshakePreferences::default()
         },
     )
@@ -656,6 +714,7 @@ fn rpc_cancel_propagates_through_a_batch_and_skips_its_descendants() {
         "integration-63",
         HandshakePreferences {
             operation_mask: u64::MAX,
+            capability_mask: u64::MAX,
             ..HandshakePreferences::default()
         },
     )
@@ -754,6 +813,7 @@ fn rpc_retrieves_and_releases_retained_evidence_across_frames() {
         "integration-70",
         HandshakePreferences {
             operation_mask: u64::MAX,
+            capability_mask: u64::MAX,
             ..HandshakePreferences::default()
         },
     )
@@ -852,6 +912,7 @@ fn rpc_chains_a_snapshot_reference_into_a_workspace_delta() {
         "integration-90",
         HandshakePreferences {
             operation_mask: u64::MAX,
+            capability_mask: u64::MAX,
             ..HandshakePreferences::default()
         },
     )

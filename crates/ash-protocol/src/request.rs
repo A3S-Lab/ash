@@ -4,10 +4,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use thiserror::Error;
 
-use crate::Operation;
 use crate::ason::{Atom, BuildError, Cell, Document, Field, Key, Record, Table, Value};
+use crate::{ApprovalToken, Capability, Operation};
 
 const ENVELOPE_FIELDS: &[&str] = &["t", "i", "o", "a", "u"];
+const PERMITTED_ENVELOPE_FIELDS: &[&str] = &["t", "i", "o", "a", "u", "v"];
 const BUDGET_COLUMNS: &[&str] = &["tok", "rec", "ms"];
 const EXEC_COLUMNS: &[&str] = &["x", "v", "c", "e", "in", "f"];
 const READ_COLUMNS: &[&str] = &["p", "m", "o", "n"];
@@ -103,6 +104,7 @@ pub struct Request {
     id: u64,
     arguments: Arguments,
     budget: Budget,
+    permit: Option<ApprovalToken>,
 }
 
 impl Request {
@@ -133,11 +135,17 @@ impl Request {
             id,
             arguments,
             budget,
+            permit: None,
         })
     }
 
     pub fn decode(document: &Document) -> Result<Self, RequestError> {
-        expect_fields(document, ENVELOPE_FIELDS)?;
+        let has_permit = if expect_fields(document, ENVELOPE_FIELDS).is_ok() {
+            false
+        } else {
+            expect_fields(document, PERMITTED_ENVELOPE_FIELDS)?;
+            true
+        };
         expect_unsigned(document.get("t"), "t", 1)?;
         let id = unsigned(document.get("i"), "i")?;
         let operation_text = text(document.get("o"), "o")?;
@@ -158,7 +166,14 @@ impl Request {
             narrow_u32(unsigned_cell(&budget_values[1], "rec")?, "rec")?,
             unsigned_cell(&budget_values[2], "ms")?,
         )?;
-        Self::new(id, arguments, budget)
+        let mut request = Self::new(id, arguments, budget)?;
+        if has_permit {
+            request.permit = Some(
+                ApprovalToken::parse(text(document.get("v"), "v")?)
+                    .map_err(|_| RequestError::InvalidText("v"))?,
+            );
+        }
+        Ok(request)
     }
 
     /// Extracts a usable request identifier before full schema validation.
@@ -170,7 +185,7 @@ impl Request {
     pub fn encode(&self) -> Result<Document, BuildError> {
         let operation = char::from(self.operation().id()).to_string();
         let budget = self.budget;
-        Document::new(vec![
+        let mut fields = vec![
             scalar_field("t", "1")?,
             scalar_field("i", &self.id.to_string())?,
             scalar_field("o", &operation)?,
@@ -186,6 +201,27 @@ impl Request {
                     ],
                 )?),
             ),
+        ];
+        if let Some(permit) = &self.permit {
+            fields.push(scalar_field("v", &permit.encode())?);
+        }
+        Document::new(fields)
+    }
+
+    /// Attaches an opaque approval token to a semantic retry.
+    #[must_use]
+    pub fn with_permit(mut self, permit: ApprovalToken) -> Self {
+        self.permit = Some(permit);
+        self
+    }
+
+    /// Canonical action-only representation used for approval binding.
+    pub fn authorization_target(&self) -> Result<Document, BuildError> {
+        Document::new(vec![
+            scalar_field("v", "1")?,
+            scalar_field("o", &char::from(self.operation().id()).to_string())?,
+            Field::new(Key::new("a")?, self.arguments.encode()?),
+            scalar_field("c", &self.required_capabilities().to_string())?,
         ])
     }
 
@@ -207,6 +243,16 @@ impl Request {
     #[must_use]
     pub const fn budget(&self) -> Budget {
         self.budget
+    }
+
+    #[must_use]
+    pub const fn permit(&self) -> Option<&ApprovalToken> {
+        self.permit.as_ref()
+    }
+
+    #[must_use]
+    pub fn required_capabilities(&self) -> u64 {
+        self.arguments.required_capabilities()
     }
 }
 
@@ -238,6 +284,24 @@ impl Arguments {
             Self::Snapshot(_) => Operation::Snapshot,
             Self::Ref(_) => Operation::Ref,
             Self::Cancel(_) => Operation::Cancel,
+        }
+    }
+
+    #[must_use]
+    pub fn required_capabilities(&self) -> u64 {
+        match self {
+            Self::Exec(_) => Capability::HostProcess.mask(),
+            Self::Read(_) | Self::List(_) | Self::Search(_) | Self::Snapshot(_) => {
+                Capability::WorkspaceRead.mask()
+            }
+            Self::Patch(_) | Self::Fs(_) => Capability::WorkspaceWrite.mask(),
+            Self::Batch(arguments) => arguments.nodes.iter().fold(0, |mask, node| {
+                mask | node.arguments.required_capabilities()
+            }),
+            Self::Ref(_) => Capability::RetainedResult.mask(),
+            // Cancellation must remain available even when the target is
+            // waiting for a capability-gated program permit.
+            Self::Cancel(_) => 0,
         }
     }
 

@@ -1,5 +1,5 @@
 use ash_engine::{Engine, Parallelism, Session, SessionConfig};
-use ash_ops::{OperationError, PortableOperations};
+use ash_ops::{AuthorizationPolicy, OperationError, PortableOperations};
 use ash_platform::Workspace;
 use ash_protocol::Operation;
 use ash_protocol::request::{Arguments, CancelArgs, Request};
@@ -22,11 +22,17 @@ impl ExecutionSession {
         PortableOperations::operation_mask() | Operation::Cancel.mask()
     }
 
+    #[must_use]
+    pub const fn capability_mask() -> u64 {
+        PortableOperations::capability_mask()
+    }
+
     pub fn open(
         session_id: u64,
         workspace: &str,
         max_output_bytes: u64,
         parallelism: Parallelism,
+        capability_mask: u64,
     ) -> Result<Self, CliError> {
         let engine = Engine::new(parallelism)?;
         let session = engine.open_session(SessionConfig::new(
@@ -35,7 +41,10 @@ impl ExecutionSession {
             max_output_bytes,
             parallelism,
         ))?;
-        let operations = PortableOperations::new(Workspace::new(workspace)?);
+        let operations = PortableOperations::with_authorization(
+            Workspace::new(workspace)?,
+            AuthorizationPolicy::allow(capability_mask).map_err(OperationError::from)?,
+        );
         Ok(Self {
             session,
             operations,

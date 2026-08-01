@@ -9,8 +9,12 @@ use ash_protocol::response::{
 use ash_store::{PathDictionaryError, StoreError};
 use thiserror::Error;
 
+use crate::authorization::AuthorizationError;
+
 #[derive(Debug, Error)]
 pub enum OperationError {
+    #[error(transparent)]
+    Authorization(#[from] AuthorizationError),
     #[error(transparent)]
     Platform(#[from] PlatformError),
     #[error(transparent)]
@@ -37,6 +41,8 @@ pub enum OperationError {
     Unsupported,
     #[error("operation was cancelled")]
     Cancelled,
+    #[error("the session capability policy denies this operation")]
+    CapabilityDenied,
     #[error("operation arguments are inconsistent with the observed input")]
     InvalidArgument,
     #[error("retained snapshot is malformed or has a different capture scope")]
@@ -77,6 +83,12 @@ impl OperationError {
                 ErrorCode::UnsupportedOperation,
                 RetryClass::CorrectRequest,
                 ErrorStage::Validate,
+            ),
+            Self::CapabilityDenied => (
+                Status::Denied,
+                ErrorCode::CapabilityDenied,
+                RetryClass::Never,
+                ErrorStage::Authorize,
             ),
             Self::Cancelled | Self::Engine(EngineError::Governor(GovernorError::Cancelled)) => (
                 Status::Cancelled,
@@ -192,7 +204,8 @@ impl OperationError {
                 RetryClass::RetrySame,
                 ErrorStage::Execute,
             ),
-            Self::Engine(_)
+            Self::Authorization(_)
+            | Self::Engine(_)
             | Self::Budget(_)
             | Self::Parallelism(_)
             | Self::Store(_)

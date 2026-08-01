@@ -2,6 +2,7 @@ use super::{
     HandshakePreferences, HandshakeRequest, HandshakeResponse, SchemaError, ServerHandshake,
 };
 use crate::ason::decode;
+use crate::{ALL_CAPABILITY_MASK, ALL_OPERATION_MASK};
 
 const HANDSHAKE_REQUEST: &str =
     include_str!("../../../../spec/fixtures/ason/handshake-request.ason");
@@ -14,11 +15,13 @@ fn specification_fixtures_match_the_typed_schema() {
         .expect("request schema");
     assert_eq!(request.request_id(), 7);
     assert_eq!(request.nonce(), "nonce-7");
+    assert_eq!(request.preferences().capability_mask, ALL_CAPABILITY_MASK);
 
     let response = HandshakeResponse::decode(&decode(HANDSHAKE_RESPONSE).expect("ASON response"))
         .expect("response schema");
     assert_eq!(response.session_id(), 1);
     assert_eq!(response.nonce(), "nonce-7");
+    assert_eq!(response.capability_mask(), ALL_CAPABILITY_MASK);
 }
 
 #[test]
@@ -52,6 +55,7 @@ fn request_and_response_round_trip_through_ason() {
         .expect("decode schema");
     assert_eq!(decoded, response);
     assert_eq!(decoded.operation_mask(), 0b101);
+    assert_eq!(decoded.capability_mask(), 1);
     assert_eq!(decoded.session_id(), 42);
     assert_eq!(decoded.nonce(), "nonce-7");
 }
@@ -113,15 +117,18 @@ fn server_masks_operation_bits_unknown_to_this_minor_version() {
         "n",
         HandshakePreferences {
             operation_mask: u64::MAX,
+            capability_mask: u64::MAX,
             ..HandshakePreferences::default()
         },
     )
     .expect("valid request");
     let response = ServerHandshake {
         operation_mask: u64::MAX,
+        capability_mask: u64::MAX,
         ..ServerHandshake::default()
     }
     .negotiate(&request, 1)
     .expect("negotiate");
-    assert_eq!(response.operation_mask(), crate::ALL_OPERATION_MASK);
+    assert_eq!(response.operation_mask(), ALL_OPERATION_MASK);
+    assert_eq!(response.capability_mask(), ALL_CAPABILITY_MASK);
 }

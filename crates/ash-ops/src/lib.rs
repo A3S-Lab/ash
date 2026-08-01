@@ -2,6 +2,7 @@
 
 //! Portable operation semantics for ash.
 
+mod authorization;
 mod batch;
 mod error;
 mod exec;
@@ -20,12 +21,14 @@ use ash_protocol::Operation;
 use ash_protocol::request::{Arguments, Request};
 use ash_protocol::response::FinalResponse;
 
+pub use authorization::{AuthorizationError, AuthorizationPolicy, PermitAuthority};
 pub use error::OperationError;
 
 /// Portable operations bound to one native workspace capability.
 #[derive(Clone, Debug)]
 pub struct PortableOperations {
     workspace: Workspace,
+    authorization: AuthorizationPolicy,
 }
 
 #[cfg(test)]
@@ -34,7 +37,23 @@ mod tests;
 impl PortableOperations {
     #[must_use]
     pub fn new(workspace: Workspace) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            authorization: AuthorizationPolicy::default(),
+        }
+    }
+
+    #[must_use]
+    pub const fn capability_mask() -> u64 {
+        ash_protocol::ALL_CAPABILITY_MASK
+    }
+
+    #[must_use]
+    pub fn with_authorization(workspace: Workspace, authorization: AuthorizationPolicy) -> Self {
+        Self {
+            workspace,
+            authorization,
+        }
     }
 
     #[must_use]
@@ -55,6 +74,11 @@ impl PortableOperations {
         request: &Request,
         program: &Program,
     ) -> Result<FinalResponse, OperationError> {
+        match authorization::authorize(&self.authorization, request, program) {
+            Ok(Some(response)) => return Ok(response),
+            Ok(None) => {}
+            Err(error) => return error.into_response(request.id()),
+        }
         let result = match request.arguments() {
             Arguments::Batch(arguments) => batch::execute(self, request, arguments, program).await,
             _ => self.execute_leaf(request, program).await,
