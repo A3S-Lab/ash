@@ -1,6 +1,6 @@
 # ASH/1 protocol and ASON
 
-Status: architecture baseline; canonical ASON syntax and framing implemented
+Status: canonical ASON syntax, framing, and the ASH/1.0 session handshake are implemented
 
 ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
 
@@ -145,11 +145,31 @@ The client opens a session with a handshake containing:
 - ASON format major and supported minor range;
 - maximum frame and desired output budgets;
 - supported operation and reducer capabilities;
-- optional tokenizer profile identifier;
 - workspace capability request;
 - client session nonce.
 
-The server returns the selected versions, effective limits, operation capability bitmap, platform identifiers, session identifier, and the compact field dictionary.
+The ASH/1.0 client request is encoded with this exact core schema:
+
+```ason
+t:0
+i:7
+a{ap,al,ah,zp,zl,zh,frm,out,ops,cap,root,n}:
+1,0,0,1,0,0,1048576,65536,1023,0,.,nonce-7
+```
+
+`ap` and `zp` are the ASH and ASON major versions; `al..ah` and `zl..zh` are supported minor ranges. `frm` and `out` request frame and immediate-output byte ceilings. `ops` and `cap` are unsigned capability masks. `root` is the requested logical workspace root, and `n` is a client nonce of at most 128 bytes.
+
+The server returns the selected versions, effective limits, operation capability bitmap, platform identifiers, and session identifier. The ASH/1.0 compact field dictionary is fixed by this specification and retained by the adapter rather than repeated in every handshake.
+
+```ason
+t:0
+i:7
+s:0
+d{ap,av,zp,zv,frm,out,ops,cap,os,arch,sid,n}:
+1,0,1,0,1048576,65536,0,0,linux,x86_64,1,nonce-7
+```
+
+The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. During the M0 protocol stage the executable advertises an operation mask of `0`; bits are enabled only as their complete operation contracts land.
 
 The handshake is retained by the adapter and is not repeated in each model-visible result.
 
@@ -216,18 +236,18 @@ The path `src/lib.rs` is introduced once with identifier `1`. Later messages in 
 
 The first protocol level reserves single-character presentation identifiers:
 
-| Identifier | Operation | Required result behavior |
-| --- | --- | --- |
-| `x` | direct process execution | normalized termination plus bounded stream projections |
-| `r` | file read | explicit ranges, digests, and path identifiers |
-| `l` | list, glob, or stat | compact paths and typed metadata |
-| `g` | literal or regex search | homogeneous match records |
-| `p` | compare-and-swap patch | per-file commit or conflict records |
-| `f` | filesystem mutation | journaled mutation outcomes |
-| `b` | batch or dependency graph | node-status table and selected outputs |
-| `h` | retained result operation | slice, search, project, or materialize |
-| `s` | workspace snapshot or delta | versioned file-change records |
-| `k` | cancellation | acknowledged target and final cancellation state |
+| Identifier | Mask bit | Operation | Required result behavior |
+| --- | ---: | --- | --- |
+| `x` | 0 | direct process execution | normalized termination plus bounded stream projections |
+| `r` | 1 | file read | explicit ranges, digests, and path identifiers |
+| `l` | 2 | list, glob, or stat | compact paths and typed metadata |
+| `g` | 3 | literal or regex search | homogeneous match records |
+| `p` | 4 | compare-and-swap patch | per-file commit or conflict records |
+| `f` | 5 | filesystem mutation | journaled mutation outcomes |
+| `b` | 6 | batch or dependency graph | node-status table and selected outputs |
+| `h` | 7 | retained result operation | slice, search, project, or materialize |
+| `s` | 8 | workspace snapshot or delta | versioned file-change records |
+| `k` | 9 | cancellation | acknowledged target and final cancellation state |
 
 These identifiers are stable within ASH/1. Internal Rust enum ordering is not part of the protocol.
 
@@ -305,6 +325,16 @@ r:@10
 The schema negotiated for error code `31` defines the meanings and types of its payload slots. Agent instructions need describe each stable code only once.
 
 Error code families reserve ranges for protocol, validation, capability, path, process, filesystem, budget, reference, and internal failures. New minor protocol levels may add codes but cannot change an existing code's meaning.
+
+Before a request identifier exists, CLI bootstrap failures are written to stderr as bare ASON rather than prose:
+
+```ason
+s:1
+e{c}:
+4
+```
+
+Bootstrap codes are `1` usage, `2` input ceiling, `3` invalid UTF-8, `4` ASON, `5` framing, `6` handshake schema, `7` missing handshake, `8` unavailable message type, `9` I/O, and `10` internal model construction. They are CLI diagnostics, not ASH request error codes.
 
 ## 16. Parser security
 

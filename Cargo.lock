@@ -11,6 +11,7 @@ dependencies = [
  "a3s-ash-platform",
  "a3s-ash-protocol",
  "a3s-ash-store",
+ "thiserror",
  "tokio",
 ]
 

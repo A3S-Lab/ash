@@ -19,4 +19,5 @@ ash-ops.workspace = true
 ash-platform.workspace = true
 ash-protocol.workspace = true
 ash-store.workspace = true
+thiserror.workspace = true
 tokio.workspace = true

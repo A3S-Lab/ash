@@ -48,11 +48,31 @@ impl Operation {
             _ => None,
         }
     }
+
+    /// Returns this operation's stable bit in the handshake capability mask.
+    #[must_use]
+    pub const fn mask(self) -> u64 {
+        match self {
+            Self::Exec => 1 << 0,
+            Self::Read => 1 << 1,
+            Self::List => 1 << 2,
+            Self::Search => 1 << 3,
+            Self::Patch => 1 << 4,
+            Self::Fs => 1 << 5,
+            Self::Batch => 1 << 6,
+            Self::Ref => 1 << 7,
+            Self::Snapshot => 1 << 8,
+            Self::Cancel => 1 << 9,
+        }
+    }
 }
+
+/// All operation bits defined by ASH/1.0.
+pub const ALL_OPERATION_MASK: u64 = (1 << 10) - 1;
 
 #[cfg(test)]
 mod tests {
-    use super::Operation;
+    use super::{ALL_OPERATION_MASK, Operation};
 
     #[test]
     fn operation_identifiers_are_stable_and_round_trip() {
@@ -74,5 +94,10 @@ mod tests {
             assert_eq!(Operation::from_id(id), Some(operation));
         }
         assert_eq!(Operation::from_id(b'?'), None);
+        let combined = expected
+            .into_iter()
+            .map(|(operation, _)| operation.mask())
+            .fold(0, |mask, bit| mask | bit);
+        assert_eq!(combined, ALL_OPERATION_MASK);
     }
 }
