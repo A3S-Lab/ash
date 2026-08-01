@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ash_engine::{Engine, Parallelism, SessionConfig};
 use ash_platform::Workspace;
 use ash_protocol::request::{
-    Arguments, Budget, LIST_FILES_ONLY, ListArgs, ReadArgs, ReadMode, Request,
-    SEARCH_CASE_INSENSITIVE, SearchArgs,
+    Arguments, Budget, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource, LIST_FILES_ONLY, ListArgs,
+    ReadArgs, ReadMode, Request, SEARCH_CASE_INSENSITIVE, SearchArgs,
 };
 
 use super::PortableOperations;
@@ -42,6 +42,142 @@ fn runtime(directory: &TestDirectory) -> (ash_engine::Session, PortableOperation
 
 fn budget(tokens: u32, records: u32) -> Budget {
     Budget::new(tokens, records, 30_000).expect("budget")
+}
+
+fn compile_helper(directory: &TestDirectory) -> String {
+    let bin = directory.0.join("bin");
+    fs::create_dir(&bin).expect("create bin");
+    let source = directory.0.join("helper.rs");
+    fs::write(
+        &source,
+        r#"
+use std::io::{self, Read};
+use std::time::Duration;
+
+fn main() {
+    match std::env::args().nth(1).as_deref() {
+        Some("fail") => {
+            eprintln!("bad");
+            std::process::exit(7);
+        }
+        Some("wait") => std::thread::sleep(Duration::from_secs(5)),
+        _ => {
+            let mut input = String::new();
+            io::stdin().read_to_string(&mut input).expect("stdin");
+            print!("{}:{input}", std::env::var("ASH_TEST").unwrap_or_default());
+        }
+    }
+}
+"#,
+    )
+    .expect("write helper");
+    let executable_name = if cfg!(windows) {
+        "helper.exe"
+    } else {
+        "helper"
+    };
+    let output = bin.join(executable_name);
+    let status = std::process::Command::new("rustc")
+        .arg(&source)
+        .arg("-o")
+        .arg(&output)
+        .status()
+        .expect("run rustc");
+    assert!(status.success(), "compile helper");
+    format!("bin/{executable_name}")
+}
+
+#[tokio::test]
+async fn exec_handles_environment_stdin_failure_and_timeout_without_a_shell() {
+    let directory = TestDirectory::new();
+    let executable = compile_helper(&directory);
+    let (session, operations) = runtime(&directory);
+
+    let success = Request::new(
+        50,
+        Arguments::Exec(
+            ExecArgs::new(
+                &executable,
+                vec![],
+                ".",
+                vec!["ASH_TEST=value".to_owned()],
+                InputSource::Inline("payload".to_owned()),
+                EXEC_CLEAR_ENVIRONMENT,
+            )
+            .expect("exec"),
+        ),
+        budget(1024, 8),
+    )
+    .expect("request");
+    let program = session.begin(&success).await.expect("program");
+    let response = operations
+        .execute(&success, &program)
+        .await
+        .expect("response")
+        .encode()
+        .expect("encode")
+        .encode();
+    assert!(response.starts_with("t:3\ni:50\ns:0\n"));
+    assert!(response.contains("d{k,c,ms,o,e,ro,re}:\n0,0,"));
+    assert!(response.contains("value:payload"));
+    drop(program);
+
+    let failure = Request::new(
+        51,
+        Arguments::Exec(
+            ExecArgs::new(
+                &executable,
+                vec!["fail".to_owned()],
+                ".",
+                vec![],
+                InputSource::None,
+                0,
+            )
+            .expect("exec"),
+        ),
+        budget(1024, 8),
+    )
+    .expect("request");
+    let program = session.begin(&failure).await.expect("program");
+    let response = operations
+        .execute(&failure, &program)
+        .await
+        .expect("response")
+        .encode()
+        .expect("encode")
+        .encode();
+    assert!(response.starts_with("t:3\ni:51\ns:5\n"));
+    assert!(response.contains("d{k,c,ms,o,e,ro,re}:\n0,7,"));
+    assert!(response.contains("e{c,q,p,x,a}:\n401,0,4,~,~\n"));
+    drop(program);
+
+    let timeout = Request::new(
+        52,
+        Arguments::Exec(
+            ExecArgs::new(
+                executable,
+                vec!["wait".to_owned()],
+                ".",
+                vec![],
+                InputSource::None,
+                0,
+            )
+            .expect("exec"),
+        ),
+        Budget::new(1024, 8, 50).expect("budget"),
+    )
+    .expect("request");
+    let program = session.begin(&timeout).await.expect("program");
+    let response = operations
+        .execute(&timeout, &program)
+        .await
+        .expect("response")
+        .encode()
+        .expect("encode")
+        .encode();
+    assert!(response.starts_with("t:3\ni:52\ns:6\n"));
+    assert!(response.contains("d{k,c,ms,o,e,ro,re}:\n2,~,"));
+    assert!(response.contains("e{c,q,p,x,a}:\n402,2,4,~,~\n"));
 }
 
 #[tokio::test]

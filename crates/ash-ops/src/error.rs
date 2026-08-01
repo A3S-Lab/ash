@@ -1,4 +1,4 @@
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 
 use ash_engine::{BudgetError, EngineError, GovernorError, ParallelismError};
 use ash_platform::PlatformError;
@@ -29,6 +29,10 @@ pub enum OperationError {
     Response(#[from] ResponseError),
     #[error(transparent)]
     Regex(#[from] regex::Error),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Task(#[from] tokio::task::JoinError),
     #[error("operation is not available in this implementation stage")]
     Unsupported,
     #[error("operation was cancelled")]
@@ -145,6 +149,12 @@ impl OperationError {
                 ErrorCode::Internal,
                 RetryClass::RetrySame,
                 ErrorStage::Encode,
+            ),
+            Self::Io(_) | Self::Task(_) => (
+                Status::Internal,
+                ErrorCode::Internal,
+                RetryClass::RetrySame,
+                ErrorStage::Execute,
             ),
         }
     }

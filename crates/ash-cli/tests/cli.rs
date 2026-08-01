@@ -4,7 +4,9 @@ use std::process::{Command, Output, Stdio};
 use ash_ops::PortableOperations;
 use ash_protocol::ason::decode;
 use ash_protocol::handshake::{HandshakePreferences, HandshakeRequest, HandshakeResponse};
-use ash_protocol::request::{Arguments, Budget, ReadArgs, ReadMode, Request};
+use ash_protocol::request::{
+    Arguments, Budget, ExecArgs, InputSource, ReadArgs, ReadMode, Request,
+};
 
 fn run(arguments: &[&str], input: &[u8]) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ash"))
@@ -90,6 +92,37 @@ fn run_executes_one_bare_typed_request() {
     assert!(response.starts_with("t:3\ni:31\ns:0\n"));
     assert!(response.contains("Cargo.toml"));
     assert!(response.contains("d[1]{p,o,n,h,t,r}:"));
+}
+
+#[test]
+fn run_executes_a_direct_process_with_typed_output() {
+    let request = Request::new(
+        32,
+        Arguments::Exec(
+            ExecArgs::new(
+                "rustc",
+                vec!["--version".to_owned()],
+                ".",
+                vec![],
+                InputSource::None,
+                0,
+            )
+            .expect("exec"),
+        ),
+        Budget::new(4_096, 16, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode")
+    .encode();
+    let output = run(&["run"], request.as_bytes());
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert!(output.stderr.is_empty());
+    let response = std::str::from_utf8(&output.stdout).expect("UTF-8 response");
+    assert_eq!(decode(response).expect("ASON response").encode(), response);
+    assert!(response.starts_with("t:3\ni:32\ns:0\n"));
+    assert!(response.contains("d{k,c,ms,o,e,ro,re}:"));
+    assert!(response.contains("rustc "));
 }
 
 #[test]

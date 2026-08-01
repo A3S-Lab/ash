@@ -3,6 +3,7 @@
 //! Portable operation semantics for ash.
 
 mod error;
+mod exec;
 mod list;
 mod projection;
 mod read;
@@ -33,7 +34,10 @@ impl PortableOperations {
 
     #[must_use]
     pub const fn operation_mask() -> u64 {
-        Operation::Read.mask() | Operation::List.mask() | Operation::Search.mask()
+        Operation::Exec.mask()
+            | Operation::Read.mask()
+            | Operation::List.mask()
+            | Operation::Search.mask()
     }
 
     pub async fn execute(
@@ -42,6 +46,9 @@ impl PortableOperations {
         program: &Program,
     ) -> Result<FinalResponse, OperationError> {
         let result = match request.arguments() {
+            Arguments::Exec(arguments) => {
+                exec::execute(&self.workspace, request, arguments, program).await
+            }
             Arguments::Read(arguments) => {
                 read::execute(&self.workspace, request, arguments, program).await
             }
@@ -51,7 +58,6 @@ impl PortableOperations {
             Arguments::Search(arguments) => {
                 search::execute(&self.workspace, request, arguments, program).await
             }
-            Arguments::Exec(_) => Err(OperationError::Unsupported),
         };
         match result {
             Ok(response) => Ok(response),

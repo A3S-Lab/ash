@@ -10,5 +10,6 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+process-wrap.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

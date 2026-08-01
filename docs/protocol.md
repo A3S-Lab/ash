@@ -1,6 +1,6 @@
 # ASH/1 protocol and ASON
 
-Status: canonical ASON, framing, handshake, typed M1 schemas, and read/list/search runtime paths are implemented
+Status: canonical ASON, framing, handshake, typed M1 schemas, and exec/read/list/search runtime paths are implemented
 
 ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
 
@@ -169,7 +169,7 @@ d{ap,av,zp,zv,frm,out,ops,cap,os,arch,sid,n}:
 1,0,1,0,1048576,65536,0,0,linux,x86_64,1,nonce-7
 ```
 
-The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises `0x0e`, exactly the implemented `read`, `list`, and `search` bits; `exec` and later bits remain clear until their complete operation contracts land.
+The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises `0x0f`, exactly the implemented `exec`, `read`, `list`, and `search` bits; later bits remain clear until their complete operation contracts land.
 
 The handshake is retained by the adapter and is not repeated in each model-visible result.
 

@@ -1,7 +1,12 @@
 use std::ffi::OsString;
 use std::process::Stdio;
 
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 
 use crate::{PlatformError, Workspace};
 
@@ -29,10 +34,7 @@ pub struct ProcessExit {
 }
 
 pub struct ProcessHandle {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    stdout: Option<ChildStdout>,
-    stderr: Option<ChildStderr>,
+    child: Box<dyn ChildWrapper>,
 }
 
 impl Workspace {
@@ -56,8 +58,7 @@ impl Workspace {
                 Stdio::null()
             })
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
         if spec.clear_environment {
             command.env_clear();
         }
@@ -71,12 +72,14 @@ impl Workspace {
                 }
             }
         }
-        let mut child = command.spawn()?;
+        let mut command = CommandWrap::from(command);
+        command.wrap(KillOnDrop);
+        #[cfg(unix)]
+        command.wrap(ProcessGroup::leader());
+        #[cfg(windows)]
+        command.wrap(JobObject);
         Ok(ProcessHandle {
-            stdin: child.stdin.take(),
-            stdout: child.stdout.take(),
-            stderr: child.stderr.take(),
-            child,
+            child: command.spawn()?,
         })
     }
 }
@@ -106,15 +109,15 @@ fn validate_process_spec(spec: &ProcessSpec) -> Result<(), PlatformError> {
 
 impl ProcessHandle {
     pub fn take_stdin(&mut self) -> Option<ChildStdin> {
-        self.stdin.take()
+        self.child.stdin().take()
     }
 
     pub fn take_stdout(&mut self) -> Option<ChildStdout> {
-        self.stdout.take()
+        self.child.stdout().take()
     }
 
     pub fn take_stderr(&mut self) -> Option<ChildStderr> {
-        self.stderr.take()
+        self.child.stderr().take()
     }
 
     #[must_use]
@@ -128,7 +131,7 @@ impl ProcessHandle {
     }
 
     pub async fn terminate(&mut self) -> Result<(), PlatformError> {
-        match self.child.kill().await {
+        match Box::into_pin(self.child.kill()).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
             Err(error) => Err(error.into()),
@@ -160,7 +163,9 @@ fn normalize_exit(status: std::process::ExitStatus) -> ProcessExit {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
     use tokio::io::AsyncReadExt;
 
@@ -185,6 +190,57 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn compile_process_tree_helper(directory: &TestDirectory) -> String {
+        let bin_directory = directory.0.join("bin");
+        fs::create_dir(&bin_directory).expect("create bin directory");
+        let source = directory.0.join("process-tree-helper.rs");
+        fs::write(
+            &source,
+            r#"
+use std::{env, fs, process::Command, thread, time::Duration};
+
+fn main() {
+    let mut arguments = env::args().skip(1);
+    match arguments.next().as_deref() {
+        Some("parent") => {
+            let ready = arguments.next().expect("ready path");
+            let escaped = arguments.next().expect("escaped path");
+            let _child = Command::new(env::current_exe().expect("current executable"))
+                .arg("child")
+                .arg(escaped)
+                .spawn()
+                .expect("spawn descendant");
+            fs::write(ready, b"ready").expect("write ready marker");
+            thread::sleep(Duration::from_secs(10));
+        }
+        Some("child") => {
+            let escaped = arguments.next().expect("escaped path");
+            thread::sleep(Duration::from_secs(1));
+            fs::write(escaped, b"escaped").expect("write escaped marker");
+            thread::sleep(Duration::from_secs(10));
+        }
+        _ => panic!("unknown helper mode"),
+    }
+}
+"#,
+        )
+        .expect("write helper source");
+        let executable_name = if cfg!(windows) {
+            "process-tree-helper.exe"
+        } else {
+            "process-tree-helper"
+        };
+        let executable = bin_directory.join(executable_name);
+        let status = Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .expect("run rustc");
+        assert!(status.success(), "compile process-tree helper");
+        format!("bin/{executable_name}")
     }
 
     #[tokio::test]
@@ -218,5 +274,41 @@ mod tests {
         );
         assert!(exit.expect("wait").success, "stderr={stderr:?}");
         assert!(stdout.starts_with(b"rustc "));
+    }
+
+    #[tokio::test]
+    async fn terminating_a_process_terminates_its_descendants() {
+        let directory = TestDirectory::new();
+        let executable = compile_process_tree_helper(&directory);
+        let workspace = Workspace::new(&directory.0).expect("workspace");
+        let mut process = workspace
+            .spawn(&ProcessSpec {
+                executable,
+                argv: vec![
+                    "parent".to_owned(),
+                    "ready".to_owned(),
+                    "escaped".to_owned(),
+                ],
+                cwd: ".".to_owned(),
+                environment: vec![],
+                clear_environment: false,
+                pipe_stdin: false,
+            })
+            .expect("spawn process tree");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !directory.0.join("ready").is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("descendant should start");
+        process.terminate().await.expect("terminate process tree");
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+        assert!(
+            !directory.0.join("escaped").exists(),
+            "descendant survived process-tree termination"
+        );
     }
 }
