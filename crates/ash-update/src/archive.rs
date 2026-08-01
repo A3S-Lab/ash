@@ -87,8 +87,19 @@ fn prepare_empty_destination(destination: &Path) -> Result<(), UpdateError> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn extract_platform_archive(
+    archive: &Path,
+    destination: &Path,
+    artifact: &Artifact,
+) -> Result<(), UpdateError> {
+    if artifact.target().contains("windows") {
+        extract_zip_archive(archive, destination, artifact)
+    } else {
+        extract_tar_archive(archive, destination, artifact)
+    }
+}
+
+fn extract_tar_archive(
     archive: &Path,
     destination: &Path,
     artifact: &Artifact,
@@ -127,8 +138,7 @@ fn extract_platform_archive(
     Ok(())
 }
 
-#[cfg(windows)]
-fn extract_platform_archive(
+fn extract_zip_archive(
     archive: &Path,
     destination: &Path,
     artifact: &Artifact,
@@ -206,6 +216,11 @@ fn set_executable(path: &Path) -> Result<(), UpdateError> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_executable(_path: &Path) -> Result<(), UpdateError> {
     Ok(())
 }
 

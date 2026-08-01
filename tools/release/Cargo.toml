@@ -1,6 +1,6 @@
 [package]
-name = "a3s-ash-update"
-description = "Signed release verification and safe activation for ash"
+name = "a3s-ash-release"
+description = "Fail-closed release packaging and signing for ash"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,19 +8,17 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+publish = false
 
 [dependencies]
-atomicwrites.workspace = true
+ash-update.workspace = true
 ed25519-dalek.workspace = true
 flate2.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tempfile.workspace = true
-thiserror.workspace = true
 tar.workspace = true
+tempfile.workspace = true
 zip.workspace = true
-
-[dev-dependencies]
-ed25519-dalek = { workspace = true, features = ["zeroize"] }
+zeroize.workspace = true

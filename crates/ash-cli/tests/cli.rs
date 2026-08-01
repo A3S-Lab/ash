@@ -232,6 +232,7 @@ fn build_info_is_canonical_machine_metadata() {
     assert_eq!(decode(&metadata).expect("ASON").encode(), metadata);
     assert!(metadata.starts_with("v:0.1.0\nt:"));
     assert!(metadata.contains("\np:1\na:1\nk:"));
+    assert!(metadata.contains("\nc:"));
     assert!(metadata.ends_with('\n'));
     assert!(!metadata.contains("unsupported"));
 }

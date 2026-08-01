@@ -403,6 +403,7 @@ fn probe_candidate(path: &Path) -> Result<CandidateInfo, UpdateError> {
     if build_value(lines.next(), "p:")? != "1"
         || build_value(lines.next(), "a:")? != "1"
         || build_value(lines.next(), "k:")? != trust_fingerprint()
+        || !valid_build_commit(build_value(lines.next(), "c:")?)
         || lines.next().is_some()
         || !text.ends_with('\n')
     {
@@ -412,6 +413,14 @@ fn probe_candidate(path: &Path) -> Result<CandidateInfo, UpdateError> {
         version: version.to_owned(),
         target: target.to_owned(),
     })
+}
+
+fn valid_build_commit(value: &str) -> bool {
+    value == "~"
+        || (value.len() == 40
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
 }
 
 fn build_value<'a>(line: Option<&'a str>, prefix: &str) -> Result<&'a str, UpdateError> {

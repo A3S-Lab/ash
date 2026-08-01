@@ -1,6 +1,6 @@
 # Cross-platform distribution
 
-Status: installers and signed self-update pipeline implemented; release-key provisioning and a published signed binary release remain open
+Status: installers, signed self-update, release assembly, and six-native-target workflow implemented; credential provisioning and a published signed binary release remain open
 
 This document defines how `ash` is built, installed, updated, rolled back, and removed on Linux, macOS, and Windows. The source tree contains offline-testable `install.sh` and `install.ps1` implementations plus an `ash-update` trust core and `ash self` coordinator that strictly verify canonical Ed25519-signed metadata, stream bounded release archives, activate healthy candidates, recover interrupted journals, and roll back. The online commands remain unavailable in ordinary development builds until a release public key is embedded and signed artifacts exist.
 
@@ -45,7 +45,7 @@ SHA256SUMS.sig
 release-manifest.json
 release-manifest.sig
 sbom.spdx.json
-provenance.intoto.jsonl
+provenance.sigstore.json
 ```
 
 Every archive contains exactly:
@@ -179,7 +179,7 @@ The Unix installer recognizes common POSIX shell profiles but does not append du
 
 The one-click bootstrap trusts HTTPS delivery of the source-controlled installer. The installer then validates the downloaded archive against `SHA256SUMS`. A signature bundle and build provenance are published for independent verification.
 
-Checksums fetched from the same release origin protect against corruption and accidental substitution but do not by themselves defend against compromise of that origin. Documentation must state this boundary rather than describe checksums as complete supply-chain verification.
+Checksums fetched from the same release origin protect against corruption and accidental substitution but do not by themselves defend against compromise of that origin. `SHA256SUMS.sig` is a canonical Ed25519 signature for independent verification, and GitHub's Sigstore bundle binds the listed assets to the release workflow. The bootstrap installer intentionally relies only on HTTPS plus the checksum; documentation must state this boundary rather than describe checksums as complete supply-chain verification.
 
 ### 10.2 Self-update
 
@@ -231,21 +231,23 @@ The flow removes the active launcher, installed versions, updater state, and ins
 
 ## 13. Release workflow
 
-Tag-triggered release jobs must:
+The implemented tag-triggered workflow performs the following fail-closed sequence:
 
 1. Verify a clean, annotated version tag.
 2. Run protocol, unit, integration, fuzz-smoke, and platform contract gates.
 3. Build each target from a pinned Rust toolchain and locked dependencies.
 4. Strip release binaries without removing required signing metadata.
-5. Generate archive contents, checksums, SBOM, and provenance.
+5. Generate deterministic archive contents, signed checksums, an SPDX 2.3 SBOM, and Sigstore provenance.
 6. Sign macOS and Windows binaries.
 7. Notarize macOS artifacts.
 8. Sign checksums and the release manifest.
 9. Publish a draft GitHub Release.
-10. Run clean-host installer, upgrade, rollback, and uninstall tests against the draft assets.
+10. Run clean-host installer, signed-current confirmation, uninstall, and, when a prior stable release exists, upgrade and rollback tests against the draft assets.
 11. Promote the release only after all required target evidence passes.
 
 No target is silently omitted from a stable release. A missing target blocks promotion or requires a documented platform-support change before tagging.
+
+Linux x86-64 and ARM64, macOS Intel and Apple Silicon, and Windows x86-64 and ARM64 build on matching GitHub-hosted native runners. macOS artifacts must pass Developer ID signing and notarization; Windows artifacts must pass Authenticode signing and timestamp verification. The assembly job accepts exactly one descriptor for every target, recomputes archive identities, signs a monotonic manifest derived from the stable semantic version, then cross-extracts all tar and zip packages with the production update verifier before a draft can exist. The protected `stable-release` environment is the final promotion boundary. See the [release operator contract](./releasing.md) for exact repository configuration and recovery rules.
 
 ## 14. Installer test matrix
 

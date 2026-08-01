@@ -39,15 +39,27 @@ async fn run() -> Result<(), CliError> {
 
 async fn build_info() -> Result<(), CliError> {
     let output = format!(
-        "v:{}\nt:{}\np:1\na:1\nk:{}\n",
+        "v:{}\nt:{}\np:1\na:1\nk:{}\nc:{}\n",
         env!("CARGO_PKG_VERSION"),
         build_target(),
-        self_command::trust_fingerprint()
+        self_command::trust_fingerprint(),
+        build_commit(),
     );
     let mut stdout = stdout();
     stdout.write_all(output.as_bytes()).await?;
     stdout.flush().await?;
     Ok(())
+}
+
+pub(crate) fn build_commit() -> &'static str {
+    option_env!("ASH_BUILD_COMMIT")
+        .filter(|value| {
+            value.len() == 40
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .unwrap_or("~")
 }
 
 pub(crate) fn build_target() -> &'static str {

@@ -179,6 +179,17 @@ impl TrustStore {
         &self.fingerprint
     }
 
+    pub fn verify_detached(
+        &self,
+        key_id: &str,
+        payload: &[u8],
+        signature: [u8; 64],
+    ) -> Result<(), UpdateError> {
+        self.key(key_id)?
+            .verify_strict(payload, &Signature::from_bytes(&signature))
+            .map_err(|_| UpdateError::Signature)
+    }
+
     fn key(&self, key_id: &str) -> Result<&VerifyingKey, UpdateError> {
         self.keys
             .iter()
@@ -262,13 +273,11 @@ pub fn verify_release(
     if signature.schema != 1 || signature.key_id != manifest.key_id {
         return Err(UpdateError::Signature);
     }
-    let signature_value = Signature::from_bytes(
-        &decode_hex_array::<64>(&signature.signature).map_err(|_| UpdateError::Signature)?,
-    );
-    trust
-        .key(&signature.key_id)?
-        .verify_strict(&signing_payload(manifest_bytes), &signature_value)
-        .map_err(|_| UpdateError::Signature)?;
+    trust.verify_detached(
+        &signature.key_id,
+        &signing_payload(manifest_bytes),
+        decode_hex_array::<64>(&signature.signature).map_err(|_| UpdateError::Signature)?,
+    )?;
 
     validate_manifest(&manifest, current_protocol, current_ason)?;
     let current = Version::parse(installed_version).map_err(|_| UpdateError::Version)?;

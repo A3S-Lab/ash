@@ -14,6 +14,7 @@ pub use install::{
 };
 pub use manifest::{
     Artifact, MAX_ARCHIVE_BYTES, MAX_BINARY_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,
-    ReleaseManifest, ReleaseSignature, TrustStore, UpdateDecision, UpdateError, VerifiedRelease,
-    canonical_manifest, canonical_signature, embedded_trust_store, signing_payload, verify_release,
+    RELEASE_TARGETS, ReleaseManifest, ReleaseSignature, TrustStore, UpdateDecision, UpdateError,
+    VerifiedRelease, canonical_manifest, canonical_signature, embedded_trust_store,
+    signing_payload, verify_release,
 };

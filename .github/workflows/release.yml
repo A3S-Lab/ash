@@ -1,0 +1,576 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated vMAJOR.MINOR.PATCH tag
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Validate release identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
+      commit: ${{ steps.identity.outputs.commit }}
+      published_unix: ${{ steps.identity.outputs.published_unix }}
+      previous_tag: ${{ steps.identity.outputs.previous_tag }}
+    steps:
+      - name: Check out annotated tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Validate tag, source, and workspace version
+        id: identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag
+          version=${RELEASE_TAG#v}
+          workspace_version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "a3s-ash") | .version')
+          test "$workspace_version" = "$version"
+          commit=$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")
+          test "$(git rev-parse HEAD)" = "$commit"
+          published_unix=$(git for-each-ref --format='%(taggerdate:unix)' "refs/tags/$RELEASE_TAG")
+          test -n "$published_unix"
+          test "$published_unix" -gt 0
+          previous_tag=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')
+          test "$previous_tag" != "$RELEASE_TAG"
+          test -z "$(git status --porcelain)"
+          {
+            echo "tag=$RELEASE_TAG"
+            echo "version=$version"
+            echo "commit=$commit"
+            echo "published_unix=$published_unix"
+            echo "previous_tag=$previous_tag"
+          } >> "$GITHUB_OUTPUT"
+
+  quality:
+    name: Re-run release quality gates
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - name: Install pinned stable and nightly toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
+          rustup toolchain install nightly-2026-07-31 --profile minimal
+      - name: Verify source, licenses, and format evidence
+        shell: pwsh
+        run: |
+          cargo +1.97.1 fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/check-third-party-licenses.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.97.1 run -p a3s-ash-bench --release --locked -- --check benches/reports/v0.1.0/format.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Lint and test every workspace target
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.97.1 clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo +1.97.1 test --workspace --all-targets --locked
+      - name: Run bounded parser and metadata fuzz smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-fuzz --version 0.13.2 --locked
+          cargo +nightly-2026-07-31 fuzz run ason_decode fuzz/corpus/ason_decode -- \
+            -runs=1000 -max_len=65536 -rss_limit_mb=2048
+          cargo +nightly-2026-07-31 fuzz run update_metadata fuzz/corpus/update_metadata -- \
+            -runs=1000 -max_len=65536 -rss_limit_mb=2048
+
+  build:
+    name: Build and sign ${{ matrix.target }}
+    needs: [prepare, quality]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            family: linux
+            target: x86_64-unknown-linux-musl
+            binary: target/x86_64-unknown-linux-musl/release/ash
+          - runner: ubuntu-24.04-arm
+            family: linux
+            target: aarch64-unknown-linux-musl
+            binary: target/aarch64-unknown-linux-musl/release/ash
+          - runner: macos-15-intel
+            family: macos
+            target: x86_64-apple-darwin
+            binary: target/x86_64-apple-darwin/release/ash
+          - runner: macos-15
+            family: macos
+            target: aarch64-apple-darwin
+            binary: target/aarch64-apple-darwin/release/ash
+          - runner: windows-2025
+            family: windows
+            target: x86_64-pc-windows-msvc
+            binary: target/x86_64-pc-windows-msvc/release/ash.exe
+          - runner: windows-11-arm
+            family: windows
+            target: aarch64-pc-windows-msvc
+            binary: target/aarch64-pc-windows-msvc/release/ash.exe
+    env:
+      ASH_RELEASE_TRUSTED_KEYS: ${{ secrets.ASH_RELEASE_TRUSTED_KEYS }}
+      ASH_BUILD_COMMIT: ${{ needs.prepare.outputs.commit }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_BUILD: gha-${{ github.run_id }}-${{ github.run_attempt }}
+      RELEASE_TARGET: ${{ matrix.target }}
+      RELEASE_BINARY: ${{ matrix.binary }}
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.tag }}
+      - name: Require an embedded release trust root
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ASH_RELEASE_TRUSTED_KEYS"
+      - name: Install pinned Rust toolchain and target
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 "$RELEASE_TARGET"
+      - name: Install MUSL linker
+        if: matrix.family == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+      - name: Build locked native binary
+        shell: bash
+        run: cargo +1.97.1 build --release --locked --target "$RELEASE_TARGET" -p a3s-ash
+      - name: Reject a dynamically linked Linux binary
+        if: matrix.family == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if readelf -l "$RELEASE_BINARY" | grep -q 'INTERP'; then
+            echo 'release binary contains a dynamic interpreter' >&2
+            exit 1
+          fi
+      - name: Sign and notarize macOS binary
+        if: matrix.family == 'macos'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_CERTIFICATE_P12_BASE64"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_SIGNING_IDENTITY"
+          test -n "$APPLE_ID"
+          test -n "$APPLE_TEAM_ID"
+          test -n "$APPLE_APP_PASSWORD"
+          certificate="$RUNNER_TEMP/ash-release.p12"
+          keychain="$RUNNER_TEMP/ash-release.keychain-db"
+          keychain_password="ash-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+            rm -f "$certificate" "$RUNNER_TEMP/ash-notary.zip"
+          }
+          trap cleanup EXIT
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 -D > "$certificate"
+          chmod 600 "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$RELEASE_BINARY"
+          codesign --verify --strict --verbose=2 "$RELEASE_BINARY"
+          ditto -c -k --keepParent "$RELEASE_BINARY" "$RUNNER_TEMP/ash-notary.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/ash-notary.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+      - name: Authenticode-sign Windows binary
+        if: matrix.family == 'windows'
+        shell: powershell
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PFX_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw 'Windows signing material is unavailable'
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'ash-release.pfx'
+          [IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64)
+          )
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate `
+            -FilePath $certificatePath `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -Password $password | Where-Object HasPrivateKey | Select-Object -First 1
+          if (-not $certificate) { throw 'No private code-signing certificate was imported' }
+          try {
+            $architecture = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+            $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+              -Recurse -Filter signtool.exe | `
+              Where-Object FullName -Match "\\$architecture\\signtool\.exe$" | `
+              Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $signTool) { throw "signtool.exe for $architecture was not found" }
+            & $signTool.FullName sign /fd SHA256 /td SHA256 `
+              /tr https://timestamp.digicert.com /sha1 $certificate.Thumbprint $env:RELEASE_BINARY
+            if ($LASTEXITCODE -ne 0) { throw 'signtool sign failed' }
+            & $signTool.FullName verify /pa /all $env:RELEASE_BINARY
+            if ($LASTEXITCODE -ne 0) { throw 'signtool verify failed' }
+          }
+          finally {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force
+            Remove-Item -LiteralPath $certificatePath -Force
+          }
+      - name: Package signed Unix artifact
+        if: matrix.family != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="dist/$RELEASE_TARGET"
+          cargo +1.97.1 run --release --locked -p a3s-ash-release -- package \
+            --target "$RELEASE_TARGET" \
+            --binary "$RELEASE_BINARY" \
+            --output "$output" \
+            --version "$RELEASE_VERSION" \
+            --commit "$ASH_BUILD_COMMIT" \
+            --build "$RELEASE_BUILD" \
+            --trusted-keys "$ASH_RELEASE_TRUSTED_KEYS" \
+            --license LICENSE \
+            --inventory THIRD-PARTY-LICENSES
+      - name: Package signed Windows artifact
+        if: matrix.family == 'windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo +1.97.1 run --release --locked -p a3s-ash-release -- package `
+            --target $env:RELEASE_TARGET `
+            --binary $env:RELEASE_BINARY `
+            --output "dist/$env:RELEASE_TARGET" `
+            --version $env:RELEASE_VERSION `
+            --commit $env:ASH_BUILD_COMMIT `
+            --build $env:RELEASE_BUILD `
+            --trusted-keys $env:ASH_RELEASE_TRUSTED_KEYS `
+            --license LICENSE `
+            --inventory THIRD-PARTY-LICENSES
+          if ($LASTEXITCODE -ne 0) { throw 'release packaging failed' }
+      - name: Upload packaged target
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    name: Assemble, attest, and draft release
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+      PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
+      RELEASE_PUBLISHED_UNIX: ${{ needs.prepare.outputs.published_unix }}
+      ASH_RELEASE_TRUSTED_KEYS: ${{ secrets.ASH_RELEASE_TRUSTED_KEYS }}
+      ASH_RELEASE_KEY_ID: ${{ secrets.ASH_RELEASE_KEY_ID }}
+      ASH_RELEASE_SIGNING_KEY: ${{ secrets.ASH_RELEASE_SIGNING_KEY }}
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.tag }}
+      - name: Download all six target artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: artifacts
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Generate SPDX 2.3 SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: artifacts/sbom.spdx.json
+          syft-version: v1.44.0
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Sign and cross-verify the complete release
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ASH_RELEASE_TRUSTED_KEYS"
+          test -n "$ASH_RELEASE_KEY_ID"
+          test -n "$ASH_RELEASE_SIGNING_KEY"
+          key="$RUNNER_TEMP/ash-release-signing-key"
+          cleanup() { rm -f "$key"; }
+          trap cleanup EXIT
+          umask 077
+          printf '%s' "$ASH_RELEASE_SIGNING_KEY" > "$key"
+          cargo +1.97.1 run --release --locked -p a3s-ash-release -- sign \
+            --artifacts artifacts \
+            --output release \
+            --version "$RELEASE_VERSION" \
+            --commit "$RELEASE_COMMIT" \
+            --published-unix "$RELEASE_PUBLISHED_UNIX" \
+            --key-id "$ASH_RELEASE_KEY_ID" \
+            --signing-key "$key" \
+            --trusted-keys "$ASH_RELEASE_TRUSTED_KEYS" \
+            --sbom artifacts/sbom.spdx.json
+      - name: Generate Sigstore build provenance
+        id: attest
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-checksums: release/SHA256SUMS
+      - name: Bind provenance and reverify release directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp '${{ steps.attest.outputs.bundle-path }}' release/provenance.sigstore.json
+          cargo +1.97.1 run --release --locked -p a3s-ash-release -- verify \
+            --release release \
+            --trusted-keys "$ASH_RELEASE_TRUSTED_KEYS"
+      - name: Create immutable-candidate draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "release $RELEASE_TAG already exists" >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" release/* \
+            --draft \
+            --verify-tag \
+            --generate-notes \
+            --title "ash $RELEASE_TAG"
+
+  smoke:
+    name: Clean-host smoke ${{ matrix.target }}
+    needs: [prepare, assemble]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      attestations: read
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            family: unix
+            target: x86_64-unknown-linux-musl
+            asset: ash-x86_64-unknown-linux-musl.tar.gz
+          - runner: ubuntu-24.04-arm
+            family: unix
+            target: aarch64-unknown-linux-musl
+            asset: ash-aarch64-unknown-linux-musl.tar.gz
+          - runner: macos-15-intel
+            family: macos
+            target: x86_64-apple-darwin
+            asset: ash-x86_64-apple-darwin.tar.gz
+          - runner: macos-15
+            family: macos
+            target: aarch64-apple-darwin
+            asset: ash-aarch64-apple-darwin.tar.gz
+          - runner: windows-2025
+            family: windows
+            target: x86_64-pc-windows-msvc
+            asset: ash-x86_64-pc-windows-msvc.zip
+          - runner: windows-11-arm
+            family: windows
+            target: aarch64-pc-windows-msvc
+            asset: ash-aarch64-pc-windows-msvc.zip
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+      RELEASE_TARGET: ${{ matrix.target }}
+      RELEASE_ASSET: ${{ matrix.asset }}
+    steps:
+      - name: Check out installer entrypoints
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - name: Download draft release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release
+          gh release download "$RELEASE_TAG" --dir release --pattern '*'
+          if [ -n "$PREVIOUS_TAG" ]; then
+            mkdir previous
+            gh release download "$PREVIOUS_TAG" --dir previous \
+              --pattern "$RELEASE_ASSET" \
+              --pattern SHA256SUMS
+          fi
+      - name: Verify GitHub build provenance
+        shell: bash
+        run: >-
+          gh attestation verify "release/$RELEASE_ASSET"
+          --repo "$GITHUB_REPOSITORY"
+          --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+      - name: Install, confirm signed metadata, and uninstall on Unix
+        if: matrix.family != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          checksum=$(awk -v asset="$RELEASE_ASSET" '$2 == asset { print $1; exit }' release/SHA256SUMS)
+          test ${#checksum} -eq 64
+          prefix="$RUNNER_TEMP/ash smoke prefix"
+          bin="$RUNNER_TEMP/ash smoke bin"
+          install_archive="release/$RELEASE_ASSET"
+          install_checksum=$checksum
+          if [ -n "$PREVIOUS_TAG" ]; then
+            install_archive="previous/$RELEASE_ASSET"
+            install_checksum=$(awk -v asset="$RELEASE_ASSET" '$2 == asset { print $1; exit }' previous/SHA256SUMS)
+            test ${#install_checksum} -eq 64
+          fi
+          sh install.sh \
+            --archive "$install_archive" \
+            --sha256 "$install_checksum" \
+            --prefix "$prefix" \
+            --bin-dir "$bin" \
+            --no-path
+          "$bin/ash" self update --prefix "$prefix" --from "$PWD/release"
+          "$bin/ash" --build-info | grep -F -x "v:$RELEASE_VERSION"
+          "$bin/ash" --build-info | grep -F -x "t:$RELEASE_TARGET"
+          "$bin/ash" --build-info | grep -F -x "c:$RELEASE_COMMIT"
+          if [ '${{ matrix.family }}' = macos ]; then
+            codesign --verify --strict --verbose=2 "$bin/ash"
+          fi
+          if [ -n "$PREVIOUS_TAG" ]; then
+            previous_version=${PREVIOUS_TAG#v}
+            "$bin/ash" self rollback --prefix "$prefix"
+            "$bin/ash" --build-info | grep -F -x "v:$previous_version"
+          fi
+          sh install.sh --prefix "$prefix" --bin-dir "$bin" --uninstall
+          test ! -e "$bin/ash"
+      - name: Install, confirm signed metadata, and uninstall on Windows
+        if: matrix.family == 'windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $line = Get-Content release/SHA256SUMS | Where-Object { $_ -match "^[0-9a-f]{64}\s+$([regex]::Escape($env:RELEASE_ASSET))$" } | Select-Object -First 1
+          if (-not $line) { throw 'release checksum was not found' }
+          $checksum = ($line -split '\s+')[0]
+          $prefix = Join-Path $env:RUNNER_TEMP 'ash smoke prefix'
+          $bin = Join-Path $env:RUNNER_TEMP 'ash smoke bin'
+          $installArchive = "release/$env:RELEASE_ASSET"
+          $installChecksum = $checksum
+          if (-not [string]::IsNullOrWhiteSpace($env:PREVIOUS_TAG)) {
+            $previousLine = Get-Content previous/SHA256SUMS | Where-Object { $_ -match "^[0-9a-f]{64}\s+$([regex]::Escape($env:RELEASE_ASSET))$" } | Select-Object -First 1
+            if (-not $previousLine) { throw 'previous release checksum was not found' }
+            $installArchive = "previous/$env:RELEASE_ASSET"
+            $installChecksum = ($previousLine -split '\s+')[0]
+          }
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File install.ps1 `
+            -Archive $installArchive `
+            -Sha256 $installChecksum `
+            -Prefix $prefix `
+            -BinDir $bin `
+            -NoPath
+          if ($LASTEXITCODE -ne 0) { throw 'installer failed' }
+          $ash = Join-Path $bin 'ash.exe'
+          & $ash self update --prefix $prefix --from (Resolve-Path release)
+          if ($LASTEXITCODE -ne 0) { throw 'signed release activation failed' }
+          $deadline = [DateTime]::UtcNow.AddSeconds(30)
+          do {
+            Start-Sleep -Milliseconds 200
+            $versionLine = @(& $ash --build-info 2>$null) | Where-Object { $_ -like 'v:*' } | Select-Object -First 1
+          } while ($versionLine -ne "v:$env:RELEASE_VERSION" -and [DateTime]::UtcNow -lt $deadline)
+          if ($versionLine -ne "v:$env:RELEASE_VERSION") { throw 'Windows activation did not complete' }
+          $buildInfo = @(& $ash --build-info)
+          foreach ($expected in @("v:$env:RELEASE_VERSION", "t:$env:RELEASE_TARGET", "c:$env:RELEASE_COMMIT")) {
+            if ($buildInfo -notcontains $expected) { throw "missing build identity: $expected" }
+          }
+          if ((Get-AuthenticodeSignature -FilePath $ash).Status -ne 'Valid') {
+            throw 'installed Authenticode signature is not valid'
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:PREVIOUS_TAG)) {
+            $previousVersion = $env:PREVIOUS_TAG.Substring(1)
+            & $ash self rollback --prefix $prefix
+            if ($LASTEXITCODE -ne 0) { throw 'Windows rollback scheduling failed' }
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+              Start-Sleep -Milliseconds 200
+              $versionLine = @(& $ash --build-info 2>$null) | Where-Object { $_ -like 'v:*' } | Select-Object -First 1
+            } while ($versionLine -ne "v:$previousVersion" -and [DateTime]::UtcNow -lt $deadline)
+            if ($versionLine -ne "v:$previousVersion") { throw 'Windows rollback did not complete' }
+          }
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File install.ps1 -Prefix $prefix -BinDir $bin -Uninstall
+          if ($LASTEXITCODE -ne 0 -or (Test-Path -LiteralPath $ash)) { throw 'uninstall failed' }
+
+  publish:
+    name: Promote stable release
+    needs: [prepare, smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: stable-release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Publish only the fully verified draft
+        shell: bash
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest

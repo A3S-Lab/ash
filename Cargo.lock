@@ -81,6 +81,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "a3s-ash-release"
+version = "0.1.0"
+dependencies = [
+ "a3s-ash-update",
+ "ed25519-dalek",
+ "flate2",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "zeroize",
+ "zip",
+]
+
+[[package]]
 name = "a3s-ash-store"
 version = "0.1.0"
 dependencies = [
