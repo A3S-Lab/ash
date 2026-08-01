@@ -171,6 +171,7 @@ impl Workspace {
         must_exist: bool,
     ) -> Result<PathBuf, PlatformError> {
         super::workspace::validate_logical(logical)?;
+        self.reject_reserved(logical)?;
         if logical == "." {
             return Err(PlatformError::InvalidMutationTarget);
         }

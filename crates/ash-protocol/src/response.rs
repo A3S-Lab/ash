@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::Operation;
 use crate::ason::{Atom, BuildError, Cell, Document, Field, Key, Record, Table, Value};
+use crate::request::FsActionKind;
 
 pub const RESULT_TRUNCATED: u32 = 1 << 0;
 pub const RESULT_REDUCED: u32 = 1 << 1;
@@ -21,6 +22,7 @@ const READ_COLUMNS: &[&str] = &["p", "o", "n", "h", "t", "r"];
 const LIST_COLUMNS: &[&str] = &["p", "k", "z", "m"];
 const SEARCH_COLUMNS: &[&str] = &["p", "l", "c", "t"];
 const PATCH_COLUMNS: &[&str] = &["p", "s", "h"];
+const FS_COLUMNS: &[&str] = &["i", "k", "p", "q", "s", "h"];
 const SNAPSHOT_COLUMNS: &[&str] = &["p", "c", "k", "z", "h"];
 const BATCH_COLUMNS: &[&str] = &["i", "o", "s", "c", "r"];
 const REF_SLICE_COLUMNS: &[&str] = &["o", "n", "p", "h", "t", "b"];
@@ -222,6 +224,22 @@ impl FinalResponse {
             {
                 return Err(ResponseError::InvalidData);
             }
+            if let ResultData::Fs(results) = data {
+                if status == Status::Success
+                    && results
+                        .iter()
+                        .any(|result| result.state != FsState::Committed)
+                {
+                    return Err(ResponseError::InvalidData);
+                }
+                if status == Status::Conflict
+                    && !results
+                        .iter()
+                        .any(|result| result.state == FsState::Conflict)
+                {
+                    return Err(ResponseError::InvalidData);
+                }
+            }
             match data {
                 ResultData::Reference(ReferenceResult::Slice(_) | ReferenceResult::Search(_))
                     if reference.is_none() =>
@@ -318,6 +336,7 @@ pub enum ResultData {
     List(Vec<ListEntry>),
     Search(Vec<SearchMatch>),
     Patch(Vec<PatchResult>),
+    Fs(Vec<FsResult>),
     Batch(Vec<BatchNodeResult>),
     Snapshot(Vec<SnapshotResult>),
     Reference(ReferenceResult),
@@ -332,6 +351,7 @@ impl ResultData {
             Self::List(entries) => encode_list(entries),
             Self::Search(matches) => encode_search(matches),
             Self::Patch(results) => encode_patch(results),
+            Self::Fs(results) => encode_fs(results),
             Self::Batch(results) => encode_batch(results),
             Self::Snapshot(results) => encode_snapshot(results),
             Self::Reference(result) => result.encode(),
@@ -349,6 +369,7 @@ impl ResultData {
             Self::List(_)
             | Self::Search(_)
             | Self::Patch(_)
+            | Self::Fs(_)
             | Self::Snapshot(_)
             | Self::Reference(_)
             | Self::Cancel(_) => false,
@@ -415,6 +436,33 @@ impl ResultData {
                     }
                 }
             }
+            Self::Fs(results) => {
+                if results.is_empty() || !results.windows(2).all(|pair| pair[0].id < pair[1].id) {
+                    return Err(ResponseError::InvalidData);
+                }
+                for result in results {
+                    if result.id == 0 || result.path == 0 {
+                        return Err(ResponseError::InvalidData);
+                    }
+                    let destination_valid = match result.kind {
+                        FsActionKind::Create | FsActionKind::Remove => result.destination.is_none(),
+                        FsActionKind::Copy | FsActionKind::Move => result
+                            .destination
+                            .is_some_and(|path| path != 0 && path != result.path),
+                    };
+                    let digest_valid = result.digest.as_deref().is_none_or(valid_digest);
+                    let state_valid = match result.state {
+                        FsState::Committed | FsState::Conflict | FsState::RolledBack => {
+                            result.digest.is_some()
+                        }
+                        FsState::RecoveryRequired => true,
+                        FsState::Skipped => result.digest.is_none(),
+                    };
+                    if !destination_valid || !digest_valid || !state_valid {
+                        return Err(ResponseError::InvalidData);
+                    }
+                }
+            }
             Self::Batch(results) => {
                 if results.is_empty() || !results.windows(2).all(|pair| pair[0].id < pair[1].id) {
                     return Err(ResponseError::InvalidData);
@@ -422,10 +470,7 @@ impl ResultData {
                 for result in results {
                     validate_reference(result.reference)?;
                     if result.id == 0
-                        || matches!(
-                            result.operation,
-                            Operation::Batch | Operation::Cancel | Operation::Fs
-                        )
+                        || matches!(result.operation, Operation::Batch | Operation::Cancel)
                     {
                         return Err(ResponseError::InvalidData);
                     }
@@ -717,6 +762,26 @@ pub struct PatchResult {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+pub enum FsState {
+    Committed = 0,
+    Conflict = 1,
+    RolledBack = 2,
+    RecoveryRequired = 3,
+    Skipped = 4,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FsResult {
+    pub id: u64,
+    pub kind: FsActionKind,
+    pub path: u64,
+    pub destination: Option<u64>,
+    pub state: FsState,
+    pub digest: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub enum BatchNodeState {
     Succeeded = 0,
     Failed = 1,
@@ -853,6 +918,23 @@ fn encode_patch(results: &[PatchResult]) -> Result<Value, BuildError> {
         })
         .collect();
     Ok(Value::Table(Table::new(keys(PATCH_COLUMNS)?, rows)?))
+}
+
+fn encode_fs(results: &[FsResult]) -> Result<Value, BuildError> {
+    let rows = results
+        .iter()
+        .map(|result| {
+            vec![
+                unsigned_cell(result.id),
+                unsigned_cell(u64::from(result.kind as u8)),
+                unsigned_cell(result.path),
+                result.destination.map_or_else(null_cell, unsigned_cell),
+                unsigned_cell(u64::from(result.state as u8)),
+                optional_text(result.digest.as_deref()),
+            ]
+        })
+        .collect();
+    Ok(Value::Table(Table::new(keys(FS_COLUMNS)?, rows)?))
 }
 
 fn encode_batch(results: &[BatchNodeResult]) -> Result<Value, BuildError> {

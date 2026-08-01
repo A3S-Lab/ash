@@ -10,9 +10,9 @@ use ash_protocol::Operation;
 use ash_protocol::ason::decode;
 use ash_protocol::handshake::{HandshakePreferences, HandshakeRequest, HandshakeResponse};
 use ash_protocol::request::{
-    Arguments, BatchArgs, BatchNode, Budget, CancelArgs, ExecArgs, InputSource, PatchArgs,
-    PatchContent, PatchEdit, ReadArgs, ReadMode, RefArgs, RefMode, Request, SearchArgs,
-    SnapshotArgs, SnapshotMode,
+    Arguments, BatchArgs, BatchNode, Budget, CancelArgs, ExecArgs, FsAction, FsActionKind, FsArgs,
+    InputSource, PatchArgs, PatchContent, PatchEdit, ReadArgs, ReadMode, RefArgs, RefMode, Request,
+    SearchArgs, SnapshotArgs, SnapshotMode,
 };
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -85,8 +85,17 @@ fn main() {
 }
 
 fn run(arguments: &[&str], input: &[u8]) -> Output {
+    run_from(None, arguments, input)
+}
+
+fn run_in(directory: &TestDirectory, arguments: &[&str], input: &[u8]) -> Output {
+    run_from(Some(&directory.0), arguments, input)
+}
+
+fn run_from(directory: Option<&std::path::Path>, arguments: &[&str], input: &[u8]) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ash"))
         .args(arguments)
+        .current_dir(directory.unwrap_or_else(|| std::path::Path::new(".")))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -192,6 +201,45 @@ fn run_executes_one_bare_typed_request() {
     assert!(response.starts_with("t:3\ni:31\ns:0\n"));
     assert!(response.contains("Cargo.toml"));
     assert!(response.contains("d[1]{p,o,n,h,t,r}:"));
+}
+
+#[test]
+fn run_executes_one_bare_durable_fs_request() {
+    let directory = TestDirectory::new();
+    let request = Request::new(
+        34,
+        Arguments::Fs(
+            FsArgs::new(vec![
+                FsAction::new(
+                    1,
+                    FsActionKind::Create,
+                    "created.txt",
+                    None,
+                    None,
+                    Some(PatchContent::Inline("created\n".to_owned())),
+                )
+                .expect("create"),
+            ])
+            .expect("fs"),
+        ),
+        Budget::new(1024, 8, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode")
+    .encode();
+    let output = run_in(&directory, &["run"], request.as_bytes());
+
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert!(output.stderr.is_empty());
+    let response = std::str::from_utf8(&output.stdout).expect("UTF-8 response");
+    assert_eq!(decode(response).expect("ASON response").encode(), response);
+    assert!(response.starts_with("t:3\ni:34\ns:0\n"), "{response}");
+    assert!(response.contains("d[1]{i,k,p,q,s,h}:"), "{response}");
+    assert_eq!(
+        fs::read(directory.0.join("created.txt")).expect("created"),
+        b"created\n"
+    );
 }
 
 #[test]
@@ -422,6 +470,62 @@ fn rpc_executes_a_compare_and_swap_patch() {
     assert!(result.starts_with("t:3\ni:46\ns:0\n"), "{result}");
     assert!(result.contains("d[1]{p,s,h}:"), "{result}");
     assert_eq!(fs::read(target).expect("read target"), b"after\n");
+}
+
+#[test]
+fn rpc_executes_a_durable_fs_transaction() {
+    let directory = TestDirectory::new();
+    fs::write(directory.0.join("source.txt"), b"source\n").expect("source");
+    let handshake = HandshakeRequest::new(
+        47,
+        directory.0.to_string_lossy(),
+        "integration-47",
+        HandshakePreferences {
+            operation_mask: u64::MAX,
+            ..HandshakePreferences::default()
+        },
+    )
+    .expect("handshake")
+    .encode()
+    .expect("encode handshake")
+    .encode();
+    let request = Request::new(
+        48,
+        Arguments::Fs(
+            FsArgs::new(vec![
+                FsAction::new(
+                    1,
+                    FsActionKind::Copy,
+                    "source.txt",
+                    Some("copied.txt".to_owned()),
+                    Some(blake3::hash(b"source\n").to_hex().to_string()),
+                    None,
+                )
+                .expect("copy"),
+            ])
+            .expect("fs"),
+        ),
+        Budget::new(1024, 8, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode request")
+    .encode();
+    let mut input = frame(handshake.as_bytes());
+    input.extend(frame(request.as_bytes()));
+    let output = run(&["rpc"], &input);
+
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert!(output.stderr.is_empty());
+    let frames = split_frames(&output.stdout);
+    assert_eq!(frames.len(), 2);
+    let result = std::str::from_utf8(frames[1]).expect("result UTF-8");
+    assert!(result.starts_with("t:3\ni:48\ns:0\n"), "{result}");
+    assert!(result.contains("d[1]{i,k,p,q,s,h}:"), "{result}");
+    assert_eq!(
+        fs::read(directory.0.join("copied.txt")).expect("copied"),
+        b"source\n"
+    );
 }
 
 #[test]

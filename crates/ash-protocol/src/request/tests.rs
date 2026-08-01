@@ -1,9 +1,9 @@
 use super::{
     Arguments, BatchArgs, BatchNode, Budget, CancelArgs, EXEC_CLEAR_ENVIRONMENT, ExecArgs,
-    InputSource, LIST_INCLUDE_HIDDEN, ListArgs, PATCH_COLUMNS, PatchArgs, PatchContent, PatchEdit,
-    READ_COLUMNS, REF_CASE_INSENSITIVE, REF_REGEX, ReadArgs, ReadMode, RefArgs, RefMode, Request,
-    RequestError, SEARCH_CASE_INSENSITIVE, SEARCH_REGEX, SNAPSHOT_INCLUDE_HIDDEN, SearchArgs,
-    SnapshotArgs, SnapshotMode,
+    FsAction, FsActionKind, FsArgs, InputSource, LIST_INCLUDE_HIDDEN, ListArgs, PATCH_COLUMNS,
+    PatchArgs, PatchContent, PatchEdit, READ_COLUMNS, REF_CASE_INSENSITIVE, REF_REGEX, ReadArgs,
+    ReadMode, RefArgs, RefMode, Request, RequestError, SEARCH_CASE_INSENSITIVE, SEARCH_REGEX,
+    SNAPSHOT_INCLUDE_HIDDEN, SearchArgs, SnapshotArgs, SnapshotMode,
 };
 use crate::Operation;
 use crate::ason::{Atom, Cell, Document, Field, Key, Record, Value, decode};
@@ -15,6 +15,7 @@ const LIST_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/list-req
 const CANCEL_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/cancel-request.ason");
 const REF_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/ref-request.ason");
 const PATCH_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/patch-request.ason");
+const FS_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/fs-request.ason");
 const SNAPSHOT_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/snapshot-request.ason");
 const BATCH_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/batch-request.ason");
 
@@ -43,6 +44,7 @@ fn all_core_request_fixtures_are_canonical_typed_messages() {
         (LIST_REQUEST, Operation::List),
         (SEARCH_REQUEST, Operation::Search),
         (PATCH_REQUEST, Operation::Patch),
+        (FS_REQUEST, Operation::Fs),
         (BATCH_REQUEST, Operation::Batch),
         (SNAPSHOT_REQUEST, Operation::Snapshot),
         (REF_REQUEST, Operation::Ref),
@@ -53,6 +55,48 @@ fn all_core_request_fixtures_are_canonical_typed_messages() {
         assert_eq!(request.operation(), operation);
         assert_eq!(request.encode().expect("encode").encode(), fixture);
     }
+}
+
+#[test]
+fn filesystem_fixture_is_typed_and_transactions_reject_overlapping_paths() {
+    let request = Request::decode(&decode(FS_REQUEST).expect("ASON")).expect("filesystem schema");
+    let Arguments::Fs(filesystem) = request.arguments() else {
+        panic!("filesystem arguments expected");
+    };
+    assert_eq!(filesystem.actions().len(), 2);
+    assert_eq!(filesystem.actions()[0].kind(), FsActionKind::Create);
+    assert_eq!(
+        filesystem.actions()[1].destination(),
+        Some("Cargo.copy.toml")
+    );
+    assert_eq!(request.encode().expect("encode").encode(), FS_REQUEST);
+
+    let digest = "a".repeat(64);
+    let overlapping = vec![
+        FsAction::new(
+            1,
+            FsActionKind::Remove,
+            "same.txt",
+            None,
+            Some(digest.clone()),
+            None,
+        )
+        .expect("remove"),
+        FsAction::new(
+            2,
+            FsActionKind::Copy,
+            "source.txt",
+            Some("same.txt".to_owned()),
+            Some(digest),
+            None,
+        )
+        .expect("copy"),
+    ];
+    assert_eq!(
+        FsArgs::new(overlapping),
+        Err(RequestError::UnexpectedValue("p"))
+    );
+    assert!(FsAction::new(3, FsActionKind::Create, "new", None, None, None).is_err());
 }
 
 #[test]

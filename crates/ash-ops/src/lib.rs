@@ -5,6 +5,7 @@
 mod batch;
 mod error;
 mod exec;
+mod filesystem;
 mod list;
 mod patch;
 mod projection;
@@ -43,6 +44,7 @@ impl PortableOperations {
             | Operation::List.mask()
             | Operation::Search.mask()
             | Operation::Patch.mask()
+            | Operation::Fs.mask()
             | Operation::Batch.mask()
             | Operation::Ref.mask()
             | Operation::Snapshot.mask()
@@ -83,6 +85,9 @@ impl PortableOperations {
             }
             Arguments::Patch(arguments) => {
                 patch::execute(&self.workspace, request, arguments, program).await
+            }
+            Arguments::Fs(arguments) => {
+                filesystem::execute(&self.workspace, request, arguments, program).await
             }
             Arguments::Snapshot(arguments) => {
                 snapshot::execute(&self.workspace, request, arguments, program).await

@@ -1,15 +1,17 @@
 use super::{
     BatchNodeResult, BatchNodeState, CancelResult, CancellationState, ErrorCode, ErrorRecord,
-    ErrorStage, FileKind, FinalResponse, ListEntry, PatchResult, PatchState, PathMapping,
-    ProcessResult, RESULT_RETAINED, RESULT_TRUNCATED, ReadResult, ReferenceMatch, ReferenceResult,
-    ReferenceSlice, ReleasedReference, ResponseError, ResultData, RetryClass, SearchMatch,
-    SnapshotChange, SnapshotResult, Status, StreamResult, TerminationKind,
+    ErrorStage, FileKind, FinalResponse, FsResult, FsState, ListEntry, PatchResult, PatchState,
+    PathMapping, ProcessResult, RESULT_RETAINED, RESULT_TRUNCATED, ReadResult, ReferenceMatch,
+    ReferenceResult, ReferenceSlice, ReleasedReference, ResponseError, ResultData, RetryClass,
+    SearchMatch, SnapshotChange, SnapshotResult, Status, StreamResult, TerminationKind,
 };
 use crate::Operation;
 use crate::ason::decode;
+use crate::request::FsActionKind;
 
 const SEARCH_RESULT: &str = include_str!("../../../../spec/fixtures/ason/search-result.ason");
 const BATCH_RESULT: &str = include_str!("../../../../spec/fixtures/ason/batch-result.ason");
+const FS_RESULT: &str = include_str!("../../../../spec/fixtures/ason/fs-result.ason");
 
 #[test]
 fn search_result_matches_the_canonical_specification_fixture() {
@@ -315,4 +317,49 @@ fn batch_results_are_compact_references_in_stable_node_order() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn filesystem_result_matches_the_canonical_transaction_fixture() {
+    let response = FinalResponse::success(
+        84,
+        vec![
+            PathMapping {
+                id: 1,
+                value: "new.txt".to_owned(),
+            },
+            PathMapping {
+                id: 2,
+                value: "Cargo.toml".to_owned(),
+            },
+            PathMapping {
+                id: 3,
+                value: "Cargo.copy.toml".to_owned(),
+            },
+        ],
+        ResultData::Fs(vec![
+            FsResult {
+                id: 1,
+                kind: FsActionKind::Create,
+                path: 1,
+                destination: None,
+                state: FsState::Committed,
+                digest: Some("b".repeat(64)),
+            },
+            FsResult {
+                id: 2,
+                kind: FsActionKind::Copy,
+                path: 2,
+                destination: Some(3),
+                state: FsState::Committed,
+                digest: Some("a".repeat(64)),
+            },
+        ]),
+        0,
+        None,
+    )
+    .expect("filesystem response");
+    let encoded = response.encode().expect("encode").encode();
+    assert_eq!(encoded, FS_RESULT);
+    assert_eq!(decode(&encoded).expect("ASON").encode(), encoded);
 }

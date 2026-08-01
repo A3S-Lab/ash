@@ -14,6 +14,7 @@ const READ_COLUMNS: &[&str] = &["p", "m", "o", "n"];
 const LIST_COLUMNS: &[&str] = &["p", "d", "f"];
 const SEARCH_COLUMNS: &[&str] = &["q", "p", "f"];
 const PATCH_COLUMNS: &[&str] = &["p", "h", "i", "o", "n", "v", "f"];
+const FS_COLUMNS: &[&str] = &["i", "k", "p", "q", "h", "v"];
 const SNAPSHOT_COLUMNS: &[&str] = &["p", "d", "m", "r", "f"];
 const REF_COLUMNS: &[&str] = &["r", "m", "o", "n", "q", "f"];
 const CANCEL_COLUMNS: &[&str] = &["i"];
@@ -25,6 +26,7 @@ pub const MAX_REQUEST_MILLIS: u64 = 86_400_000;
 pub const MAX_ARGUMENT_ITEMS: usize = 1024;
 pub const MAX_BATCH_NODES: usize = 256;
 pub const MAX_BATCH_EDGES: usize = 4096;
+pub const MAX_FS_ACTIONS: usize = 256;
 
 pub const EXEC_CLEAR_ENVIRONMENT: u32 = 1 << 0;
 pub const LIST_INCLUDE_HIDDEN: u32 = 1 << 0;
@@ -119,6 +121,13 @@ impl Request {
                 return Err(RequestError::InvalidLimit("u"));
             }
         }
+        if let Arguments::Fs(filesystem) = &arguments {
+            let actions = u32::try_from(filesystem.actions.len())
+                .map_err(|_| RequestError::InvalidLimit("a"))?;
+            if actions > budget.tokens || actions > budget.records {
+                return Err(RequestError::InvalidLimit("u"));
+            }
+        }
         budget.validate()?;
         Ok(Self {
             id,
@@ -208,6 +217,7 @@ pub enum Arguments {
     List(ListArgs),
     Search(SearchArgs),
     Patch(PatchArgs),
+    Fs(FsArgs),
     Batch(BatchArgs),
     Snapshot(SnapshotArgs),
     Ref(RefArgs),
@@ -223,6 +233,7 @@ impl Arguments {
             Self::List(_) => Operation::List,
             Self::Search(_) => Operation::Search,
             Self::Patch(_) => Operation::Patch,
+            Self::Fs(_) => Operation::Fs,
             Self::Batch(_) => Operation::Batch,
             Self::Snapshot(_) => Operation::Snapshot,
             Self::Ref(_) => Operation::Ref,
@@ -231,10 +242,14 @@ impl Arguments {
     }
 
     fn decode(operation: Operation, value: &Value) -> Result<Self, RequestError> {
-        if operation == Operation::Batch {
-            return match value {
-                Value::Table(table) => BatchArgs::decode(table).map(Self::Batch),
-                _ => Err(RequestError::ExpectedTable("a")),
+        if matches!(operation, Operation::Fs | Operation::Batch) {
+            let Value::Table(table) = value else {
+                return Err(RequestError::ExpectedTable("a"));
+            };
+            return match operation {
+                Operation::Fs => FsArgs::decode(table).map(Self::Fs),
+                Operation::Batch => BatchArgs::decode(table).map(Self::Batch),
+                _ => unreachable!(),
             };
         }
         let Value::Record(record) = value else {
@@ -264,6 +279,7 @@ impl Arguments {
             Self::List(arguments) => arguments.encode(),
             Self::Search(arguments) => arguments.encode(),
             Self::Patch(arguments) => arguments.encode(),
+            Self::Fs(arguments) => arguments.encode(),
             Self::Batch(arguments) => arguments.encode(),
             Self::Snapshot(arguments) => arguments.encode(),
             Self::Ref(arguments) => arguments.encode(),
@@ -278,6 +294,7 @@ impl Arguments {
             Self::List(arguments) => arguments.validate(),
             Self::Search(arguments) => arguments.validate(),
             Self::Patch(arguments) => arguments.validate(),
+            Self::Fs(arguments) => arguments.validate(),
             Self::Batch(arguments) => arguments.validate(),
             Self::Snapshot(arguments) => arguments.validate(),
             Self::Ref(arguments) => arguments.validate(),
@@ -898,6 +915,237 @@ impl PatchArgs {
     }
 }
 
+/// File-only transaction actions. Directory and overwrite semantics require
+/// separate capabilities and are intentionally absent from the core schema.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum FsActionKind {
+    Create = 0,
+    Copy = 1,
+    Move = 2,
+    Remove = 3,
+}
+
+impl FsActionKind {
+    fn decode(value: u64) -> Result<Self, RequestError> {
+        match value {
+            0 => Ok(Self::Create),
+            1 => Ok(Self::Copy),
+            2 => Ok(Self::Move),
+            3 => Ok(Self::Remove),
+            _ => Err(RequestError::UnexpectedValue("k")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FsAction {
+    id: u64,
+    kind: FsActionKind,
+    path: String,
+    destination: Option<String>,
+    expected_digest: Option<String>,
+    content: Option<PatchContent>,
+}
+
+impl FsAction {
+    pub fn new(
+        id: u64,
+        kind: FsActionKind,
+        path: impl Into<String>,
+        destination: Option<String>,
+        expected_digest: Option<String>,
+        content: Option<PatchContent>,
+    ) -> Result<Self, RequestError> {
+        let action = Self {
+            id,
+            kind,
+            path: path.into(),
+            destination,
+            expected_digest,
+            content,
+        };
+        action.validate()?;
+        Ok(action)
+    }
+
+    fn decode(row: &[Cell]) -> Result<Self, RequestError> {
+        let content = match &row[5] {
+            Cell::Atom(Atom::Null) => None,
+            Cell::Atom(value) => Some(PatchContent::decode(value)?),
+            Cell::Vector(_) => return Err(RequestError::ExpectedScalar("v")),
+        };
+        Self::new(
+            unsigned_cell(&row[0], "i")?,
+            FsActionKind::decode(unsigned_cell(&row[1], "k")?)?,
+            text_cell(&row[2], "p")?,
+            optional_text_cell(&row[3], "q")?,
+            optional_text_cell(&row[4], "h")?,
+            content,
+        )
+    }
+
+    fn encode(&self) -> Vec<Cell> {
+        vec![
+            unsigned_value(self.id),
+            unsigned_value(u64::from(self.kind as u8)),
+            text_value(&self.path),
+            self.destination
+                .as_deref()
+                .map_or_else(|| Cell::Atom(Atom::Null), text_value),
+            self.expected_digest
+                .as_deref()
+                .map_or_else(|| Cell::Atom(Atom::Null), text_value),
+            self.content.as_ref().map_or_else(
+                || Cell::Atom(Atom::Null),
+                |content| Cell::Atom(content.encode()),
+            ),
+        ]
+    }
+
+    fn validate(&self) -> Result<(), RequestError> {
+        if self.id == 0 {
+            return Err(RequestError::InvalidUnsigned("i"));
+        }
+        validate_text(&self.path, "p", 4096)?;
+        if let Some(destination) = &self.destination {
+            validate_text(destination, "q", 4096)?;
+            if destination == &self.path {
+                return Err(RequestError::UnexpectedValue("q"));
+            }
+        }
+        if let Some(digest) = &self.expected_digest
+            && !valid_digest(digest)
+        {
+            return Err(RequestError::InvalidText("h"));
+        }
+        if let Some(content) = &self.content {
+            content.validate()?;
+        }
+        let shape_is_valid = match self.kind {
+            FsActionKind::Create => {
+                self.destination.is_none()
+                    && self.expected_digest.is_none()
+                    && self.content.is_some()
+            }
+            FsActionKind::Copy | FsActionKind::Move => {
+                self.destination.is_some()
+                    && self.expected_digest.is_some()
+                    && self.content.is_none()
+            }
+            FsActionKind::Remove => {
+                self.destination.is_none()
+                    && self.expected_digest.is_some()
+                    && self.content.is_none()
+            }
+        };
+        if shape_is_valid {
+            Ok(())
+        } else {
+            Err(RequestError::UnexpectedValue("k"))
+        }
+    }
+
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> FsActionKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn destination(&self) -> Option<&str> {
+        self.destination.as_deref()
+    }
+
+    #[must_use]
+    pub fn expected_digest(&self) -> Option<&str> {
+        self.expected_digest.as_deref()
+    }
+
+    #[must_use]
+    pub const fn content(&self) -> Option<&PatchContent> {
+        self.content.as_ref()
+    }
+}
+
+/// A bounded, stable-order file transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FsArgs {
+    actions: Vec<FsAction>,
+}
+
+impl FsArgs {
+    pub fn new(actions: Vec<FsAction>) -> Result<Self, RequestError> {
+        let arguments = Self { actions };
+        arguments.validate()?;
+        Ok(arguments)
+    }
+
+    fn decode(table: &Table) -> Result<Self, RequestError> {
+        expect_table_columns(table, FS_COLUMNS)?;
+        Self::new(
+            table
+                .rows()
+                .iter()
+                .map(|row| FsAction::decode(row))
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+    }
+
+    fn encode(&self) -> Result<Value, BuildError> {
+        Ok(Value::Table(Table::new(
+            keys(FS_COLUMNS)?,
+            self.actions.iter().map(FsAction::encode).collect(),
+        )?))
+    }
+
+    fn validate(&self) -> Result<(), RequestError> {
+        if self.actions.is_empty() || self.actions.len() > MAX_FS_ACTIONS {
+            return Err(RequestError::InvalidLimit("a"));
+        }
+        if !self.actions.windows(2).all(|pair| pair[0].id < pair[1].id) {
+            return Err(RequestError::UnexpectedValue("i"));
+        }
+        let mut paths = HashSet::new();
+        let mut inline_bytes = 0_usize;
+        for action in &self.actions {
+            action.validate()?;
+            if !paths.insert(action.path.as_str())
+                || action
+                    .destination
+                    .as_deref()
+                    .is_some_and(|destination| !paths.insert(destination))
+            {
+                return Err(RequestError::UnexpectedValue("p"));
+            }
+            if let Some(PatchContent::Inline(content)) = &action.content {
+                inline_bytes = inline_bytes
+                    .checked_add(content.len())
+                    .ok_or(RequestError::InvalidLimit("v"))?;
+            }
+        }
+        if inline_bytes > MAX_PATCH_INLINE_BYTES {
+            Err(RequestError::InvalidLimit("v"))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[must_use]
+    pub fn actions(&self) -> &[FsAction] {
+        &self.actions
+    }
+}
+
 /// One typed node in a batch dependency graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatchNode {
@@ -932,10 +1180,7 @@ impl BatchNode {
             .filter(|_| operation_text.len() == 1)
             .and_then(Operation::from_id)
             .ok_or(RequestError::UnsupportedOperation)?;
-        if matches!(
-            operation,
-            Operation::Batch | Operation::Cancel | Operation::Fs
-        ) {
+        if matches!(operation, Operation::Batch | Operation::Cancel) {
             return Err(RequestError::UnsupportedOperation);
         }
         let payload = text_cell(&row[3], "a")?;
@@ -983,7 +1228,7 @@ impl BatchNode {
         }
         if matches!(
             self.arguments.operation(),
-            Operation::Batch | Operation::Cancel | Operation::Fs
+            Operation::Batch | Operation::Cancel
         ) {
             return Err(RequestError::UnsupportedOperation);
         }

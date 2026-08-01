@@ -1,0 +1,8 @@
+t:1
+i:84
+o:f
+a[2]{i,k,p,q,h,v}:
+1,0,new.txt,~,~,"hello\n"
+2,1,Cargo.toml,Cargo.copy.toml,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,~
+u{tok,rec,ms}:
+64,8,30000

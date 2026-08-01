@@ -119,6 +119,18 @@ impl OperationError {
                 RetryClass::Never,
                 ErrorStage::Authorize,
             ),
+            Self::Platform(PlatformError::ReservedPath) => (
+                Status::Denied,
+                ErrorCode::CapabilityDenied,
+                RetryClass::Never,
+                ErrorStage::Authorize,
+            ),
+            Self::Platform(PlatformError::JournalCorrupt | PlatformError::RecoveryRequired) => (
+                Status::Failed,
+                ErrorCode::RecoveryRequired,
+                RetryClass::Approval,
+                ErrorStage::Execute,
+            ),
             Self::Platform(PlatformError::Io(error)) if error.kind() == ErrorKind::NotFound => (
                 Status::NotFound,
                 ErrorCode::PathNotFound,

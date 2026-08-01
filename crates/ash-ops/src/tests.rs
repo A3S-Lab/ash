@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ash_engine::{Engine, Parallelism, SessionConfig};
 use ash_platform::Workspace;
 use ash_protocol::request::{
-    Arguments, BatchArgs, BatchNode, Budget, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource,
-    LIST_FILES_ONLY, ListArgs, PatchArgs, PatchContent, PatchEdit, REF_CASE_INSENSITIVE, ReadArgs,
-    ReadMode, RefArgs, RefMode, Request, SEARCH_CASE_INSENSITIVE, SNAPSHOT_INCLUDE_HIDDEN,
-    SearchArgs, SnapshotArgs, SnapshotMode,
+    Arguments, BatchArgs, BatchNode, Budget, EXEC_CLEAR_ENVIRONMENT, ExecArgs, FsAction,
+    FsActionKind, FsArgs, InputSource, LIST_FILES_ONLY, ListArgs, PatchArgs, PatchContent,
+    PatchEdit, REF_CASE_INSENSITIVE, ReadArgs, ReadMode, RefArgs, RefMode, Request,
+    SEARCH_CASE_INSENSITIVE, SNAPSHOT_INCLUDE_HIDDEN, SearchArgs, SnapshotArgs, SnapshotMode,
 };
 
 use super::PortableOperations;
@@ -626,6 +626,192 @@ async fn patch_commits_multi_file_byte_edits_and_rejects_stale_preimages() {
     );
     assert_eq!(fs::read(&first_path).expect("read"), b"external\n");
     assert_eq!(fs::read(&second_path).expect("read"), second_now);
+}
+
+#[tokio::test]
+async fn fs_commits_typed_file_transaction_and_reports_stale_preimages() {
+    let directory = TestDirectory::new();
+    fs::write(directory.0.join("copy-source"), b"copy").expect("copy source");
+    fs::write(directory.0.join("move-source"), b"move").expect("move source");
+    fs::write(directory.0.join("remove-source"), b"remove").expect("remove source");
+    let (session, operations) = runtime(&directory);
+    assert_eq!(PortableOperations::operation_mask(), 0x1ff);
+    let binary_reference = session
+        .store()
+        .retain(vec![0xff, 0x00, 0x10])
+        .expect("retain binary");
+    let request = Request::new(
+        75,
+        Arguments::Fs(
+            FsArgs::new(vec![
+                FsAction::new(
+                    1,
+                    FsActionKind::Create,
+                    "created",
+                    None,
+                    None,
+                    Some(PatchContent::Inline("created".to_owned())),
+                )
+                .expect("create"),
+                FsAction::new(
+                    2,
+                    FsActionKind::Create,
+                    "binary",
+                    None,
+                    None,
+                    Some(PatchContent::Reference(binary_reference)),
+                )
+                .expect("binary create"),
+                FsAction::new(
+                    3,
+                    FsActionKind::Copy,
+                    "copy-source",
+                    Some("copied".to_owned()),
+                    Some(blake3::hash(b"copy").to_hex().to_string()),
+                    None,
+                )
+                .expect("copy"),
+                FsAction::new(
+                    4,
+                    FsActionKind::Move,
+                    "move-source",
+                    Some("moved".to_owned()),
+                    Some(blake3::hash(b"move").to_hex().to_string()),
+                    None,
+                )
+                .expect("move"),
+                FsAction::new(
+                    5,
+                    FsActionKind::Remove,
+                    "remove-source",
+                    None,
+                    Some(blake3::hash(b"remove").to_hex().to_string()),
+                    None,
+                )
+                .expect("remove"),
+            ])
+            .expect("fs"),
+        ),
+        budget(4096, 32),
+    )
+    .expect("request");
+    let program = session.begin(&request).await.expect("program");
+    let encoded = operations
+        .execute(&request, &program)
+        .await
+        .expect("response")
+        .encode()
+        .expect("encode")
+        .encode();
+    assert!(encoded.starts_with("t:3\ni:75\ns:0\n"), "{encoded}");
+    assert!(encoded.contains("d[5]{i,k,p,q,s,h}:"), "{encoded}");
+    assert_eq!(
+        fs::read(directory.0.join("created")).expect("created"),
+        b"created"
+    );
+    assert_eq!(
+        fs::read(directory.0.join("binary")).expect("binary"),
+        [0xff, 0x00, 0x10]
+    );
+    assert_eq!(
+        fs::read(directory.0.join("copied")).expect("copied"),
+        b"copy"
+    );
+    assert_eq!(fs::read(directory.0.join("moved")).expect("moved"), b"move");
+    assert!(!directory.0.join("move-source").exists());
+    assert!(!directory.0.join("remove-source").exists());
+    drop(program);
+
+    let stale = Request::new(
+        76,
+        Arguments::Fs(
+            FsArgs::new(vec![
+                FsAction::new(
+                    1,
+                    FsActionKind::Remove,
+                    "copy-source",
+                    None,
+                    Some(blake3::hash(b"stale").to_hex().to_string()),
+                    None,
+                )
+                .expect("stale remove"),
+            ])
+            .expect("fs"),
+        ),
+        budget(1024, 8),
+    )
+    .expect("request");
+    let program = session.begin(&stale).await.expect("program");
+    let encoded = operations
+        .execute(&stale, &program)
+        .await
+        .expect("typed conflict")
+        .encode()
+        .expect("encode")
+        .encode();
+    assert!(encoded.starts_with("t:3\ni:76\ns:8\n"), "{encoded}");
+    assert!(encoded.contains("1,3,"), "{encoded}");
+    assert!(encoded.contains(",~,1,"), "{encoded}");
+    assert!(
+        encoded.contains("e{c,q,p,x,a}:\n501,1,4,~,~\n"),
+        "{encoded}"
+    );
+    assert_eq!(
+        fs::read(directory.0.join("copy-source")).expect("copy source"),
+        b"copy"
+    );
+}
+
+#[tokio::test]
+async fn batch_can_chain_fs_output_into_a_read_node() {
+    let directory = TestDirectory::new();
+    let (session, operations) = runtime(&directory);
+    let nodes = vec![
+        BatchNode::new(
+            1,
+            vec![],
+            Arguments::Fs(
+                FsArgs::new(vec![
+                    FsAction::new(
+                        1,
+                        FsActionKind::Create,
+                        "created.txt",
+                        None,
+                        None,
+                        Some(PatchContent::Inline("created\n".to_owned())),
+                    )
+                    .expect("create"),
+                ])
+                .expect("fs"),
+            ),
+        )
+        .expect("fs node"),
+        BatchNode::new(
+            2,
+            vec![1],
+            Arguments::Read(
+                ReadArgs::new(vec!["created.txt".to_owned()], ReadMode::Lines, 1, 1).expect("read"),
+            ),
+        )
+        .expect("read node"),
+    ];
+    let request = Request::new(
+        77,
+        Arguments::Batch(BatchArgs::new(nodes).expect("batch")),
+        budget(4096, 24),
+    )
+    .expect("request");
+    let program = session.begin(&request).await.expect("program");
+    let response = operations
+        .execute(&request, &program)
+        .await
+        .expect("batch response");
+    let encoded = response.encode().expect("encode").encode();
+    assert!(encoded.starts_with("t:3\ni:77\ns:0\n"), "{encoded}");
+    assert!(encoded.contains("d[2]{i,o,s,c,r}:"), "{encoded}");
+    let child = program.store().get(2).expect("read child");
+    let child = std::str::from_utf8(&child).expect("ASON");
+    assert!(child.contains("created\\n"), "{child}");
 }
 
 #[tokio::test]

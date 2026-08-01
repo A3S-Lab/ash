@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
@@ -10,6 +11,7 @@ use crate::PlatformError;
 pub struct Workspace {
     root: PathBuf,
     pub(crate) mutation_lock: Arc<Mutex<()>>,
+    pub(crate) internal_state: Arc<AtomicBool>,
 }
 
 /// Existing path that was resolved and checked against a workspace root.
@@ -55,9 +57,11 @@ impl Workspace {
         if !fs::metadata(&root)?.is_dir() {
             return Err(PlatformError::InvalidWorkspace);
         }
+        let internal_state = crate::transaction::has_internal_state(&root)?;
         Ok(Self {
             root,
             mutation_lock: Arc::new(Mutex::new(())),
+            internal_state: Arc::new(AtomicBool::new(internal_state)),
         })
     }
 
@@ -68,6 +72,7 @@ impl Workspace {
 
     pub fn resolve_existing(&self, logical: &str) -> Result<ResolvedPath, PlatformError> {
         validate_logical(logical)?;
+        self.reject_reserved(logical)?;
         let joined = if logical == "." {
             self.root.clone()
         } else {
@@ -132,6 +137,12 @@ impl Workspace {
         options: WalkOptions,
         output: &mut Vec<NativeEntry>,
     ) -> Result<(), PlatformError> {
+        if depth == 1
+            && self.internal_state.load(Ordering::Acquire)
+            && native.file_name().is_some_and(|name| name == ".ash")
+        {
+            return Ok(());
+        }
         let metadata = fs::symlink_metadata(native)?;
         let hidden = depth > 0 && is_hidden(native, &metadata);
         if hidden && !options.include_hidden {
@@ -198,6 +209,16 @@ impl Workspace {
             Ok(())
         } else {
             Err(PlatformError::WorkspaceEscape)
+        }
+    }
+
+    pub(crate) fn reject_reserved(&self, logical: &str) -> Result<(), PlatformError> {
+        if self.internal_state.load(Ordering::Acquire)
+            && (logical == ".ash" || logical.starts_with(".ash/"))
+        {
+            Err(PlatformError::ReservedPath)
+        } else {
+            Ok(())
         }
     }
 }

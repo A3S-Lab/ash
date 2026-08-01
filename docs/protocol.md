@@ -1,6 +1,6 @@
 # ASH/1 protocol and ASON
 
-Status: canonical ASON, framing, handshake, typed exec/read/list/search/patch/batch/ref/snapshot/cancel schemas, bounded DAG execution, retained-result inspection, and runtime paths are implemented
+Status: canonical ASON, framing, handshake, typed exec/read/list/search/patch/fs/batch/ref/snapshot/cancel schemas, durable file transactions, bounded DAG execution, retained-result inspection, and runtime paths are implemented
 
 ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
 
@@ -169,7 +169,7 @@ d{ap,av,zp,zv,frm,out,ops,cap,os,arch,sid,n}:
 1,0,1,0,1048576,65536,0,0,linux,x86_64,1,nonce-7
 ```
 
-The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises `0x3df`, exactly the implemented `exec`, `read`, `list`, `search`, `patch`, `batch`, `ref`, `snapshot`, and `cancel` bits. The filesystem-mutation bit remains clear until its durable operation contract lands.
+The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises `0x3ff`, exactly all ten ASH/1.0 operation bits: `exec`, `read`, `list`, `search`, `patch`, `fs`, `batch`, `ref`, `snapshot`, and `cancel`.
 
 The handshake is retained by the adapter and is not repeated in each model-visible result.
 
@@ -271,6 +271,7 @@ Operation argument records are positional only after their declared columns, so 
 | `l` | `a{p,d,f}:` | root path vector, maximum depth, flags |
 | `g` | `a{q,p,f}:` | query, root path vector, flags |
 | `p` | `a{p,h,i,o,n,v,f}:` | sorted paths, expected digests, edit file indexes, byte offsets, delete lengths, replacements, flags |
+| `f` | `a[N]{i,k,p,q,h,v}:` | action ID, action kind, source or create path, optional destination, optional preimage digest, optional content |
 | `b` | `a[N]{i,d,o,a}:` | node ID, dependency-ID vector, leaf operation ID, canonical nested argument document |
 | `s` | `a{p,d,m,r,f}:` | sorted roots, maximum depth, capture mode, optional baseline reference, flags |
 | `h` | `a{r,m,o,n,q,f}:` | source reference, mode, offset, range length, optional query, flags |
@@ -282,9 +283,13 @@ Read mode `0` is a zero-based byte range and mode `1` is a one-based line range.
 
 Patch paths are unique and sorted by UTF-8 bytes. The `h` vector contains one lowercase 64-digit BLAKE3 digest per path. The `i`, `o`, `n`, and `v` vectors are aligned edits: zero-based path index, zero-based byte offset in the original file, deleted byte length, and replacement. A replacement is inline text or an immutable `@reference`, so binary or previously retained content does not need to be repeated. Edits are sorted by file index and offset and cannot overlap. Every path has at least one edit, all paths must already be regular files, and the current flag value is `0`.
 
-Patch preparation reads, hashes, and constructs independent files on the compute plane under aggregate byte ceilings. No file is changed if preflight finds a stale digest. Commit is serialized per workspace and uses same-directory atomic replacement; a later conflict or filesystem failure rolls earlier files back in reverse order. The current source keeps preimages for the live transaction. A process crash can still require the durable recovery journal planned with the filesystem-mutation operation.
+Patch preparation reads, hashes, and constructs independent files on the compute plane under aggregate byte ceilings. No file is changed if preflight finds a stale digest. Commit is serialized per workspace and uses same-directory atomic replacement; a later conflict or filesystem failure rolls earlier files back in reverse order. Patch currently keeps preimages only for the live transaction; persisting patch preimages across a process crash remains a hardening item separate from the durable `fs` action journal.
 
-A batch table contains 1 through 256 nodes and at most 4096 dependency edges. Node rows are sorted by increasing `i`; every `d` vector is sorted, unique, and names nodes in the same table. The entire graph is checked for unknown dependencies, self-edges, duplicate IDs, and cycles before any node can run. The nested `a` cell is a quoted canonical one-field ASON document, for example `"a{q,p,f}:\nTODO,[src],0\n"`. This keeps heterogeneous arguments typed without paying for a sparse union table. Batch, cancellation, and the not-yet-implemented filesystem operation cannot be nested.
+Filesystem action kinds are `0` create, `1` copy, `2` move, and `3` remove. Create requires inline text or an immutable `@reference` in `v`; the other actions omit content. Copy and move require destination `q` and a lowercase 64-digit BLAKE3 source digest in `h`; remove requires the digest and omits `q`. Action IDs are positive and increasing, all source and destination paths are distinct, and the table contains at most 256 actions. Files are bounded to 128 MiB and the transaction's combined staged or hashed input is bounded to 128 MiB. Only regular files are accepted. Create, copy, and move never overwrite, and recursive or directory mutation has no ASH/1.0 encoding.
+
+The complete response budget is reserved before mutation. The implementation serializes a workspace across threads and processes, stages content, persists a checksummed journal, publishes actions using reversible same-filesystem links or renames, and writes a durable commit marker before cleanup. A clean conflict reverses earlier actions and returns status `8`; cancellation and deadlines are checked during lock waits, request hashing, and staging. Before the next filesystem transaction, recovery rolls an uncommitted journal back or finalizes committed cleanup. If exact size, digest, or journal state cannot prove a safe action, the journal and workspace are left untouched and error `502` requires inspection or approval.
+
+A batch table contains 1 through 256 nodes and at most 4096 dependency edges. Node rows are sorted by increasing `i`; every `d` vector is sorted, unique, and names nodes in the same table. The entire graph is checked for unknown dependencies, self-edges, duplicate IDs, and cycles before any node can run. The nested `a` cell is a quoted canonical one-field ASON document, for example `"a{q,p,f}:\nTODO,[src],0\n"`. This keeps heterogeneous arguments typed without paying for a sparse union table. Filesystem transactions are valid leaf nodes; batch and cancellation cannot be nested.
 
 Ready nodes execute concurrently under the global/session node governor. Each node receives deterministic token, record, and output shares, the parent deadline and cancellation token, and a node-local path dictionary so sibling completion order cannot change child bytes. The current batch edge is a control dependency: a node starts only after every dependency succeeds. Runtime output binding and stream edges are reserved for a later compatible extension.
 
@@ -315,6 +320,7 @@ Core result data uses these fixed schemas:
 | `l` | `d[N]{p,k,z,m}:` | path ID, file kind, byte size, optional modified Unix milliseconds |
 | `g` | `d[N]{p,l,c,t}:` | path ID, one-based line and column, matching line projection |
 | `p` | `d[N]{p,s,h}:` | path ID, mutation state, resulting or observed BLAKE3 digest when known |
+| `f` | `d[N]{i,k,p,q,s,h}:` | action ID, action kind, path ID, optional destination path ID, action state, resulting or observed digest |
 | `b` | `d[N]{i,o,s,c,r}:` | node ID, operation, node state, child final status, retained child-response reference |
 | `s` | `d[N]{p,c,k,z,h}:` | path ID, change kind, file kind, byte size, optional BLAKE3 digest |
 | `h` | `d{o,n,p,h,t,b}:`, `d[N]{o,l,c,t}:`, or `d{r,z}:` | slice, in-reference search, or release result selected by request mode |
@@ -322,7 +328,7 @@ Core result data uses these fixed schemas:
 
 Null (`~`) omits an unavailable projection, code, timestamp, or reference. Result flag bits are 0 truncated, 1 reduced, 2 normalized text, 3 retained evidence, 4 partial completion, and 5 redacted. Unknown bits are invalid. Any truncated result must retain inspectable evidence, and the retained flag must agree with the references actually present.
 
-Patch state values are `0` committed, `1` conflict, `2` rolled back, `3` recovery required, and `4` skipped. A clean stale-preimage result uses status `8` and error `501`. If an atomic outcome is indeterminate or rollback cannot restore a preimage, error `502` and result flag bit 4 make the partial state explicit; retry class `3` requires external inspection or approval rather than an automatic retry.
+Patch and filesystem action state values are `0` committed, `1` conflict, `2` rolled back, `3` recovery required, and `4` skipped. A clean stale-preimage or no-overwrite conflict uses status `8` and error `501`. If an atomic outcome is indeterminate, a durable journal is ambiguous, or rollback cannot restore a preimage, error `502` and result flag bit 4 make the partial state explicit; retry class `3` requires external inspection or approval rather than an automatic retry.
 
 Batch node states are `0` succeeded, `1` failed, `2` skipped, and `3` cancelled. Field `c` is the child's final status; a skipped node has `c:~` and `r:~` because it never ran. Every executed child response is retained atomically in node-ID order, so `r` remains stable even when workers finish in a different order. An all-success graph returns final status `0` with retained flag bit 3. Any failed or cancelled node produces program status `5`, error `800`, and both retained and partial flag bits; only its transitive descendants are skipped, while independent branches finish normally. The compact table is the immediate model context, and `ref` retrieves any full child response on demand.
 

@@ -4,7 +4,7 @@ Status: architecture baseline plus implementation checkpoint
 
 This document defines the intended architecture of `ash` and is normative for component ownership and runtime boundaries. Statements explicitly labeled as the current source checkpoint describe implemented behavior; the remaining contracts are design targets rather than release claims.
 
-The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, dual Tokio/Rayon runtime, hierarchical governor, direct process execution, bounded read/list/search, compare-and-swap patching with live rollback, retained-result inspection, workspace snapshot/delta, cancellation, and bounded batch DAGs with stable retained child evidence. Durable filesystem journals, approval permits, signed online releases, self-update, fuzz infrastructure, and published benchmark evidence remain open.
+The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, dual Tokio/Rayon runtime, hierarchical governor, direct process execution, bounded read/list/search, compare-and-swap patching with live rollback, durable file-only filesystem transactions with restart recovery, retained-result inspection, workspace snapshot/delta, cancellation, and bounded batch DAGs with stable retained child evidence. Approval permits, signed online releases, self-update, fuzz infrastructure, and published benchmark evidence remain open.
 
 ## 1. Product definition
 
@@ -134,7 +134,7 @@ Owns portable operation semantics:
 - `read` — bounded byte and line slices across one or more files;
 - `list` — directory enumeration, globbing, stat, and compact trees;
 - `search` — literal and regular-expression search;
-- `patch` — compare-and-swap file edits and multi-file journals;
+- `patch` — compare-and-swap file edits and live multi-file rollback;
 - `batch` — bounded dependency graphs over heterogeneous leaf operations;
 - `fs` — create, copy, move, and remove mutations;
 - `snapshot` — workspace state and deltas;
@@ -151,6 +151,7 @@ Owns native operating-system adapters:
 - pipes, process groups, job objects, signals, and termination;
 - filesystem metadata and path conversion;
 - atomic replacement primitives;
+- durable workspace transaction journals, cross-process mutation locking, and restart recovery;
 - clocks, temporary locations, terminal detection, and environment access;
 - optional filesystem observation used by workspace snapshots.
 
@@ -358,7 +359,11 @@ Mutations use compare-and-swap semantics. A caller supplies the digest or versio
 
 Single-file replacement uses a same-directory temporary file, permission preservation where supported, flush, and atomic replacement. Multi-file operations use a journal with preimages or reversible moves. Because no operating system provides a general atomic multi-file transaction, the protocol reports `committed`, `rolled_back`, or `recovery_required` explicitly.
 
-The current patch vertical slice accepts sorted, non-overlapping byte splices over multiple existing regular files. It prepares and hashes files in parallel, serializes the commit phase inside the workspace, retains in-memory preimages, and rolls committed files back in reverse order when a later compare-and-swap fails. The filesystem-mutation milestone extends this boundary with a durable journal so an interrupted process can recover after restart.
+The current patch vertical slice accepts sorted, non-overlapping byte splices over multiple existing regular files. It prepares and hashes files in parallel, serializes the commit phase inside the workspace, retains in-memory preimages, and rolls committed files back in reverse order when a later compare-and-swap fails.
+
+The implemented `fs` operation is a separate durable, file-only transaction boundary. It supports create, copy, move, and remove over regular files; create and destination paths never overwrite, while copy, move, and remove require the caller's full BLAKE3 preimage digest. Requests contain 1 through 256 stable-ID actions, every source and destination is unique, and input hashing and staging are bounded per file and in aggregate. Directory creation, directory moves, overwrite, and recursive deletion are intentionally absent because they require additional capabilities and recovery rules.
+
+Before the first mutation, the platform writes staged content and a versioned, checksummed binary manifest under the reserved workspace `.ash` state directory, flushes it, and atomically publishes the transaction journal. Actions then use reversible same-filesystem links or renames. A durable commit marker separates rollback recovery from committed cleanup. A later action failure rolls prior actions back in reverse order; after interruption, the next transaction infers each applied step from the manifest, exact file size, digest, and journal layout. Ambiguous or externally modified state is preserved and reported as `recovery_required` instead of being guessed. A process-local mutex and an operating-system file lock serialize workspace mutations across cloned sessions and processes. Valid internal state is excluded from listings and snapshots and cannot be addressed through normal workspace operations.
 
 ### 9.3 Snapshots
 
@@ -513,6 +518,8 @@ The repository remains independently buildable and releasable at `A3S-Lab/ash`. 
 - parent and grandchild process termination;
 - concurrent stdout/stderr pressure;
 - atomic replacement and conflict races.
+- durable create/copy/move/remove recovery before and after the commit marker;
+- corrupt journals, external interference, cancellation, and bounded recovery reads.
 
 ### 15.4 Distribution
 
@@ -548,7 +555,7 @@ The benchmark contract in [benchmarks.md](./benchmarks.md) measures correctness,
 ### M2: coding mutation workflow
 
 - compare-and-swap patching (implemented in the source checkpoint);
-- filesystem mutation journals;
+- filesystem mutation journals (implemented in the source checkpoint);
 - snapshots and changed-file deltas (implemented in the source checkpoint);
 - batch programs and control dependency edges (implemented in the source checkpoint);
 - permit binding and structured conflict recovery.
