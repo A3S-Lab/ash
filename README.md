@@ -70,7 +70,7 @@ cd ash
 cargo test --workspace --all-targets
 ```
 
-The pinned Rust workspace currently verifies typed M1 schemas, canonical framed handshakes, bounded content retention, incremental path interning, atomic program budgets, hierarchical concurrency permits, cancellation-safe sessions, and deterministic multi-core collection. This is a development checkpoint, not an installation path.
+The pinned Rust workspace currently verifies typed M1 schemas, canonical framed handshakes, bounded retention, atomic budgets, hierarchical permits, cancellation-safe sessions, workspace-confined paths, direct argv process launch, and deterministic multi-core collection. This is a development checkpoint, not an installation path.
 
 ## Release contract
 

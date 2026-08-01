@@ -27,7 +27,7 @@ ash-store = { package = "a3s-ash-store", path = "crates/ash-store" }
 blake3 = "1.8.5"
 rayon = "1.12.0"
 thiserror = "2.0.19"
-tokio = { version = "1.53.1", features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [profile.release]
 opt-level = 3
