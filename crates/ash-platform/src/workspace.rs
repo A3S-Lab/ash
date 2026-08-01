@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use crate::PlatformError;
@@ -8,6 +9,7 @@ use crate::PlatformError;
 #[derive(Clone, Debug)]
 pub struct Workspace {
     root: PathBuf,
+    pub(crate) mutation_lock: Arc<Mutex<()>>,
 }
 
 /// Existing path that was resolved and checked against a workspace root.
@@ -52,7 +54,10 @@ impl Workspace {
         if !fs::metadata(&root)?.is_dir() {
             return Err(PlatformError::InvalidWorkspace);
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            mutation_lock: Arc::new(Mutex::new(())),
+        })
     }
 
     #[must_use]

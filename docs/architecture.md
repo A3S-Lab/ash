@@ -353,6 +353,8 @@ Mutations use compare-and-swap semantics. A caller supplies the digest or versio
 
 Single-file replacement uses a same-directory temporary file, permission preservation where supported, flush, and atomic replacement. Multi-file operations use a journal with preimages or reversible moves. Because no operating system provides a general atomic multi-file transaction, the protocol reports `committed`, `rolled_back`, or `recovery_required` explicitly.
 
+The current patch vertical slice accepts sorted, non-overlapping byte splices over multiple existing regular files. It prepares and hashes files in parallel, serializes the commit phase inside the workspace, retains in-memory preimages, and rolls committed files back in reverse order when a later compare-and-swap fails. The filesystem-mutation milestone extends this boundary with a durable journal so an interrupted process can recover after restart.
+
 ### 9.3 Path safety
 
 Resolution checks lexical traversal, symlink or reparse-point traversal, workspace escape, and mutation target type. The backend must revalidate at the point of use to reduce time-of-check/time-of-use races.

@@ -6,8 +6,8 @@ use ash_engine::{Engine, Parallelism, SessionConfig};
 use ash_platform::Workspace;
 use ash_protocol::request::{
     Arguments, Budget, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource, LIST_FILES_ONLY, ListArgs,
-    REF_CASE_INSENSITIVE, ReadArgs, ReadMode, RefArgs, RefMode, Request, SEARCH_CASE_INSENSITIVE,
-    SearchArgs,
+    PatchArgs, PatchContent, PatchEdit, REF_CASE_INSENSITIVE, ReadArgs, ReadMode, RefArgs, RefMode,
+    Request, SEARCH_CASE_INSENSITIVE, SearchArgs,
 };
 
 use super::PortableOperations;
@@ -439,4 +439,83 @@ async fn workspace_escape_becomes_a_typed_protocol_error() {
         .encode();
     assert!(response.contains("s:1\n"));
     assert!(response.contains("e{c,q,p,x,a}:\n100,1,1,~,~\n"));
+}
+
+#[tokio::test]
+async fn patch_commits_multi_file_byte_edits_and_rejects_stale_preimages() {
+    let directory = TestDirectory::new();
+    let first_path = directory.0.join("a.txt");
+    let second_path = directory.0.join("b.txt");
+    fs::write(&first_path, b"hello world\n").expect("write");
+    fs::write(&second_path, b"second\n").expect("write");
+    let first_digest = blake3::hash(b"hello world\n").to_hex().to_string();
+    let second_digest = blake3::hash(b"second\n").to_hex().to_string();
+    let (session, operations) = runtime(&directory);
+    let reference = session.store().retain(b"RUST".to_vec()).expect("retain");
+
+    let request = Request::new(
+        70,
+        Arguments::Patch(
+            PatchArgs::new(
+                vec!["a.txt".to_owned(), "b.txt".to_owned()],
+                vec![first_digest.clone(), second_digest],
+                vec![
+                    PatchEdit::new(0, 6, 5, PatchContent::Inline("ash".to_owned())).expect("edit"),
+                    PatchEdit::new(1, 0, 6, PatchContent::Reference(reference)).expect("edit"),
+                ],
+                0,
+            )
+            .expect("patch"),
+        ),
+        budget(2048, 16),
+    )
+    .expect("request");
+    let program = session.begin(&request).await.expect("program");
+    let encoded = operations
+        .execute(&request, &program)
+        .await
+        .expect("response")
+        .encode()
+        .expect("encode")
+        .encode();
+    assert!(encoded.starts_with("t:3\ni:70\ns:0\n"), "{encoded}");
+    assert!(encoded.contains("d[2]{p,s,h}:"), "{encoded}");
+    assert_eq!(fs::read(&first_path).expect("read"), b"hello ash\n");
+    assert_eq!(fs::read(&second_path).expect("read"), b"RUST\n");
+    drop(program);
+
+    fs::write(&first_path, b"external\n").expect("external write");
+    let second_now = fs::read(&second_path).expect("read");
+    let stale = Request::new(
+        71,
+        Arguments::Patch(
+            PatchArgs::new(
+                vec!["a.txt".to_owned(), "b.txt".to_owned()],
+                vec![first_digest, blake3::hash(&second_now).to_hex().to_string()],
+                vec![
+                    PatchEdit::new(0, 0, 1, PatchContent::Inline("A".to_owned())).expect("edit"),
+                    PatchEdit::new(1, 0, 1, PatchContent::Inline("B".to_owned())).expect("edit"),
+                ],
+                0,
+            )
+            .expect("patch"),
+        ),
+        budget(2048, 16),
+    )
+    .expect("request");
+    let program = session.begin(&stale).await.expect("program");
+    let encoded = operations
+        .execute(&stale, &program)
+        .await
+        .expect("typed conflict")
+        .encode()
+        .expect("encode")
+        .encode();
+    assert!(encoded.starts_with("t:3\ni:71\ns:8\n"), "{encoded}");
+    assert!(
+        encoded.contains("e{c,q,p,x,a}:\n501,1,4,~,~\n"),
+        "{encoded}"
+    );
+    assert_eq!(fs::read(&first_path).expect("read"), b"external\n");
+    assert_eq!(fs::read(&second_path).expect("read"), second_now);
 }

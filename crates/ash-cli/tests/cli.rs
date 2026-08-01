@@ -10,8 +10,8 @@ use ash_protocol::Operation;
 use ash_protocol::ason::decode;
 use ash_protocol::handshake::{HandshakePreferences, HandshakeRequest, HandshakeResponse};
 use ash_protocol::request::{
-    Arguments, Budget, CancelArgs, ExecArgs, InputSource, ReadArgs, ReadMode, RefArgs, RefMode,
-    Request, SearchArgs,
+    Arguments, Budget, CancelArgs, ExecArgs, InputSource, PatchArgs, PatchContent, PatchEdit,
+    ReadArgs, ReadMode, RefArgs, RefMode, Request, SearchArgs,
 };
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -313,6 +313,57 @@ fn rpc_executes_a_request_after_the_handshake() {
     assert_eq!(decode(result).expect("result ASON").encode(), result);
     assert!(result.starts_with("t:3\ni:41\ns:0\n"));
     assert!(result.contains("Cargo.toml"));
+}
+
+#[test]
+fn rpc_executes_a_compare_and_swap_patch() {
+    let directory = TestDirectory::new();
+    let target = directory.0.join("target.txt");
+    fs::write(&target, b"before\n").expect("write target");
+    let handshake = HandshakeRequest::new(
+        45,
+        directory.0.to_string_lossy(),
+        "integration-45",
+        HandshakePreferences {
+            operation_mask: u64::MAX,
+            ..HandshakePreferences::default()
+        },
+    )
+    .expect("handshake")
+    .encode()
+    .expect("encode handshake")
+    .encode();
+    let request = Request::new(
+        46,
+        Arguments::Patch(
+            PatchArgs::new(
+                vec!["target.txt".to_owned()],
+                vec![blake3::hash(b"before\n").to_hex().to_string()],
+                vec![
+                    PatchEdit::new(0, 0, 6, PatchContent::Inline("after".to_owned()))
+                        .expect("edit"),
+                ],
+                0,
+            )
+            .expect("patch"),
+        ),
+        Budget::new(1024, 8, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode request")
+    .encode();
+    let mut input = frame(handshake.as_bytes());
+    input.extend(frame(request.as_bytes()));
+    let output = run(&["rpc"], &input);
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert!(output.stderr.is_empty());
+    let frames = split_frames(&output.stdout);
+    assert_eq!(frames.len(), 2);
+    let result = std::str::from_utf8(frames[1]).expect("result UTF-8");
+    assert!(result.starts_with("t:3\ni:46\ns:0\n"), "{result}");
+    assert!(result.contains("d[1]{p,s,h}:"), "{result}");
+    assert_eq!(fs::read(target).expect("read target"), b"after\n");
 }
 
 #[test]

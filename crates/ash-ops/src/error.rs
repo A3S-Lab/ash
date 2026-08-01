@@ -37,6 +37,8 @@ pub enum OperationError {
     Unsupported,
     #[error("operation was cancelled")]
     Cancelled,
+    #[error("operation arguments are inconsistent with the observed input")]
+    InvalidArgument,
     #[error("operation input exceeds its bounded work ceiling")]
     WorkLimit,
     #[error("operation requires UTF-8 retained content")]
@@ -88,7 +90,9 @@ impl OperationError {
                 RetryClass::RetrySame,
                 ErrorStage::Execute,
             ),
-            Self::Platform(PlatformError::InvalidLogicalPath) | Self::Regex(_) => (
+            Self::InvalidArgument
+            | Self::Platform(PlatformError::InvalidLogicalPath)
+            | Self::Regex(_) => (
                 Status::InvalidRequest,
                 ErrorCode::InvalidArgument,
                 RetryClass::CorrectRequest,
@@ -99,6 +103,12 @@ impl OperationError {
                 ErrorCode::WrongFileType,
                 RetryClass::CorrectRequest,
                 ErrorStage::Execute,
+            ),
+            Self::Platform(PlatformError::InvalidMutationTarget) => (
+                Status::Failed,
+                ErrorCode::WrongFileType,
+                RetryClass::CorrectRequest,
+                ErrorStage::Resolve,
             ),
             Self::Platform(PlatformError::WorkspaceEscape) => (
                 Status::Denied,
@@ -144,6 +154,12 @@ impl OperationError {
                 ErrorCode::ReferenceBusy,
                 RetryClass::RetrySame,
                 ErrorStage::Retain,
+            ),
+            Self::Platform(PlatformError::MutationLockPoisoned) => (
+                Status::Internal,
+                ErrorCode::Internal,
+                RetryClass::RetrySame,
+                ErrorStage::Execute,
             ),
             Self::Platform(_) => (
                 Status::Failed,

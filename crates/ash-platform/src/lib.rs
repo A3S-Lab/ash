@@ -6,7 +6,7 @@ mod mutation;
 mod process;
 mod workspace;
 
-pub use mutation::ReplaceOutcome;
+pub use mutation::{MutationGuard, ReplaceOutcome};
 pub use process::{EnvironmentChange, ProcessExit, ProcessHandle, ProcessSpec};
 pub use workspace::{EntryKind, NativeEntry, ResolvedPath, WalkOptions, Workspace};
 
@@ -28,6 +28,8 @@ pub enum PlatformError {
     InvalidEnvironment,
     #[error("mutation target must be a regular file without symlink or reparse traversal")]
     InvalidMutationTarget,
+    #[error("mutation serialization lock was poisoned")]
+    MutationLockPoisoned,
     #[error("input contains {size} bytes, exceeding the operation ceiling of {max}")]
     InputTooLarge { size: u64, max: u64 },
     #[error("filesystem or process I/O failed: {0}")]

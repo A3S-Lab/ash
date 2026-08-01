@@ -1,8 +1,9 @@
 use super::{
     CancelResult, CancellationState, ErrorCode, ErrorRecord, ErrorStage, FileKind, FinalResponse,
-    ListEntry, PathMapping, ProcessResult, RESULT_RETAINED, RESULT_TRUNCATED, ReadResult,
-    ReferenceMatch, ReferenceResult, ReferenceSlice, ReleasedReference, ResponseError, ResultData,
-    RetryClass, SearchMatch, Status, StreamResult, TerminationKind,
+    ListEntry, PatchResult, PatchState, PathMapping, ProcessResult, RESULT_RETAINED,
+    RESULT_TRUNCATED, ReadResult, ReferenceMatch, ReferenceResult, ReferenceSlice,
+    ReleasedReference, ResponseError, ResultData, RetryClass, SearchMatch, Status, StreamResult,
+    TerminationKind,
 };
 use crate::ason::decode;
 
@@ -67,6 +68,11 @@ fn every_m1_result_shape_encodes_as_canonical_ason() {
             modified_millis: None,
         }]),
         ResultData::Search(vec![]),
+        ResultData::Patch(vec![PatchResult {
+            path: 1,
+            state: PatchState::Committed,
+            digest: Some("c".repeat(64)),
+        }]),
         ResultData::Reference(ReferenceResult::Slice(ReferenceSlice {
             offset: 4,
             length: 2,
@@ -182,4 +188,41 @@ fn truncation_without_any_reference_is_rejected() {
         None,
     );
     assert_eq!(response, Err(ResponseError::MissingRetainedReference));
+}
+
+#[test]
+fn patch_status_and_per_file_states_must_agree() {
+    let conflict = PatchResult {
+        path: 1,
+        state: PatchState::Conflict,
+        digest: Some("d".repeat(64)),
+    };
+    assert_eq!(
+        FinalResponse::success(
+            40,
+            vec![],
+            ResultData::Patch(vec![conflict.clone()]),
+            0,
+            None,
+        ),
+        Err(ResponseError::InvalidData)
+    );
+    assert!(
+        FinalResponse::failure(
+            41,
+            Status::Conflict,
+            ErrorRecord {
+                code: ErrorCode::ContentConflict,
+                retry: RetryClass::CorrectRequest,
+                stage: ErrorStage::Execute,
+                evidence: None,
+                argument: None,
+            },
+            vec![],
+            Some(ResultData::Patch(vec![conflict])),
+            0,
+            None,
+        )
+        .is_ok()
+    );
 }

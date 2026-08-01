@@ -21,3 +21,6 @@ ash-protocol.workspace = true
 ash-store.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true

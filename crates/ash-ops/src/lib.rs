@@ -5,6 +5,7 @@
 mod error;
 mod exec;
 mod list;
+mod patch;
 mod projection;
 mod read;
 mod reference;
@@ -39,6 +40,7 @@ impl PortableOperations {
             | Operation::Read.mask()
             | Operation::List.mask()
             | Operation::Search.mask()
+            | Operation::Patch.mask()
             | Operation::Ref.mask()
     }
 
@@ -59,6 +61,9 @@ impl PortableOperations {
             }
             Arguments::Search(arguments) => {
                 search::execute(&self.workspace, request, arguments, program).await
+            }
+            Arguments::Patch(arguments) => {
+                patch::execute(&self.workspace, request, arguments, program).await
             }
             Arguments::Ref(arguments) => reference::execute(request, arguments, program).await,
             Arguments::Cancel(_) => Err(OperationError::Unsupported),

@@ -19,6 +19,7 @@ const EXEC_COLUMNS: &[&str] = &["k", "c", "ms", "o", "e", "ro", "re"];
 const READ_COLUMNS: &[&str] = &["p", "o", "n", "h", "t", "r"];
 const LIST_COLUMNS: &[&str] = &["p", "k", "z", "m"];
 const SEARCH_COLUMNS: &[&str] = &["p", "l", "c", "t"];
+const PATCH_COLUMNS: &[&str] = &["p", "s", "h"];
 const REF_SLICE_COLUMNS: &[&str] = &["o", "n", "p", "h", "t", "b"];
 const REF_SEARCH_COLUMNS: &[&str] = &["o", "l", "c", "t"];
 const REF_RELEASE_COLUMNS: &[&str] = &["r", "z"];
@@ -87,6 +88,8 @@ pub enum ErrorCode {
     ProcessTimedOut = 402,
     ProcessCancelled = 403,
     Filesystem = 500,
+    ContentConflict = 501,
+    RecoveryRequired = 502,
     OutputBudget = 600,
     StorageBudget = 601,
     ConcurrencyBudget = 602,
@@ -191,6 +194,22 @@ impl FinalResponse {
         validate_paths(&paths)?;
         if let Some(data) = &data {
             data.validate()?;
+            if let ResultData::Patch(results) = data {
+                if status == Status::Success
+                    && results
+                        .iter()
+                        .any(|result| result.state != PatchState::Committed)
+                {
+                    return Err(ResponseError::InvalidData);
+                }
+                if status == Status::Conflict
+                    && !results
+                        .iter()
+                        .any(|result| result.state == PatchState::Conflict)
+                {
+                    return Err(ResponseError::InvalidData);
+                }
+            }
             match data {
                 ResultData::Reference(ReferenceResult::Slice(_) | ReferenceResult::Search(_))
                     if reference.is_none() =>
@@ -283,6 +302,7 @@ pub enum ResultData {
     Read(Vec<ReadResult>),
     List(Vec<ListEntry>),
     Search(Vec<SearchMatch>),
+    Patch(Vec<PatchResult>),
     Reference(ReferenceResult),
     Cancel(CancelResult),
 }
@@ -294,6 +314,7 @@ impl ResultData {
             Self::Read(results) => encode_read(results),
             Self::List(entries) => encode_list(entries),
             Self::Search(matches) => encode_search(matches),
+            Self::Patch(results) => encode_patch(results),
             Self::Reference(result) => result.encode(),
             Self::Cancel(result) => result.encode(),
         }
@@ -305,7 +326,11 @@ impl ResultData {
                 result.stdout.reference.is_some() || result.stderr.reference.is_some()
             }
             Self::Read(results) => results.iter().any(|result| result.reference.is_some()),
-            Self::List(_) | Self::Search(_) | Self::Reference(_) | Self::Cancel(_) => false,
+            Self::List(_)
+            | Self::Search(_)
+            | Self::Patch(_)
+            | Self::Reference(_)
+            | Self::Cancel(_) => false,
         }
     }
 
@@ -348,6 +373,25 @@ impl ResultData {
                     .any(|entry| entry.path == 0 || entry.line == 0 || entry.column == 0)
                 {
                     return Err(ResponseError::InvalidData);
+                }
+            }
+            Self::Patch(results) => {
+                let mut paths = HashSet::new();
+                if results.is_empty() || results.iter().any(|result| !paths.insert(result.path)) {
+                    return Err(ResponseError::InvalidData);
+                }
+                for result in results {
+                    let valid_optional_digest = result.digest.as_deref().is_none_or(valid_digest);
+                    let valid_state_digest = match result.state {
+                        PatchState::Committed | PatchState::Conflict | PatchState::RolledBack => {
+                            result.digest.is_some()
+                        }
+                        PatchState::RecoveryRequired => true,
+                        PatchState::Skipped => result.digest.is_none(),
+                    };
+                    if result.path == 0 || !valid_optional_digest || !valid_state_digest {
+                        return Err(ResponseError::InvalidData);
+                    }
                 }
             }
             Self::Reference(result) => result.validate()?,
@@ -578,6 +622,23 @@ pub struct SearchMatch {
     pub text: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PatchState {
+    Committed = 0,
+    Conflict = 1,
+    RolledBack = 2,
+    RecoveryRequired = 3,
+    Skipped = 4,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PatchResult {
+    pub path: u64,
+    pub state: PatchState,
+    pub digest: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ResponseError {
     #[error("response request identifier must be non-zero")]
@@ -666,6 +727,20 @@ fn encode_search(matches: &[SearchMatch]) -> Result<Value, BuildError> {
         })
         .collect();
     Ok(Value::Table(Table::new(keys(SEARCH_COLUMNS)?, rows)?))
+}
+
+fn encode_patch(results: &[PatchResult]) -> Result<Value, BuildError> {
+    let rows = results
+        .iter()
+        .map(|result| {
+            vec![
+                unsigned_cell(result.path),
+                unsigned_cell(u64::from(result.state as u8)),
+                optional_text(result.digest.as_deref()),
+            ]
+        })
+        .collect();
+    Ok(Value::Table(Table::new(keys(PATCH_COLUMNS)?, rows)?))
 }
 
 fn encode_reference_search(matches: &[ReferenceMatch]) -> Result<Value, BuildError> {

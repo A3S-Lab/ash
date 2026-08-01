@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::MutexGuard;
 
 use atomicwrites::{AllowOverwrite, AtomicFile};
 
@@ -15,12 +16,60 @@ pub enum ReplaceOutcome {
     Conflict {
         actual_digest: [u8; 32],
     },
+    Indeterminate {
+        actual_digest: Option<[u8; 32]>,
+    },
+}
+
+/// Serializes a complete mutation transaction within one workspace instance.
+pub struct MutationGuard<'a> {
+    workspace: &'a Workspace,
+    _lock: MutexGuard<'a, ()>,
 }
 
 impl Workspace {
+    pub fn begin_mutation(&self) -> Result<MutationGuard<'_>, PlatformError> {
+        Ok(MutationGuard {
+            workspace: self,
+            _lock: self
+                .mutation_lock
+                .lock()
+                .map_err(|_| PlatformError::MutationLockPoisoned)?,
+        })
+    }
+
+    pub fn mutation_file_size(&self, logical: &str) -> Result<u64, PlatformError> {
+        let target = self.resolve_mutation_file(logical)?;
+        Ok(fs::metadata(self.revalidate_mutation_file(&target)?)?.len())
+    }
+
+    pub fn read_mutation_limited(
+        &self,
+        logical: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, PlatformError> {
+        let target = self.resolve_mutation_file(logical)?;
+        self.read_mutation_file(&target, max_bytes)
+    }
+
     /// Atomically replaces one regular file when its current BLAKE3 identity
     /// matches the caller's observed identity.
     pub fn compare_and_swap_replace(
+        &self,
+        logical: &str,
+        expected_digest: [u8; 32],
+        contents: &[u8],
+        max_existing_bytes: u64,
+    ) -> Result<ReplaceOutcome, PlatformError> {
+        self.begin_mutation()?.compare_and_swap_replace(
+            logical,
+            expected_digest,
+            contents,
+            max_existing_bytes,
+        )
+    }
+
+    fn compare_and_swap_replace_inner(
         &self,
         logical: &str,
         expected_digest: [u8; 32],
@@ -53,7 +102,28 @@ impl Workspace {
                 previous_digest: actual_digest,
                 new_digest,
             }),
-            Err(atomicwrites::Error::Internal(error)) => Err(error.into()),
+            Err(atomicwrites::Error::Internal(error)) => {
+                match self.read_mutation_file(&target, max_existing_bytes) {
+                    Ok(current) => {
+                        let observed = *blake3::hash(&current).as_bytes();
+                        if observed == new_digest {
+                            Ok(ReplaceOutcome::Committed {
+                                previous_digest: actual_digest,
+                                new_digest,
+                            })
+                        } else if observed == expected_digest {
+                            Err(error.into())
+                        } else {
+                            Ok(ReplaceOutcome::Conflict {
+                                actual_digest: observed,
+                            })
+                        }
+                    }
+                    Err(_) => Ok(ReplaceOutcome::Indeterminate {
+                        actual_digest: None,
+                    }),
+                }
+            }
             Err(atomicwrites::Error::User(WriteAbort::Io(error))) => Err(error.into()),
             Err(atomicwrites::Error::User(WriteAbort::Platform(error))) => Err(error),
             Err(atomicwrites::Error::User(WriteAbort::Conflict(actual_digest))) => {
@@ -137,6 +207,23 @@ impl Workspace {
     }
 }
 
+impl MutationGuard<'_> {
+    pub fn compare_and_swap_replace(
+        &self,
+        logical: &str,
+        expected_digest: [u8; 32],
+        contents: &[u8],
+        max_existing_bytes: u64,
+    ) -> Result<ReplaceOutcome, PlatformError> {
+        self.workspace.compare_and_swap_replace_inner(
+            logical,
+            expected_digest,
+            contents,
+            max_existing_bytes,
+        )
+    }
+}
+
 enum WriteAbort {
     Io(io::Error),
     Platform(PlatformError),
@@ -161,6 +248,8 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     use super::ReplaceOutcome;
     #[cfg(unix)]
@@ -216,6 +305,50 @@ mod tests {
             }
         );
         assert_eq!(fs::read(&path).expect("read"), b"after");
+    }
+
+    #[test]
+    fn concurrent_workspace_clones_cannot_both_commit_one_preimage() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("file.txt");
+        fs::write(&path, b"before").expect("write");
+        let workspace = Workspace::new(&directory.0).expect("workspace");
+        let expected = *blake3::hash(b"before").as_bytes();
+        let barrier = Arc::new(Barrier::new(3));
+        let threads: Vec<_> = [b"first".as_slice(), b"second".as_slice()]
+            .into_iter()
+            .map(|contents| {
+                let workspace = workspace.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    workspace
+                        .compare_and_swap_replace("file.txt", expected, contents, 1024)
+                        .expect("replace")
+                })
+            })
+            .collect();
+        barrier.wait();
+        let outcomes: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("join"))
+            .collect();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, ReplaceOutcome::Committed { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, ReplaceOutcome::Conflict { .. }))
+                .count(),
+            1
+        );
+        let final_contents = fs::read(path).expect("read");
+        assert!(final_contents == b"first" || final_contents == b"second");
     }
 
     #[cfg(unix)]

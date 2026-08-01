@@ -1,8 +1,8 @@
 use super::{
     Arguments, Budget, CancelArgs, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource,
-    LIST_INCLUDE_HIDDEN, ListArgs, READ_COLUMNS, REF_CASE_INSENSITIVE, REF_REGEX, ReadArgs,
-    ReadMode, RefArgs, RefMode, Request, RequestError, SEARCH_CASE_INSENSITIVE, SEARCH_REGEX,
-    SearchArgs,
+    LIST_INCLUDE_HIDDEN, ListArgs, PATCH_COLUMNS, PatchArgs, PatchContent, PatchEdit, READ_COLUMNS,
+    REF_CASE_INSENSITIVE, REF_REGEX, ReadArgs, ReadMode, RefArgs, RefMode, Request, RequestError,
+    SEARCH_CASE_INSENSITIVE, SEARCH_REGEX, SearchArgs,
 };
 use crate::Operation;
 use crate::ason::{Atom, Cell, Document, Field, Key, Record, Value, decode};
@@ -13,6 +13,7 @@ const READ_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/read-req
 const LIST_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/list-request.ason");
 const CANCEL_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/cancel-request.ason");
 const REF_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/ref-request.ason");
+const PATCH_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/patch-request.ason");
 
 fn budget() -> Budget {
     Budget::new(256, 64, 30_000).expect("budget")
@@ -38,6 +39,7 @@ fn all_m1_request_fixtures_are_canonical_typed_messages() {
         (READ_REQUEST, Operation::Read),
         (LIST_REQUEST, Operation::List),
         (SEARCH_REQUEST, Operation::Search),
+        (PATCH_REQUEST, Operation::Patch),
         (REF_REQUEST, Operation::Ref),
         (CANCEL_REQUEST, Operation::Cancel),
     ];
@@ -99,6 +101,24 @@ fn every_m1_argument_schema_round_trips() {
         .expect("request"),
         Request::new(
             5,
+            Arguments::Patch(
+                PatchArgs::new(
+                    vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()],
+                    vec!["a".repeat(64), "b".repeat(64)],
+                    vec![
+                        PatchEdit::new(0, 4, 3, PatchContent::Inline("pub".to_owned()))
+                            .expect("edit"),
+                        PatchEdit::new(1, 0, 0, PatchContent::Reference(11)).expect("edit"),
+                    ],
+                    0,
+                )
+                .expect("patch"),
+            ),
+            budget(),
+        )
+        .expect("request"),
+        Request::new(
+            6,
             Arguments::Ref(
                 RefArgs::new(
                     9,
@@ -114,7 +134,7 @@ fn every_m1_argument_schema_round_trips() {
         )
         .expect("request"),
         Request::new(
-            6,
+            7,
             Arguments::Cancel(CancelArgs::new(4).expect("cancel")),
             budget(),
         )
@@ -126,6 +146,56 @@ fn every_m1_argument_schema_round_trips() {
         let decoded = Request::decode(&decode(&encoded).expect("ASON")).expect("schema");
         assert_eq!(decoded, request);
     }
+}
+
+#[test]
+fn patch_schema_requires_canonical_paths_digests_and_non_overlapping_edits() {
+    let digest = "a".repeat(64);
+    assert_eq!(
+        PatchArgs::new(
+            vec!["b".to_owned(), "a".to_owned()],
+            vec![digest.clone(), digest.clone()],
+            vec![
+                PatchEdit::new(0, 0, 1, PatchContent::Inline(String::new())).expect("edit"),
+                PatchEdit::new(1, 0, 1, PatchContent::Inline(String::new())).expect("edit"),
+            ],
+            0,
+        ),
+        Err(RequestError::UnexpectedValue("p"))
+    );
+    assert_eq!(
+        PatchArgs::new(
+            vec!["a".to_owned()],
+            vec![digest],
+            vec![
+                PatchEdit::new(0, 1, 2, PatchContent::Inline("x".to_owned())).expect("edit"),
+                PatchEdit::new(0, 2, 1, PatchContent::Inline("y".to_owned())).expect("edit"),
+            ],
+            0,
+        ),
+        Err(RequestError::UnexpectedValue("o"))
+    );
+
+    let record = Record::new(
+        PATCH_COLUMNS
+            .iter()
+            .map(|key| Key::new(*key).expect("key"))
+            .collect(),
+        vec![
+            Cell::Vector(vec![Atom::text("a")]),
+            Cell::Vector(vec![Atom::text("not-a-digest")]),
+            Cell::Vector(vec![Atom::text("0")]),
+            Cell::Vector(vec![Atom::text("0")]),
+            Cell::Vector(vec![Atom::text("0")]),
+            Cell::Vector(vec![Atom::text("x")]),
+            Cell::Atom(Atom::text("0")),
+        ],
+    )
+    .expect("record");
+    assert_eq!(
+        PatchArgs::decode(&record),
+        Err(RequestError::InvalidText("h"))
+    );
 }
 
 #[test]

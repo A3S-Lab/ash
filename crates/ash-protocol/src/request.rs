@@ -13,6 +13,7 @@ const EXEC_COLUMNS: &[&str] = &["x", "v", "c", "e", "in", "f"];
 const READ_COLUMNS: &[&str] = &["p", "m", "o", "n"];
 const LIST_COLUMNS: &[&str] = &["p", "d", "f"];
 const SEARCH_COLUMNS: &[&str] = &["q", "p", "f"];
+const PATCH_COLUMNS: &[&str] = &["p", "h", "i", "o", "n", "v", "f"];
 const REF_COLUMNS: &[&str] = &["r", "m", "o", "n", "q", "f"];
 const CANCEL_COLUMNS: &[&str] = &["i"];
 
@@ -35,8 +36,10 @@ const EXEC_FLAGS: u32 = EXEC_CLEAR_ENVIRONMENT;
 const LIST_FLAGS: u32 = LIST_INCLUDE_HIDDEN | LIST_FILES_ONLY | LIST_DIRECTORIES_ONLY;
 const SEARCH_FLAGS: u32 = SEARCH_REGEX | SEARCH_CASE_INSENSITIVE | SEARCH_INCLUDE_HIDDEN;
 const REF_SEARCH_FLAGS: u32 = REF_REGEX | REF_CASE_INSENSITIVE;
+const PATCH_FLAGS: u32 = 0;
 const MAX_REF_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_REF_LINES: u64 = 1_000_000;
+const MAX_PATCH_INLINE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Per-request presentation and wall-clock ceilings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -190,6 +193,7 @@ pub enum Arguments {
     Read(ReadArgs),
     List(ListArgs),
     Search(SearchArgs),
+    Patch(PatchArgs),
     Ref(RefArgs),
     Cancel(CancelArgs),
 }
@@ -202,6 +206,7 @@ impl Arguments {
             Self::Read(_) => Operation::Read,
             Self::List(_) => Operation::List,
             Self::Search(_) => Operation::Search,
+            Self::Patch(_) => Operation::Patch,
             Self::Ref(_) => Operation::Ref,
             Self::Cancel(_) => Operation::Cancel,
         }
@@ -213,6 +218,7 @@ impl Arguments {
             Operation::Read => ReadArgs::decode(record).map(Self::Read),
             Operation::List => ListArgs::decode(record).map(Self::List),
             Operation::Search => SearchArgs::decode(record).map(Self::Search),
+            Operation::Patch => PatchArgs::decode(record).map(Self::Patch),
             Operation::Ref => RefArgs::decode(record).map(Self::Ref),
             Operation::Cancel => CancelArgs::decode(record).map(Self::Cancel),
             _ => Err(RequestError::UnsupportedOperation),
@@ -225,6 +231,7 @@ impl Arguments {
             Self::Read(arguments) => arguments.encode(),
             Self::List(arguments) => arguments.encode(),
             Self::Search(arguments) => arguments.encode(),
+            Self::Patch(arguments) => arguments.encode(),
             Self::Ref(arguments) => arguments.encode(),
             Self::Cancel(arguments) => arguments.encode(),
         }
@@ -236,6 +243,7 @@ impl Arguments {
             Self::Read(arguments) => arguments.validate(),
             Self::List(arguments) => arguments.validate(),
             Self::Search(arguments) => arguments.validate(),
+            Self::Patch(arguments) => arguments.validate(),
             Self::Ref(arguments) => arguments.validate(),
             Self::Cancel(arguments) => arguments.validate(),
         }
@@ -596,6 +604,264 @@ impl SearchArgs {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PatchContent {
+    Inline(String),
+    Reference(u64),
+}
+
+impl PatchContent {
+    fn decode(atom: &Atom) -> Result<Self, RequestError> {
+        match atom {
+            Atom::Text(value) => Ok(Self::Inline(value.clone())),
+            Atom::Reference(reference) if *reference != 0 => Ok(Self::Reference(*reference)),
+            Atom::Null | Atom::Reference(_) => Err(RequestError::InvalidText("v")),
+        }
+    }
+
+    fn encode(&self) -> Atom {
+        match self {
+            Self::Inline(value) => Atom::text(value),
+            Self::Reference(reference) => Atom::reference(*reference),
+        }
+    }
+
+    fn validate(&self) -> Result<(), RequestError> {
+        match self {
+            Self::Inline(value) => validate_bounded_text(value, "v", 1024 * 1024),
+            Self::Reference(0) => Err(RequestError::InvalidUnsigned("v")),
+            Self::Reference(_) => Ok(()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PatchEdit {
+    file_index: u16,
+    offset: u64,
+    delete_length: u64,
+    replacement: PatchContent,
+}
+
+impl PatchEdit {
+    pub fn new(
+        file_index: u16,
+        offset: u64,
+        delete_length: u64,
+        replacement: PatchContent,
+    ) -> Result<Self, RequestError> {
+        let edit = Self {
+            file_index,
+            offset,
+            delete_length,
+            replacement,
+        };
+        edit.replacement.validate()?;
+        offset
+            .checked_add(delete_length)
+            .ok_or(RequestError::IntegerRange("n"))?;
+        Ok(edit)
+    }
+
+    #[must_use]
+    pub const fn file_index(&self) -> u16 {
+        self.file_index
+    }
+
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    #[must_use]
+    pub const fn delete_length(&self) -> u64 {
+        self.delete_length
+    }
+
+    #[must_use]
+    pub const fn replacement(&self) -> &PatchContent {
+        &self.replacement
+    }
+}
+
+/// Canonical compare-and-swap byte edits over one or more existing files.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PatchArgs {
+    paths: Vec<String>,
+    expected_digests: Vec<String>,
+    edits: Vec<PatchEdit>,
+    flags: u32,
+}
+
+impl PatchArgs {
+    pub fn new(
+        paths: Vec<String>,
+        expected_digests: Vec<String>,
+        edits: Vec<PatchEdit>,
+        flags: u32,
+    ) -> Result<Self, RequestError> {
+        let arguments = Self {
+            paths,
+            expected_digests,
+            edits,
+            flags,
+        };
+        arguments.validate()?;
+        Ok(arguments)
+    }
+
+    fn decode(record: &Record) -> Result<Self, RequestError> {
+        expect_columns(record, PATCH_COLUMNS)?;
+        let values = record.values();
+        let paths = text_vector(&values[0], "p")?;
+        let expected_digests = text_vector(&values[1], "h")?;
+        let file_indices = unsigned_vector(&values[2], "i")?;
+        let offsets = unsigned_vector(&values[3], "o")?;
+        let delete_lengths = unsigned_vector(&values[4], "n")?;
+        let replacements = atom_vector(&values[5], "v")?;
+        let edit_count = file_indices.len();
+        if offsets.len() != edit_count
+            || delete_lengths.len() != edit_count
+            || replacements.len() != edit_count
+        {
+            return Err(RequestError::InvalidLimit("i"));
+        }
+        let edits = file_indices
+            .into_iter()
+            .zip(offsets)
+            .zip(delete_lengths)
+            .zip(replacements)
+            .map(|(((file_index, offset), delete_length), replacement)| {
+                PatchEdit::new(
+                    narrow_u16(file_index, "i")?,
+                    offset,
+                    delete_length,
+                    PatchContent::decode(&replacement)?,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new(
+            paths,
+            expected_digests,
+            edits,
+            narrow_u32(unsigned_cell(&values[6], "f")?, "f")?,
+        )
+    }
+
+    fn encode(&self) -> Result<Value, BuildError> {
+        Ok(Value::Record(Record::new(
+            keys(PATCH_COLUMNS)?,
+            vec![
+                text_vector_value(&self.paths),
+                text_vector_value(&self.expected_digests),
+                Cell::Vector(
+                    self.edits
+                        .iter()
+                        .map(|edit| Atom::text(edit.file_index.to_string()))
+                        .collect(),
+                ),
+                Cell::Vector(
+                    self.edits
+                        .iter()
+                        .map(|edit| Atom::text(edit.offset.to_string()))
+                        .collect(),
+                ),
+                Cell::Vector(
+                    self.edits
+                        .iter()
+                        .map(|edit| Atom::text(edit.delete_length.to_string()))
+                        .collect(),
+                ),
+                Cell::Vector(
+                    self.edits
+                        .iter()
+                        .map(|edit| edit.replacement.encode())
+                        .collect(),
+                ),
+                unsigned_value(u64::from(self.flags)),
+            ],
+        )?))
+    }
+
+    fn validate(&self) -> Result<(), RequestError> {
+        validate_paths(&self.paths)?;
+        if !self
+            .paths
+            .windows(2)
+            .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+        {
+            return Err(RequestError::UnexpectedValue("p"));
+        }
+        if self.expected_digests.len() != self.paths.len()
+            || self
+                .expected_digests
+                .iter()
+                .any(|digest| !valid_digest(digest))
+        {
+            return Err(RequestError::InvalidText("h"));
+        }
+        if self.edits.is_empty() || self.edits.len() > MAX_ARGUMENT_ITEMS {
+            return Err(RequestError::InvalidLimit("i"));
+        }
+        let mut seen = vec![false; self.paths.len()];
+        let mut inline_bytes = 0_usize;
+        let mut previous: Option<&PatchEdit> = None;
+        for edit in &self.edits {
+            edit.replacement.validate()?;
+            let file_index = usize::from(edit.file_index);
+            let Some(seen_file) = seen.get_mut(file_index) else {
+                return Err(RequestError::UnexpectedValue("i"));
+            };
+            *seen_file = true;
+            edit.offset
+                .checked_add(edit.delete_length)
+                .ok_or(RequestError::IntegerRange("n"))?;
+            if let PatchContent::Inline(value) = &edit.replacement {
+                inline_bytes = inline_bytes
+                    .checked_add(value.len())
+                    .ok_or(RequestError::InvalidLimit("v"))?;
+            }
+            if let Some(previous) = previous
+                && (edit.file_index < previous.file_index
+                    || (edit.file_index == previous.file_index
+                        && (edit.offset <= previous.offset
+                            || edit.offset
+                                < previous.offset.saturating_add(previous.delete_length))))
+            {
+                return Err(RequestError::UnexpectedValue("o"));
+            }
+            previous = Some(edit);
+        }
+        if seen.iter().any(|seen| !seen) {
+            return Err(RequestError::InvalidLimit("i"));
+        }
+        if inline_bytes > MAX_PATCH_INLINE_BYTES {
+            return Err(RequestError::InvalidLimit("v"));
+        }
+        validate_flags(self.flags, PATCH_FLAGS)
+    }
+
+    #[must_use]
+    pub fn paths(&self) -> &[String] {
+        &self.paths
+    }
+
+    #[must_use]
+    pub fn expected_digests(&self) -> &[String] {
+        &self.expected_digests
+    }
+
+    #[must_use]
+    pub fn edits(&self) -> &[PatchEdit] {
+        &self.edits
+    }
+
+    #[must_use]
+    pub const fn flags(&self) -> u32 {
+        self.flags
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RefMode {
     Bytes,
@@ -930,6 +1196,23 @@ fn text_vector(cell: &Cell, field: &'static str) -> Result<Vec<String>, RequestE
         .collect()
 }
 
+fn atom_vector(cell: &Cell, field: &'static str) -> Result<Vec<Atom>, RequestError> {
+    let Cell::Vector(values) = cell else {
+        return Err(RequestError::ExpectedVector(field));
+    };
+    Ok(values.clone())
+}
+
+fn unsigned_vector(cell: &Cell, field: &'static str) -> Result<Vec<u64>, RequestError> {
+    let Cell::Vector(values) = cell else {
+        return Err(RequestError::ExpectedVector(field));
+    };
+    values
+        .iter()
+        .map(|value| unsigned_atom(value, field))
+        .collect()
+}
+
 fn record<'a>(value: Option<&'a Value>, field: &'static str) -> Result<&'a Record, RequestError> {
     match value {
         Some(Value::Record(record)) => Ok(record),
@@ -1008,6 +1291,13 @@ fn validate_paths(paths: &[String]) -> Result<(), RequestError> {
         return Err(RequestError::InvalidText("p"));
     }
     Ok(())
+}
+
+fn valid_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_flags(flags: u32, allowed: u32) -> Result<(), RequestError> {
