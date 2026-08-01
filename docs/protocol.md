@@ -1,6 +1,6 @@
 # ASH/1 protocol and ASON
 
-Status: canonical ASON syntax, framing, handshake, and M1 request schemas are implemented
+Status: canonical ASON syntax, framing, handshake, and typed M1 request/result schemas are implemented
 
 ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
 
@@ -286,6 +286,17 @@ A process result contains:
 - stdout and stderr retained references when present;
 - truncation and redaction flags;
 - observed workspace delta when requested.
+
+M1 result data uses these fixed schemas:
+
+| Operation | Result header | Row or record semantics |
+| --- | --- | --- |
+| `x` | `d{k,c,ms,o,e,ro,re}:` | termination kind, code, elapsed ms, stdout/stderr projections, stdout/stderr references |
+| `r` | `d[N]{p,o,n,h,t,r}:` | path ID, actual offset and length, BLAKE3 digest, text projection, retained reference |
+| `l` | `d[N]{p,k,z,m}:` | path ID, file kind, byte size, optional modified Unix milliseconds |
+| `g` | `d[N]{p,l,c,t}:` | path ID, one-based line and column, matching line projection |
+
+Null (`~`) omits an unavailable projection, code, timestamp, or reference. Result flag bits are 0 truncated, 1 reduced, 2 normalized text, 3 retained evidence, 4 partial completion, and 5 redacted. Unknown bits are invalid. Any truncated result must retain inspectable evidence, and the retained flag must agree with the references actually present.
 
 Success with `status-only` output does not repeat empty stdout or stderr fields. Failure reserves a diagnostic budget even if normal output has exhausted its allocation.
 
