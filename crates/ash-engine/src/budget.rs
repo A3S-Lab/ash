@@ -17,6 +17,21 @@ pub struct BudgetTracker {
 
 impl BudgetTracker {
     pub fn new(request: Budget, output_limit: u64) -> Result<Self, BudgetError> {
+        Self::new_with_deadline(
+            request,
+            output_limit,
+            Instant::now() + Duration::from_millis(request.millis()),
+        )
+    }
+
+    /// Creates an isolated counter set that inherits an already-fixed program
+    /// deadline. Batch nodes use this to avoid racing on shared output and
+    /// record counters while remaining bounded by the parent request lifetime.
+    pub fn new_with_deadline(
+        request: Budget,
+        output_limit: u64,
+        deadline: Instant,
+    ) -> Result<Self, BudgetError> {
         if output_limit == 0 {
             return Err(BudgetError::InvalidOutputLimit);
         }
@@ -24,7 +39,7 @@ impl BudgetTracker {
             tokens: request.tokens(),
             output_limit,
             record_limit: request.records(),
-            deadline: Instant::now() + Duration::from_millis(request.millis()),
+            deadline,
             output_used: AtomicU64::new(0),
             records_used: AtomicU32::new(0),
         })

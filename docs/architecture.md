@@ -1,8 +1,10 @@
 # ash system architecture
 
-Status: architecture baseline
+Status: architecture baseline plus implementation checkpoint
 
-This document defines the intended architecture of `ash`. It is normative for component ownership and runtime boundaries. It does not claim that the described implementation already exists.
+This document defines the intended architecture of `ash` and is normative for component ownership and runtime boundaries. Statements explicitly labeled as the current source checkpoint describe implemented behavior; the remaining contracts are design targets rather than release claims.
+
+The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, dual Tokio/Rayon runtime, hierarchical governor, direct process execution, bounded read/list/search, compare-and-swap patching with live rollback, retained-result inspection, workspace snapshot/delta, cancellation, and bounded batch DAGs with stable retained child evidence. Durable filesystem journals, approval permits, signed online releases, self-update, fuzz infrastructure, and published benchmark evidence remain open.
 
 ## 1. Product definition
 
@@ -122,7 +124,7 @@ Owns:
 - operation dispatch;
 - result assembly and event sequencing.
 
-The engine depends on traits provided by the operation, platform, and store boundaries. It cannot contain target-specific conditional behavior.
+The engine depends on traits provided by the operation, platform, and store boundaries. It cannot contain target-specific conditional behavior. In the current checkpoint it owns the generic validated DAG scheduler, program leases, child-budget isolation, cancellation propagation, and hierarchical permits; `ash-ops` supplies the leaf-operation futures.
 
 ### 4.3 `ash-ops`
 
@@ -133,6 +135,7 @@ Owns portable operation semantics:
 - `list` — directory enumeration, globbing, stat, and compact trees;
 - `search` — literal and regular-expression search;
 - `patch` — compare-and-swap file edits and multi-file journals;
+- `batch` — bounded dependency graphs over heterogeneous leaf operations;
 - `fs` — create, copy, move, and remove mutations;
 - `snapshot` — workspace state and deltas;
 - `ref` — slice, filter, search, and project stored results;
@@ -218,7 +221,7 @@ Operations are versioned semantic identifiers. Single-character mnemonics are pr
 
 ### 5.3 Edges
 
-Edges are typed:
+The complete model admits typed edges:
 
 - `control` — target becomes eligible after source reaches the required status;
 - `stream` — source bytes flow into the target input with backpressure;
@@ -226,6 +229,8 @@ Edges are typed:
 - `artifact` — target receives a stored file or blob reference.
 
 The graph must be acyclic. Cycles fail validation before any mutation or process creation.
+
+The current `batch` schema implements control dependencies only. It validates the whole graph before dispatch, runs every ready node concurrently, skips only transitive descendants of a non-success result, and continues independent branches. Stream, value, and artifact bindings remain protocol extensions; they are not inferred from control edges.
 
 ### 5.4 Context
 
@@ -303,7 +308,7 @@ Reducers cannot call a model. Their parameters and version are retained with the
 
 The engine enforces byte and record ceilings before encoding. A negotiated tokenizer profile may add a stricter token ceiling at the presentation boundary. If no profile is available, the adapter supplies a conservative byte budget and performs final token accounting.
 
-The program budget is allocated across nodes by explicit priority and deterministic defaults. A node cannot consume another node's reserved error budget.
+The program budget is allocated across nodes by explicit priority and deterministic defaults. A node cannot consume another node's reserved error budget. The current batch implementation divides token, record, and immediate-output capacity deterministically across nodes, inherits the parent deadline and cancellation token, and gives each child isolated counters plus a node-local path dictionary.
 
 ### 7.5 References
 
@@ -430,7 +435,7 @@ Error families include:
 - partial filesystem commit or recovery required;
 - internal invariant failure.
 
-Partial graph results identify every node as pending, running, succeeded, failed, skipped, or cancelled. A program-level status never hides node-level evidence.
+Final graph results identify every node as succeeded, failed, skipped, or cancelled. Pending and running are lifecycle event states reserved for streaming progress. A program-level status never hides terminal node evidence: every executed child has a retained full response, while a skipped child has no fabricated result.
 
 ## 13. Versioning and compatibility
 
@@ -542,10 +547,10 @@ The benchmark contract in [benchmarks.md](./benchmarks.md) measures correctness,
 
 ### M2: coding mutation workflow
 
-- compare-and-swap patching;
+- compare-and-swap patching (implemented in the source checkpoint);
 - filesystem mutation journals;
-- snapshots and changed-file deltas;
-- batch programs and dependency edges;
+- snapshots and changed-file deltas (implemented in the source checkpoint);
+- batch programs and control dependency edges (implemented in the source checkpoint);
 - permit binding and structured conflict recovery.
 
 ### M3: release hardening

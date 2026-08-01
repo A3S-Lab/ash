@@ -1,11 +1,11 @@
 //! Typed ASH/1 operation requests and resource budgets.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use thiserror::Error;
 
 use crate::Operation;
-use crate::ason::{Atom, BuildError, Cell, Document, Field, Key, Record, Value};
+use crate::ason::{Atom, BuildError, Cell, Document, Field, Key, Record, Table, Value};
 
 const ENVELOPE_FIELDS: &[&str] = &["t", "i", "o", "a", "u"];
 const BUDGET_COLUMNS: &[&str] = &["tok", "rec", "ms"];
@@ -17,11 +17,14 @@ const PATCH_COLUMNS: &[&str] = &["p", "h", "i", "o", "n", "v", "f"];
 const SNAPSHOT_COLUMNS: &[&str] = &["p", "d", "m", "r", "f"];
 const REF_COLUMNS: &[&str] = &["r", "m", "o", "n", "q", "f"];
 const CANCEL_COLUMNS: &[&str] = &["i"];
+const BATCH_COLUMNS: &[&str] = &["i", "d", "o", "a"];
 
 pub const MAX_REQUEST_TOKENS: u32 = 1_048_576;
 pub const MAX_REQUEST_RECORDS: u32 = 1_000_000;
 pub const MAX_REQUEST_MILLIS: u64 = 86_400_000;
 pub const MAX_ARGUMENT_ITEMS: usize = 1024;
+pub const MAX_BATCH_NODES: usize = 256;
+pub const MAX_BATCH_EDGES: usize = 4096;
 
 pub const EXEC_CLEAR_ENVIRONMENT: u32 = 1 << 0;
 pub const LIST_INCLUDE_HIDDEN: u32 = 1 << 0;
@@ -109,6 +112,13 @@ impl Request {
             return Err(RequestError::UnexpectedValue("i"));
         }
         arguments.validate()?;
+        if let Arguments::Batch(batch) = &arguments {
+            let nodes =
+                u32::try_from(batch.nodes.len()).map_err(|_| RequestError::InvalidLimit("a"))?;
+            if nodes > budget.tokens || nodes > budget.records {
+                return Err(RequestError::InvalidLimit("u"));
+            }
+        }
         budget.validate()?;
         Ok(Self {
             id,
@@ -129,7 +139,8 @@ impl Request {
             .filter(|_| operation_text.len() == 1)
             .and_then(Operation::from_id)
             .ok_or(RequestError::UnsupportedOperation)?;
-        let arguments = Arguments::decode(operation, record(document.get("a"), "a")?)?;
+        let arguments =
+            Arguments::decode(operation, document.get("a").ok_or(RequestError::Fields)?)?;
         let budget_record = record(document.get("u"), "u")?;
         expect_columns(budget_record, BUDGET_COLUMNS)?;
         let budget_values = budget_record.values();
@@ -197,6 +208,7 @@ pub enum Arguments {
     List(ListArgs),
     Search(SearchArgs),
     Patch(PatchArgs),
+    Batch(BatchArgs),
     Snapshot(SnapshotArgs),
     Ref(RefArgs),
     Cancel(CancelArgs),
@@ -211,13 +223,27 @@ impl Arguments {
             Self::List(_) => Operation::List,
             Self::Search(_) => Operation::Search,
             Self::Patch(_) => Operation::Patch,
+            Self::Batch(_) => Operation::Batch,
             Self::Snapshot(_) => Operation::Snapshot,
             Self::Ref(_) => Operation::Ref,
             Self::Cancel(_) => Operation::Cancel,
         }
     }
 
-    fn decode(operation: Operation, record: &Record) -> Result<Self, RequestError> {
+    fn decode(operation: Operation, value: &Value) -> Result<Self, RequestError> {
+        if operation == Operation::Batch {
+            return match value {
+                Value::Table(table) => BatchArgs::decode(table).map(Self::Batch),
+                _ => Err(RequestError::ExpectedTable("a")),
+            };
+        }
+        let Value::Record(record) = value else {
+            return Err(RequestError::ExpectedRecord("a"));
+        };
+        Self::decode_record(operation, record)
+    }
+
+    fn decode_record(operation: Operation, record: &Record) -> Result<Self, RequestError> {
         match operation {
             Operation::Exec => ExecArgs::decode(record).map(Self::Exec),
             Operation::Read => ReadArgs::decode(record).map(Self::Read),
@@ -238,6 +264,7 @@ impl Arguments {
             Self::List(arguments) => arguments.encode(),
             Self::Search(arguments) => arguments.encode(),
             Self::Patch(arguments) => arguments.encode(),
+            Self::Batch(arguments) => arguments.encode(),
             Self::Snapshot(arguments) => arguments.encode(),
             Self::Ref(arguments) => arguments.encode(),
             Self::Cancel(arguments) => arguments.encode(),
@@ -251,6 +278,7 @@ impl Arguments {
             Self::List(arguments) => arguments.validate(),
             Self::Search(arguments) => arguments.validate(),
             Self::Patch(arguments) => arguments.validate(),
+            Self::Batch(arguments) => arguments.validate(),
             Self::Snapshot(arguments) => arguments.validate(),
             Self::Ref(arguments) => arguments.validate(),
             Self::Cancel(arguments) => arguments.validate(),
@@ -870,6 +898,207 @@ impl PatchArgs {
     }
 }
 
+/// One typed node in a batch dependency graph.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchNode {
+    id: u64,
+    dependencies: Vec<u64>,
+    arguments: Box<Arguments>,
+}
+
+impl BatchNode {
+    pub fn new(
+        id: u64,
+        dependencies: Vec<u64>,
+        arguments: Arguments,
+    ) -> Result<Self, RequestError> {
+        let node = Self {
+            id,
+            dependencies,
+            arguments: Box::new(arguments),
+        };
+        node.validate()?;
+        Ok(node)
+    }
+
+    fn decode(row: &[Cell]) -> Result<Self, RequestError> {
+        let id = unsigned_cell(&row[0], "i")?;
+        let dependencies = unsigned_vector(&row[1], "d")?;
+        let operation_text = text_cell(&row[2], "o")?;
+        let operation = operation_text
+            .as_bytes()
+            .first()
+            .copied()
+            .filter(|_| operation_text.len() == 1)
+            .and_then(Operation::from_id)
+            .ok_or(RequestError::UnsupportedOperation)?;
+        if matches!(
+            operation,
+            Operation::Batch | Operation::Cancel | Operation::Fs
+        ) {
+            return Err(RequestError::UnsupportedOperation);
+        }
+        let payload = text_cell(&row[3], "a")?;
+        validate_bounded_text(payload, "a", 1024 * 1024)?;
+        let document = crate::ason::decode(payload).map_err(|_| RequestError::InvalidText("a"))?;
+        if document.encode() != payload {
+            return Err(RequestError::InvalidText("a"));
+        }
+        expect_fields(&document, &["a"])?;
+        let arguments = Arguments::decode(
+            operation,
+            document.get("a").ok_or(RequestError::InvalidText("a"))?,
+        )?;
+        Self::new(id, dependencies, arguments)
+    }
+
+    fn encode(&self) -> Result<Vec<Cell>, BuildError> {
+        let payload =
+            Document::new(vec![Field::new(Key::new("a")?, self.arguments.encode()?)])?.encode();
+        Ok(vec![
+            unsigned_value(self.id),
+            Cell::Vector(
+                self.dependencies
+                    .iter()
+                    .map(|dependency| Atom::text(dependency.to_string()))
+                    .collect(),
+            ),
+            text_value(&char::from(self.arguments.operation().id()).to_string()),
+            text_value(&payload),
+        ])
+    }
+
+    fn validate(&self) -> Result<(), RequestError> {
+        if self.id == 0 {
+            return Err(RequestError::InvalidUnsigned("i"));
+        }
+        if self.dependencies.len() > MAX_BATCH_EDGES
+            || !self.dependencies.windows(2).all(|pair| pair[0] < pair[1])
+            || self
+                .dependencies
+                .iter()
+                .any(|dependency| *dependency == 0 || *dependency == self.id)
+        {
+            return Err(RequestError::UnexpectedValue("d"));
+        }
+        if matches!(
+            self.arguments.operation(),
+            Operation::Batch | Operation::Cancel | Operation::Fs
+        ) {
+            return Err(RequestError::UnsupportedOperation);
+        }
+        self.arguments.validate()
+    }
+
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    #[must_use]
+    pub fn dependencies(&self) -> &[u64] {
+        &self.dependencies
+    }
+
+    #[must_use]
+    pub fn arguments(&self) -> &Arguments {
+        &self.arguments
+    }
+}
+
+/// A validated, acyclic batch graph in stable node-id order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchArgs {
+    nodes: Vec<BatchNode>,
+}
+
+impl BatchArgs {
+    pub fn new(nodes: Vec<BatchNode>) -> Result<Self, RequestError> {
+        let arguments = Self { nodes };
+        arguments.validate()?;
+        Ok(arguments)
+    }
+
+    fn decode(table: &Table) -> Result<Self, RequestError> {
+        expect_table_columns(table, BATCH_COLUMNS)?;
+        let nodes = table
+            .rows()
+            .iter()
+            .map(|row| BatchNode::decode(row))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new(nodes)
+    }
+
+    fn encode(&self) -> Result<Value, BuildError> {
+        Ok(Value::Table(Table::new(
+            keys(BATCH_COLUMNS)?,
+            self.nodes
+                .iter()
+                .map(BatchNode::encode)
+                .collect::<Result<Vec<_>, _>>()?,
+        )?))
+    }
+
+    fn validate(&self) -> Result<(), RequestError> {
+        if self.nodes.is_empty() || self.nodes.len() > MAX_BATCH_NODES {
+            return Err(RequestError::InvalidLimit("a"));
+        }
+        if !self.nodes.windows(2).all(|pair| pair[0].id < pair[1].id) {
+            return Err(RequestError::UnexpectedValue("i"));
+        }
+        let positions = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id, index))
+            .collect::<HashMap<_, _>>();
+        let mut edge_count = 0_usize;
+        let mut incoming = Vec::with_capacity(self.nodes.len());
+        let mut dependents = vec![Vec::new(); self.nodes.len()];
+        for (index, node) in self.nodes.iter().enumerate() {
+            node.validate()?;
+            edge_count = edge_count
+                .checked_add(node.dependencies.len())
+                .ok_or(RequestError::InvalidLimit("d"))?;
+            if edge_count > MAX_BATCH_EDGES {
+                return Err(RequestError::InvalidLimit("d"));
+            }
+            incoming.push(node.dependencies.len());
+            for dependency in &node.dependencies {
+                let dependency_index = positions
+                    .get(dependency)
+                    .copied()
+                    .ok_or(RequestError::UnexpectedValue("d"))?;
+                dependents[dependency_index].push(index);
+            }
+        }
+        let mut ready = incoming
+            .iter()
+            .enumerate()
+            .filter_map(|(index, incoming)| (*incoming == 0).then_some(index))
+            .collect::<VecDeque<_>>();
+        let mut visited = 0_usize;
+        while let Some(index) = ready.pop_front() {
+            visited += 1;
+            for dependent in &dependents[index] {
+                incoming[*dependent] -= 1;
+                if incoming[*dependent] == 0 {
+                    ready.push_back(*dependent);
+                }
+            }
+        }
+        if visited != self.nodes.len() {
+            return Err(RequestError::UnexpectedValue("d"));
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn nodes(&self) -> &[BatchNode] {
+        &self.nodes
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SnapshotMode {
     Capture,
@@ -1187,6 +1416,8 @@ pub enum RequestError {
     ExpectedScalar(&'static str),
     #[error("field {0} must be a record")]
     ExpectedRecord(&'static str),
+    #[error("field {0} must be a table")]
+    ExpectedTable(&'static str),
     #[error("field {0} must be a vector")]
     ExpectedVector(&'static str),
     #[error("record columns do not match the operation schema")]
@@ -1222,6 +1453,20 @@ fn expect_fields(document: &Document, expected: &[&str]) -> Result<(), RequestEr
 fn expect_columns(record: &Record, expected: &[&str]) -> Result<(), RequestError> {
     if record.columns().len() == expected.len()
         && record
+            .columns()
+            .iter()
+            .zip(expected)
+            .all(|(column, expected)| column.as_str() == *expected)
+    {
+        Ok(())
+    } else {
+        Err(RequestError::Columns)
+    }
+}
+
+fn expect_table_columns(table: &Table, expected: &[&str]) -> Result<(), RequestError> {
+    if table.columns().len() == expected.len()
+        && table
             .columns()
             .iter()
             .zip(expected)

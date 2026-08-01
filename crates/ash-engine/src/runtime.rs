@@ -39,6 +39,7 @@ impl Engine {
                 id: config.id,
                 workspace: config.workspace,
                 max_output_bytes: config.max_output_bytes,
+                max_paths: config.max_paths,
                 compute: Arc::clone(&self.compute),
                 governor,
                 store,
@@ -106,6 +107,7 @@ struct SessionInner {
     id: u64,
     workspace: String,
     max_output_bytes: u64,
+    max_paths: usize,
     compute: Arc<ComputePool>,
     governor: HierarchicalGovernor,
     store: Arc<ResultStore>,
@@ -209,11 +211,15 @@ impl RegisteredProgram {
             )
             .await?;
         let program = Program {
-            session: Arc::clone(&self.session),
+            lease: Arc::new(ProgramLease {
+                session: Arc::clone(&self.session),
+                root_request_id: self.request_id,
+                _program_permit: permit,
+            }),
             request_id: self.request_id,
             cancellation: self.cancellation.clone(),
             budget: Arc::clone(&self.budget),
-            _program_permit: permit,
+            paths: Arc::clone(&self.session.paths),
         };
         self.registered = false;
         Ok(program)
@@ -235,10 +241,16 @@ impl Drop for Session {
 }
 
 pub struct Program {
-    session: Arc<SessionInner>,
+    lease: Arc<ProgramLease>,
     request_id: u64,
     cancellation: CancellationToken,
     budget: Arc<BudgetTracker>,
+    paths: Arc<PathDictionary>,
+}
+
+struct ProgramLease {
+    session: Arc<SessionInner>,
+    root_request_id: u64,
     _program_permit: HierarchicalPermit,
 }
 
@@ -250,7 +262,7 @@ impl Program {
 
     #[must_use]
     pub fn workspace(&self) -> &str {
-        &self.session.workspace
+        &self.lease.session.workspace
     }
 
     #[must_use]
@@ -265,21 +277,46 @@ impl Program {
 
     #[must_use]
     pub fn compute_pool(&self) -> &Arc<ComputePool> {
-        &self.session.compute
+        &self.lease.session.compute
     }
 
     #[must_use]
     pub fn store(&self) -> &Arc<ResultStore> {
-        &self.session.store
+        &self.lease.session.store
     }
 
     #[must_use]
     pub fn paths(&self) -> &Arc<PathDictionary> {
-        &self.session.paths
+        &self.paths
+    }
+
+    /// Creates a batch-node program with isolated counters and the parent's
+    /// cancellation, session resources, deadline, and program permit lease.
+    pub fn child(
+        &self,
+        request_id: u64,
+        budget: ash_protocol::request::Budget,
+        output_limit: u64,
+    ) -> Result<Self, EngineError> {
+        Ok(Self {
+            lease: Arc::clone(&self.lease),
+            request_id,
+            cancellation: self.cancellation.clone(),
+            budget: Arc::new(BudgetTracker::new_with_deadline(
+                budget,
+                output_limit,
+                self.budget.deadline(),
+            )?),
+            // A child response is retained as a self-contained document. A
+            // node-local dictionary makes its path IDs deterministic even
+            // when sibling nodes discover paths concurrently.
+            paths: Arc::new(PathDictionary::new(self.lease.session.max_paths)?),
+        })
     }
 
     pub async fn acquire(&self, kind: PermitKind) -> Result<HierarchicalPermit, EngineError> {
         Ok(self
+            .lease
             .session
             .governor
             .acquire(kind, self.budget.deadline(), &self.cancellation)
@@ -287,9 +324,9 @@ impl Program {
     }
 }
 
-impl Drop for Program {
+impl Drop for ProgramLease {
     fn drop(&mut self) {
-        self.session.unregister(self.request_id);
+        self.session.unregister(self.root_request_id);
     }
 }
 
@@ -355,7 +392,22 @@ mod tests {
             session.begin(&request(7)).await,
             Err(EngineError::DuplicateRequest(7))
         ));
+        let child = first
+            .child(8, Budget::new(10, 2, 1_000).expect("child budget"), 32)
+            .expect("child");
         drop(first);
+        assert!(matches!(
+            session.begin(&request(7)).await,
+            Err(EngineError::DuplicateRequest(7))
+        ));
+        assert_eq!(child.request_id(), 8);
+        assert_eq!(child.budget().remaining().output_bytes, 32);
+        child
+            .paths()
+            .intern(&["child.txt".to_owned()])
+            .expect("child path");
+        assert!(session.paths().is_empty().expect("root dictionary"));
+        drop(child);
         assert!(session.begin(&request(7)).await.is_ok());
     }
 

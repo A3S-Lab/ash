@@ -1,13 +1,15 @@
 use super::{
-    CancelResult, CancellationState, ErrorCode, ErrorRecord, ErrorStage, FileKind, FinalResponse,
-    ListEntry, PatchResult, PatchState, PathMapping, ProcessResult, RESULT_RETAINED,
-    RESULT_TRUNCATED, ReadResult, ReferenceMatch, ReferenceResult, ReferenceSlice,
-    ReleasedReference, ResponseError, ResultData, RetryClass, SearchMatch, SnapshotChange,
-    SnapshotResult, Status, StreamResult, TerminationKind,
+    BatchNodeResult, BatchNodeState, CancelResult, CancellationState, ErrorCode, ErrorRecord,
+    ErrorStage, FileKind, FinalResponse, ListEntry, PatchResult, PatchState, PathMapping,
+    ProcessResult, RESULT_RETAINED, RESULT_TRUNCATED, ReadResult, ReferenceMatch, ReferenceResult,
+    ReferenceSlice, ReleasedReference, ResponseError, ResultData, RetryClass, SearchMatch,
+    SnapshotChange, SnapshotResult, Status, StreamResult, TerminationKind,
 };
+use crate::Operation;
 use crate::ason::decode;
 
 const SEARCH_RESULT: &str = include_str!("../../../../spec/fixtures/ason/search-result.ason");
+const BATCH_RESULT: &str = include_str!("../../../../spec/fixtures/ason/batch-result.ason");
 
 #[test]
 fn search_result_matches_the_canonical_specification_fixture() {
@@ -41,7 +43,7 @@ fn search_result_matches_the_canonical_specification_fixture() {
 }
 
 #[test]
-fn every_m1_result_shape_encodes_as_canonical_ason() {
+fn every_core_result_shape_encodes_as_canonical_ason() {
     let results = [
         ResultData::Exec(ProcessResult {
             termination: TerminationKind::Exited,
@@ -247,6 +249,69 @@ fn snapshot_results_are_bound_to_a_retained_manifest() {
             ResultData::Snapshot(vec![]),
             RESULT_RETAINED,
             Some(3),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn batch_results_are_compact_references_in_stable_node_order() {
+    let response = FinalResponse::success(
+        70,
+        vec![],
+        ResultData::Batch(vec![
+            BatchNodeResult {
+                id: 1,
+                operation: Operation::Search,
+                state: BatchNodeState::Succeeded,
+                status: Some(Status::Success),
+                reference: Some(4),
+            },
+            BatchNodeResult {
+                id: 2,
+                operation: Operation::Read,
+                state: BatchNodeState::Succeeded,
+                status: Some(Status::Success),
+                reference: Some(5),
+            },
+        ]),
+        RESULT_RETAINED,
+        None,
+    )
+    .expect("batch response");
+    assert_eq!(response.encode().expect("encode").encode(), BATCH_RESULT);
+    assert_eq!(decode(BATCH_RESULT).expect("ASON").encode(), BATCH_RESULT);
+
+    assert!(
+        FinalResponse::failure(
+            71,
+            Status::Failed,
+            ErrorRecord {
+                code: ErrorCode::BatchFailed,
+                retry: RetryClass::Never,
+                stage: ErrorStage::Execute,
+                evidence: None,
+                argument: None,
+            },
+            vec![],
+            Some(ResultData::Batch(vec![
+                BatchNodeResult {
+                    id: 1,
+                    operation: Operation::Exec,
+                    state: BatchNodeState::Failed,
+                    status: Some(Status::Failed),
+                    reference: Some(4),
+                },
+                BatchNodeResult {
+                    id: 2,
+                    operation: Operation::Read,
+                    state: BatchNodeState::Skipped,
+                    status: None,
+                    reference: None,
+                },
+            ])),
+            RESULT_RETAINED | super::RESULT_PARTIAL,
+            None,
         )
         .is_ok()
     );

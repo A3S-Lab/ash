@@ -10,8 +10,9 @@ use ash_protocol::Operation;
 use ash_protocol::ason::decode;
 use ash_protocol::handshake::{HandshakePreferences, HandshakeRequest, HandshakeResponse};
 use ash_protocol::request::{
-    Arguments, Budget, CancelArgs, ExecArgs, InputSource, PatchArgs, PatchContent, PatchEdit,
-    ReadArgs, ReadMode, RefArgs, RefMode, Request, SearchArgs, SnapshotArgs, SnapshotMode,
+    Arguments, BatchArgs, BatchNode, Budget, CancelArgs, ExecArgs, InputSource, PatchArgs,
+    PatchContent, PatchEdit, ReadArgs, ReadMode, RefArgs, RefMode, Request, SearchArgs,
+    SnapshotArgs, SnapshotMode,
 };
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -222,6 +223,51 @@ fn run_executes_a_direct_process_with_typed_output() {
     assert!(response.starts_with("t:3\ni:32\ns:0\n"));
     assert!(response.contains("d{k,c,ms,o,e,ro,re}:"));
     assert!(response.contains("rustc "));
+}
+
+#[test]
+fn run_executes_a_batch_and_returns_only_compact_child_references() {
+    let nodes = vec![
+        BatchNode::new(
+            1,
+            vec![],
+            Arguments::Read(
+                ReadArgs::new(vec!["Cargo.toml".to_owned()], ReadMode::Bytes, 0, 16).expect("read"),
+            ),
+        )
+        .expect("node"),
+        BatchNode::new(
+            2,
+            vec![1],
+            Arguments::Read(
+                ReadArgs::new(vec!["Cargo.toml".to_owned()], ReadMode::Bytes, 16, 16)
+                    .expect("read"),
+            ),
+        )
+        .expect("node"),
+    ];
+    let request = Request::new(
+        33,
+        Arguments::Batch(BatchArgs::new(nodes).expect("batch")),
+        Budget::new(4_096, 16, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode")
+    .encode();
+    let output = run(&["run"], request.as_bytes());
+
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert!(output.stderr.is_empty());
+    let response = std::str::from_utf8(&output.stdout).expect("UTF-8 response");
+    assert_eq!(decode(response).expect("ASON response").encode(), response);
+    assert!(response.starts_with("t:3\ni:33\ns:0\n"), "{response}");
+    assert!(response.contains("d[2]{i,o,s,c,r}:\n1,r,0,0,@1\n2,r,0,0,@2\n"));
+    assert!(response.ends_with("z:8\nr:~\n"), "{response}");
+    assert!(
+        !response.contains("[workspace]"),
+        "child data leaked inline"
+    );
 }
 
 #[test]
@@ -493,6 +539,88 @@ fn rpc_cancel_preempts_an_active_process() {
     assert!(exec.contains("e{c,q,p,x,a}:\n403,0,4,~,~\n"), "{exec}");
     assert!(cancel.starts_with("t:3\ni:62\ns:0\n"), "{cancel}");
     assert!(cancel.contains("d{i,z}:\n61,1\n"), "{cancel}");
+}
+
+#[test]
+fn rpc_cancel_propagates_through_a_batch_and_skips_its_descendants() {
+    let directory = TestDirectory::new();
+    fs::write(directory.0.join("target.txt"), b"never read\n").expect("write target");
+    let executable = compile_rpc_helper(&directory);
+    let handshake = HandshakeRequest::new(
+        63,
+        directory.0.to_string_lossy(),
+        "integration-63",
+        HandshakePreferences {
+            operation_mask: u64::MAX,
+            ..HandshakePreferences::default()
+        },
+    )
+    .expect("handshake")
+    .encode()
+    .expect("encode handshake")
+    .encode();
+    let nodes = vec![
+        BatchNode::new(
+            1,
+            vec![],
+            Arguments::Exec(
+                ExecArgs::new(
+                    executable,
+                    vec!["sleep".to_owned(), "10000".to_owned()],
+                    ".",
+                    vec![],
+                    InputSource::None,
+                    0,
+                )
+                .expect("exec"),
+            ),
+        )
+        .expect("node"),
+        BatchNode::new(
+            2,
+            vec![1],
+            Arguments::Read(
+                ReadArgs::new(vec!["target.txt".to_owned()], ReadMode::Bytes, 0, 16).expect("read"),
+            ),
+        )
+        .expect("node"),
+    ];
+    let batch = Request::new(
+        64,
+        Arguments::Batch(BatchArgs::new(nodes).expect("batch")),
+        Budget::new(4_096, 16, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode")
+    .encode();
+    let cancel = Request::new(
+        65,
+        Arguments::Cancel(CancelArgs::new(64).expect("cancel")),
+        Budget::new(64, 1, 30_000).expect("budget"),
+    )
+    .expect("request")
+    .encode()
+    .expect("encode")
+    .encode();
+    let mut input = frame(handshake.as_bytes());
+    input.extend(frame(batch.as_bytes()));
+    input.extend(frame(cancel.as_bytes()));
+
+    let started = Instant::now();
+    let output = run(&["rpc"], &input);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    let frames = split_frames(&output.stdout);
+    assert_eq!(frames.len(), 3);
+    let batch = std::str::from_utf8(frames[1]).expect("batch response");
+    let cancel = std::str::from_utf8(frames[2]).expect("cancel response");
+    assert!(batch.starts_with("t:3\ni:64\ns:5\n"), "{batch}");
+    assert!(batch.contains("1,x,3,7,@1\n2,r,2,~,~\n"), "{batch}");
+    assert!(batch.contains("e{c,q,p,x,a}:\n800,0,4,~,~\n"), "{batch}");
+    assert!(batch.ends_with("z:24\nr:~\n"), "{batch}");
+    assert!(cancel.starts_with("t:3\ni:65\ns:0\n"), "{cancel}");
+    assert!(cancel.contains("d{i,z}:\n64,1\n"), "{cancel}");
 }
 
 #[test]

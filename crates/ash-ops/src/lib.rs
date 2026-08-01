@@ -2,6 +2,7 @@
 
 //! Portable operation semantics for ash.
 
+mod batch;
 mod error;
 mod exec;
 mod list;
@@ -20,7 +21,7 @@ use ash_protocol::response::FinalResponse;
 
 pub use error::OperationError;
 
-/// Portable M1 operations bound to one native workspace capability.
+/// Portable operations bound to one native workspace capability.
 #[derive(Clone, Debug)]
 pub struct PortableOperations {
     workspace: Workspace,
@@ -42,6 +43,7 @@ impl PortableOperations {
             | Operation::List.mask()
             | Operation::Search.mask()
             | Operation::Patch.mask()
+            | Operation::Batch.mask()
             | Operation::Ref.mask()
             | Operation::Snapshot.mask()
     }
@@ -52,6 +54,21 @@ impl PortableOperations {
         program: &Program,
     ) -> Result<FinalResponse, OperationError> {
         let result = match request.arguments() {
+            Arguments::Batch(arguments) => batch::execute(self, request, arguments, program).await,
+            _ => self.execute_leaf(request, program).await,
+        };
+        match result {
+            Ok(response) => Ok(response),
+            Err(error) => error.into_response(request.id()),
+        }
+    }
+
+    async fn execute_leaf(
+        &self,
+        request: &Request,
+        program: &Program,
+    ) -> Result<FinalResponse, OperationError> {
+        match request.arguments() {
             Arguments::Exec(arguments) => {
                 exec::execute(&self.workspace, request, arguments, program).await
             }
@@ -71,9 +88,16 @@ impl PortableOperations {
                 snapshot::execute(&self.workspace, request, arguments, program).await
             }
             Arguments::Ref(arguments) => reference::execute(request, arguments, program).await,
-            Arguments::Cancel(_) => Err(OperationError::Unsupported),
-        };
-        match result {
+            Arguments::Batch(_) | Arguments::Cancel(_) => Err(OperationError::Unsupported),
+        }
+    }
+
+    async fn execute_leaf_response(
+        &self,
+        request: &Request,
+        program: &Program,
+    ) -> Result<FinalResponse, OperationError> {
+        match self.execute_leaf(request, program).await {
             Ok(response) => Ok(response),
             Err(error) => error.into_response(request.id()),
         }

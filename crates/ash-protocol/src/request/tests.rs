@@ -1,9 +1,9 @@
 use super::{
-    Arguments, Budget, CancelArgs, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource,
-    LIST_INCLUDE_HIDDEN, ListArgs, PATCH_COLUMNS, PatchArgs, PatchContent, PatchEdit, READ_COLUMNS,
-    REF_CASE_INSENSITIVE, REF_REGEX, ReadArgs, ReadMode, RefArgs, RefMode, Request, RequestError,
-    SEARCH_CASE_INSENSITIVE, SEARCH_REGEX, SNAPSHOT_INCLUDE_HIDDEN, SearchArgs, SnapshotArgs,
-    SnapshotMode,
+    Arguments, BatchArgs, BatchNode, Budget, CancelArgs, EXEC_CLEAR_ENVIRONMENT, ExecArgs,
+    InputSource, LIST_INCLUDE_HIDDEN, ListArgs, PATCH_COLUMNS, PatchArgs, PatchContent, PatchEdit,
+    READ_COLUMNS, REF_CASE_INSENSITIVE, REF_REGEX, ReadArgs, ReadMode, RefArgs, RefMode, Request,
+    RequestError, SEARCH_CASE_INSENSITIVE, SEARCH_REGEX, SNAPSHOT_INCLUDE_HIDDEN, SearchArgs,
+    SnapshotArgs, SnapshotMode,
 };
 use crate::Operation;
 use crate::ason::{Atom, Cell, Document, Field, Key, Record, Value, decode};
@@ -16,6 +16,7 @@ const CANCEL_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/cancel
 const REF_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/ref-request.ason");
 const PATCH_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/patch-request.ason");
 const SNAPSHOT_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/snapshot-request.ason");
+const BATCH_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/batch-request.ason");
 
 fn budget() -> Budget {
     Budget::new(256, 64, 30_000).expect("budget")
@@ -35,13 +36,14 @@ fn specification_search_fixture_decodes_and_reencodes_exactly() {
 }
 
 #[test]
-fn all_m1_request_fixtures_are_canonical_typed_messages() {
+fn all_core_request_fixtures_are_canonical_typed_messages() {
     let expected = [
         (EXEC_REQUEST, Operation::Exec),
         (READ_REQUEST, Operation::Read),
         (LIST_REQUEST, Operation::List),
         (SEARCH_REQUEST, Operation::Search),
         (PATCH_REQUEST, Operation::Patch),
+        (BATCH_REQUEST, Operation::Batch),
         (SNAPSHOT_REQUEST, Operation::Snapshot),
         (REF_REQUEST, Operation::Ref),
         (CANCEL_REQUEST, Operation::Cancel),
@@ -54,7 +56,55 @@ fn all_m1_request_fixtures_are_canonical_typed_messages() {
 }
 
 #[test]
-fn every_m1_argument_schema_round_trips() {
+fn batch_fixture_round_trips_nested_canonical_arguments() {
+    let request = Request::decode(&decode(BATCH_REQUEST).expect("ASON")).expect("batch schema");
+    let Arguments::Batch(batch) = request.arguments() else {
+        panic!("batch arguments expected");
+    };
+    assert_eq!(batch.nodes().len(), 2);
+    assert_eq!(batch.nodes()[0].id(), 1);
+    assert_eq!(batch.nodes()[1].dependencies(), &[1]);
+    assert!(matches!(batch.nodes()[0].arguments(), Arguments::Search(_)));
+    assert!(matches!(batch.nodes()[1].arguments(), Arguments::Read(_)));
+    assert_eq!(request.encode().expect("encode").encode(), BATCH_REQUEST);
+}
+
+#[test]
+fn batch_graph_rejects_cycles_unknown_edges_and_insufficient_budgets() {
+    let search =
+        || Arguments::Search(SearchArgs::new("needle", vec![".".to_owned()], 0).expect("search"));
+    let cycle = vec![
+        BatchNode::new(1, vec![2], search()).expect("node"),
+        BatchNode::new(2, vec![1], search()).expect("node"),
+    ];
+    assert_eq!(
+        BatchArgs::new(cycle),
+        Err(RequestError::UnexpectedValue("d"))
+    );
+    assert_eq!(
+        BatchArgs::new(vec![
+            BatchNode::new(1, vec![], search()).expect("node"),
+            BatchNode::new(2, vec![9], search()).expect("node"),
+        ]),
+        Err(RequestError::UnexpectedValue("d"))
+    );
+    let batch = BatchArgs::new(vec![
+        BatchNode::new(1, vec![], search()).expect("node"),
+        BatchNode::new(2, vec![1], search()).expect("node"),
+    ])
+    .expect("batch");
+    assert_eq!(
+        Request::new(
+            90,
+            Arguments::Batch(batch),
+            Budget::new(1, 1, 30_000).expect("budget"),
+        ),
+        Err(RequestError::InvalidLimit("u"))
+    );
+}
+
+#[test]
+fn every_core_argument_schema_round_trips() {
     let requests = [
         Request::new(
             1,

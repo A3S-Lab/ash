@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use thiserror::Error;
 
+use crate::Operation;
 use crate::ason::{Atom, BuildError, Cell, Document, Field, Key, Record, Table, Value};
 
 pub const RESULT_TRUNCATED: u32 = 1 << 0;
@@ -21,6 +22,7 @@ const LIST_COLUMNS: &[&str] = &["p", "k", "z", "m"];
 const SEARCH_COLUMNS: &[&str] = &["p", "l", "c", "t"];
 const PATCH_COLUMNS: &[&str] = &["p", "s", "h"];
 const SNAPSHOT_COLUMNS: &[&str] = &["p", "c", "k", "z", "h"];
+const BATCH_COLUMNS: &[&str] = &["i", "o", "s", "c", "r"];
 const REF_SLICE_COLUMNS: &[&str] = &["o", "n", "p", "h", "t", "b"];
 const REF_SEARCH_COLUMNS: &[&str] = &["o", "l", "c", "t"];
 const REF_RELEASE_COLUMNS: &[&str] = &["r", "z"];
@@ -96,6 +98,7 @@ pub enum ErrorCode {
     ConcurrencyBudget = 602,
     UnknownReference = 700,
     ReferenceBusy = 701,
+    BatchFailed = 800,
     Internal = 900,
 }
 
@@ -211,6 +214,14 @@ impl FinalResponse {
                     return Err(ResponseError::InvalidData);
                 }
             }
+            if let ResultData::Batch(results) = data
+                && status == Status::Success
+                && results
+                    .iter()
+                    .any(|result| result.state != BatchNodeState::Succeeded)
+            {
+                return Err(ResponseError::InvalidData);
+            }
             match data {
                 ResultData::Reference(ReferenceResult::Slice(_) | ReferenceResult::Search(_))
                     if reference.is_none() =>
@@ -307,6 +318,7 @@ pub enum ResultData {
     List(Vec<ListEntry>),
     Search(Vec<SearchMatch>),
     Patch(Vec<PatchResult>),
+    Batch(Vec<BatchNodeResult>),
     Snapshot(Vec<SnapshotResult>),
     Reference(ReferenceResult),
     Cancel(CancelResult),
@@ -320,6 +332,7 @@ impl ResultData {
             Self::List(entries) => encode_list(entries),
             Self::Search(matches) => encode_search(matches),
             Self::Patch(results) => encode_patch(results),
+            Self::Batch(results) => encode_batch(results),
             Self::Snapshot(results) => encode_snapshot(results),
             Self::Reference(result) => result.encode(),
             Self::Cancel(result) => result.encode(),
@@ -332,6 +345,7 @@ impl ResultData {
                 result.stdout.reference.is_some() || result.stderr.reference.is_some()
             }
             Self::Read(results) => results.iter().any(|result| result.reference.is_some()),
+            Self::Batch(results) => results.iter().any(|result| result.reference.is_some()),
             Self::List(_)
             | Self::Search(_)
             | Self::Patch(_)
@@ -397,6 +411,41 @@ impl ResultData {
                         PatchState::Skipped => result.digest.is_none(),
                     };
                     if result.path == 0 || !valid_optional_digest || !valid_state_digest {
+                        return Err(ResponseError::InvalidData);
+                    }
+                }
+            }
+            Self::Batch(results) => {
+                if results.is_empty() || !results.windows(2).all(|pair| pair[0].id < pair[1].id) {
+                    return Err(ResponseError::InvalidData);
+                }
+                for result in results {
+                    validate_reference(result.reference)?;
+                    if result.id == 0
+                        || matches!(
+                            result.operation,
+                            Operation::Batch | Operation::Cancel | Operation::Fs
+                        )
+                    {
+                        return Err(ResponseError::InvalidData);
+                    }
+                    let valid = match result.state {
+                        BatchNodeState::Succeeded => {
+                            result.status == Some(Status::Success) && result.reference.is_some()
+                        }
+                        BatchNodeState::Failed => {
+                            result.status.is_some_and(|status| {
+                                !matches!(status, Status::Success | Status::Cancelled)
+                            }) && result.reference.is_some()
+                        }
+                        BatchNodeState::Skipped => {
+                            result.status.is_none() && result.reference.is_none()
+                        }
+                        BatchNodeState::Cancelled => {
+                            result.status == Some(Status::Cancelled) && result.reference.is_some()
+                        }
+                    };
+                    if !valid {
                         return Err(ResponseError::InvalidData);
                     }
                 }
@@ -668,6 +717,24 @@ pub struct PatchResult {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+pub enum BatchNodeState {
+    Succeeded = 0,
+    Failed = 1,
+    Skipped = 2,
+    Cancelled = 3,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchNodeResult {
+    pub id: u64,
+    pub operation: Operation,
+    pub state: BatchNodeState,
+    pub status: Option<Status>,
+    pub reference: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub enum SnapshotChange {
     Present = 0,
     Added = 1,
@@ -786,6 +853,24 @@ fn encode_patch(results: &[PatchResult]) -> Result<Value, BuildError> {
         })
         .collect();
     Ok(Value::Table(Table::new(keys(PATCH_COLUMNS)?, rows)?))
+}
+
+fn encode_batch(results: &[BatchNodeResult]) -> Result<Value, BuildError> {
+    let rows = results
+        .iter()
+        .map(|result| {
+            vec![
+                unsigned_cell(result.id),
+                text_cell(&char::from(result.operation.id()).to_string()),
+                unsigned_cell(u64::from(result.state as u8)),
+                result
+                    .status
+                    .map_or_else(null_cell, |status| unsigned_cell(u64::from(status.code()))),
+                optional_reference_cell(result.reference),
+            ]
+        })
+        .collect();
+    Ok(Value::Table(Table::new(keys(BATCH_COLUMNS)?, rows)?))
 }
 
 fn encode_snapshot(results: &[SnapshotResult]) -> Result<Value, BuildError> {

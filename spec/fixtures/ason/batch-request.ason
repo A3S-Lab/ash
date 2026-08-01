@@ -1,0 +1,8 @@
+t:1
+i:80
+o:b
+a[2]{i,d,o,a}:
+1,[],g,"a{q,p,f}:\nTODO,[src],0\n"
+2,[1],r,"a{p,m,o,n}:\n[Cargo.toml],0,0,32\n"
+u{tok,rec,ms}:
+64,16,30000

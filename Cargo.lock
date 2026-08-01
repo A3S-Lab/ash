@@ -22,6 +22,7 @@ version = "0.1.0"
 dependencies = [
  "a3s-ash-protocol",
  "a3s-ash-store",
+ "futures",
  "rayon",
  "thiserror",
  "tokio",

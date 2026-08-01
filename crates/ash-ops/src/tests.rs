@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ash_engine::{Engine, Parallelism, SessionConfig};
 use ash_platform::Workspace;
 use ash_protocol::request::{
-    Arguments, Budget, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource, LIST_FILES_ONLY, ListArgs,
-    PatchArgs, PatchContent, PatchEdit, REF_CASE_INSENSITIVE, ReadArgs, ReadMode, RefArgs, RefMode,
-    Request, SEARCH_CASE_INSENSITIVE, SNAPSHOT_INCLUDE_HIDDEN, SearchArgs, SnapshotArgs,
-    SnapshotMode,
+    Arguments, BatchArgs, BatchNode, Budget, EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource,
+    LIST_FILES_ONLY, ListArgs, PatchArgs, PatchContent, PatchEdit, REF_CASE_INSENSITIVE, ReadArgs,
+    ReadMode, RefArgs, RefMode, Request, SEARCH_CASE_INSENSITIVE, SNAPSHOT_INCLUDE_HIDDEN,
+    SearchArgs, SnapshotArgs, SnapshotMode,
 };
 
 use super::PortableOperations;
@@ -57,12 +57,26 @@ use std::io::{self, Read};
 use std::time::Duration;
 
 fn main() {
-    match std::env::args().nth(1).as_deref() {
+    let mut arguments = std::env::args().skip(1);
+    match arguments.next().as_deref() {
         Some("fail") => {
             eprintln!("bad");
             std::process::exit(7);
         }
         Some("wait") => std::thread::sleep(Duration::from_secs(5)),
+        Some("rendezvous") => {
+            let own = arguments.next().expect("own marker");
+            let peer = arguments.next().expect("peer marker");
+            std::fs::write(own, b"ready").expect("write marker");
+            for _ in 0..200 {
+                if std::path::Path::new(&peer).exists() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            eprintln!("peer did not start concurrently");
+            std::process::exit(9);
+        }
         _ => {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input).expect("stdin");
@@ -70,6 +84,7 @@ fn main() {
         }
     }
 }
+
 "#,
     )
     .expect("write helper");
@@ -87,6 +102,98 @@ fn main() {
         .expect("run rustc");
     assert!(status.success(), "compile helper");
     format!("bin/{executable_name}")
+}
+
+#[tokio::test]
+async fn batch_runs_ready_nodes_concurrently_and_skips_only_failed_descendants() {
+    let directory = TestDirectory::new();
+    fs::write(directory.0.join("target.txt"), b"needle\nsecond\n").expect("write target");
+    let executable = compile_helper(&directory);
+    let (session, operations) = runtime(&directory);
+
+    let exec = |arguments: Vec<&str>| {
+        Arguments::Exec(
+            ExecArgs::new(
+                &executable,
+                arguments.into_iter().map(str::to_owned).collect(),
+                ".",
+                vec![],
+                InputSource::None,
+                0,
+            )
+            .expect("exec"),
+        )
+    };
+    let nodes = vec![
+        BatchNode::new(
+            1,
+            vec![],
+            exec(vec!["rendezvous", "left.ready", "right.ready"]),
+        )
+        .expect("node"),
+        BatchNode::new(
+            2,
+            vec![],
+            exec(vec!["rendezvous", "right.ready", "left.ready"]),
+        )
+        .expect("node"),
+        BatchNode::new(
+            3,
+            vec![],
+            Arguments::Search(
+                SearchArgs::new("needle", vec!["target.txt".to_owned()], 0).expect("search"),
+            ),
+        )
+        .expect("node"),
+        BatchNode::new(4, vec![], exec(vec!["fail"])).expect("node"),
+        BatchNode::new(
+            5,
+            vec![3],
+            Arguments::Read(
+                ReadArgs::new(vec!["target.txt".to_owned()], ReadMode::Lines, 1, 1).expect("read"),
+            ),
+        )
+        .expect("node"),
+        BatchNode::new(
+            6,
+            vec![4],
+            Arguments::Read(
+                ReadArgs::new(vec!["target.txt".to_owned()], ReadMode::Lines, 2, 1).expect("read"),
+            ),
+        )
+        .expect("node"),
+    ];
+    let request = Request::new(
+        90,
+        Arguments::Batch(BatchArgs::new(nodes).expect("batch")),
+        budget(8192, 48),
+    )
+    .expect("request");
+    let program = session.begin(&request).await.expect("program");
+    let response = operations
+        .execute(&request, &program)
+        .await
+        .expect("batch response");
+    let encoded = response.encode().expect("encode").encode();
+
+    assert!(encoded.starts_with("t:3\ni:90\ns:5\n"), "{encoded}");
+    assert!(encoded.contains("d[6]{i,o,s,c,r}:"), "{encoded}");
+    assert!(encoded.contains("1,x,0,0,@1\n"), "{encoded}");
+    assert!(encoded.contains("2,x,0,0,@2\n"), "{encoded}");
+    assert!(encoded.contains("3,g,0,0,@3\n"), "{encoded}");
+    assert!(encoded.contains("4,x,1,5,@4\n"), "{encoded}");
+    assert!(encoded.contains("5,r,0,0,@5\n"), "{encoded}");
+    assert!(encoded.contains("6,r,2,~,~\n"), "{encoded}");
+    assert!(
+        encoded.contains("e{c,q,p,x,a}:\n800,0,4,~,~\n"),
+        "{encoded}"
+    );
+    assert!(encoded.ends_with("z:24\nr:~\n"), "{encoded}");
+
+    let failed = program.store().get(4).expect("failed child response");
+    let failed = std::str::from_utf8(&failed).expect("ASON response");
+    assert!(failed.starts_with("t:3\ni:4\ns:5\n"), "{failed}");
+    assert_eq!(program.store().usage().expect("usage").entries, 5);
 }
 
 #[tokio::test]
