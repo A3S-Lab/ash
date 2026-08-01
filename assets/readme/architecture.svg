@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="540" viewBox="0 0 1200 540" role="img" aria-labelledby="title desc">
-  <title id="title">ash system architecture</title>
-  <desc id="desc">A flow from coding agent through ASH/1 and ASON, typed program IR, policy and scheduler, portable operations, native platform backends, retained output, deterministic reducers, and an ASON result.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">ash dual-plane multi-core architecture</title>
+  <desc id="desc">A coding agent request becomes a typed program governed by budgets, runs through separate Tokio I/O and Rayon CPU planes, uses native Linux, macOS, or Windows backends, then passes through stable merge, bounded storage, reduction, and canonical ASON.</desc>
 
   <defs>
     <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
@@ -8,98 +8,94 @@
     </marker>
   </defs>
 
-  <rect width="1200" height="540" rx="26" fill="#080B0C"/>
-  <text x="48" y="54" fill="#F2F5F3" font-size="34" font-weight="750" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Arial, sans-serif">One semantic path. Three native backends.</text>
-  <text x="48" y="84" fill="#8B9690" font-size="18" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">REQUEST → EXECUTION → REDUCTION → ASON</text>
+  <rect width="1200" height="620" rx="26" fill="#080B0C"/>
+  <text x="48" y="54" fill="#F2F5F3" font-size="34" font-weight="750" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Arial, sans-serif">Typed once. Parallel inside. Deterministic outside.</text>
+  <text x="48" y="84" fill="#8B9690" font-size="18" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">PROGRAM DAG → BOUNDED EXECUTION → STABLE MERGE → ASON</text>
 
-  <g id="primary-flow" transform="translate(48 116)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
-    <g id="agent">
-      <rect width="190" height="92" rx="14" fill="#121718" stroke="#344039"/>
-      <text x="20" y="36" fill="#78F5A4" font-size="18" font-weight="700">01 / CALLER</text>
-      <text x="20" y="67" fill="#F2F5F3" font-size="22" font-weight="700">CODING AGENT</text>
+  <g id="request-path" transform="translate(48 110)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <g id="caller">
+      <rect width="210" height="82" rx="14" fill="#121718" stroke="#344039"/>
+      <text x="18" y="32" fill="#78F5A4" font-size="18" font-weight="700">01 / CALLER</text>
+      <text x="18" y="62" fill="#F2F5F3" font-size="21" font-weight="700">CODING AGENT</text>
     </g>
-
-    <path d="M190 46H228" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
-
-    <g id="protocol" transform="translate(238 0)">
-      <rect width="190" height="92" rx="14" fill="#121718" stroke="#344039"/>
-      <text x="20" y="36" fill="#78F5A4" font-size="18" font-weight="700">02 / PROTOCOL</text>
-      <text x="20" y="67" fill="#F2F5F3" font-size="22" font-weight="700">ASH/1 + ASON</text>
+    <path d="M210 41H242" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
+    <g id="protocol" transform="translate(252)">
+      <rect width="210" height="82" rx="14" fill="#121718" stroke="#344039"/>
+      <text x="18" y="32" fill="#78F5A4" font-size="18" font-weight="700">02 / PROTOCOL</text>
+      <text x="18" y="62" fill="#F2F5F3" font-size="21" font-weight="700">ASH/1 + ASON</text>
     </g>
-
-    <path d="M428 46H466" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
-
-    <g id="program" transform="translate(476 0)">
-      <rect width="190" height="92" rx="14" fill="#121718" stroke="#344039"/>
-      <text x="20" y="36" fill="#78F5A4" font-size="18" font-weight="700">03 / SEMANTICS</text>
-      <text x="20" y="67" fill="#F2F5F3" font-size="22" font-weight="700">PROGRAM IR</text>
+    <path d="M462 41H494" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
+    <g id="program" transform="translate(504)">
+      <rect width="210" height="82" rx="14" fill="#121718" stroke="#344039"/>
+      <text x="18" y="32" fill="#78F5A4" font-size="18" font-weight="700">03 / SEMANTICS</text>
+      <text x="18" y="62" fill="#F2F5F3" font-size="21" font-weight="700">TYPED PROGRAM</text>
     </g>
-
-    <path d="M666 46H704" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
-
-    <g id="scheduler" transform="translate(714 0)">
-      <rect width="190" height="92" rx="14" fill="#121718" stroke="#344039"/>
-      <text x="20" y="36" fill="#78F5A4" font-size="18" font-weight="700">04 / CONTROL</text>
-      <text x="20" y="67" fill="#F2F5F3" font-size="22" font-weight="700">POLICY + DAG</text>
-    </g>
-
-    <path d="M904 46H942" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
-
-    <g id="operations" transform="translate(952 -16)">
-      <rect width="200" height="124" rx="14" fill="#121718" stroke="#78F5A4"/>
-      <text x="18" y="32" fill="#78F5A4" font-size="18" font-weight="700">05 / OPERATIONS</text>
-      <g fill="#D8DEDB" font-size="19" font-weight="700">
-        <text x="18" y="65">X  R  L  G</text>
-        <text x="18" y="96">P  F  S  H</text>
-      </g>
+    <path d="M714 41H746" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
+    <g id="governor" transform="translate(756)">
+      <rect width="348" height="82" rx="14" fill="#162019" stroke="#78F5A4"/>
+      <text x="18" y="32" fill="#78F5A4" font-size="18" font-weight="700">04 / HIERARCHICAL GOVERNOR</text>
+      <text x="18" y="62" fill="#F2F5F3" font-size="20" font-weight="700">DAG · CPU · PROCESS · BYTES</text>
     </g>
   </g>
 
-  <path d="M1052 224V244H400V266" fill="none" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
-  <path d="M1052 244H873V266" fill="none" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M978 192V215H400V238" fill="none" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M978 215H970V238" fill="none" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
 
-  <g id="platform-boundary" transform="translate(48 274)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
-    <rect width="704" height="116" rx="16" fill="#0E1314" stroke="#344039"/>
-    <text x="20" y="30" fill="#8B9690" font-size="18" font-weight="700">NATIVE PLATFORM BOUNDARY</text>
-    <g transform="translate(20 48)" font-size="20" font-weight="700">
-      <rect width="202" height="48" rx="10" fill="#171D1B"/>
-      <text x="101" y="31" text-anchor="middle" fill="#F2F5F3">LINUX</text>
-      <rect x="231" width="202" height="48" rx="10" fill="#171D1B"/>
-      <text x="332" y="31" text-anchor="middle" fill="#F2F5F3">MACOS</text>
-      <rect x="462" width="202" height="48" rx="10" fill="#171D1B"/>
-      <text x="563" y="31" text-anchor="middle" fill="#F2F5F3">WINDOWS</text>
+  <g id="dual-plane-runtime" transform="translate(48 246)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <rect width="704" height="202" rx="16" fill="#0E1314" stroke="#344039"/>
+    <text x="20" y="32" fill="#8B9690" font-size="18" font-weight="700">DUAL-PLANE RUNTIME</text>
+
+    <g id="io-plane" transform="translate(20 52)">
+      <rect width="318" height="126" rx="12" fill="#171D1B" stroke="#405048"/>
+      <text x="18" y="31" fill="#78F5A4" font-size="19" font-weight="700">TOKIO / I/O PLANE</text>
+      <text x="18" y="65" fill="#F2F5F3" font-size="19">RPC · PROCESS · PIPES</text>
+      <text x="18" y="96" fill="#B8C2BD" font-size="18">DEADLINE · CANCEL · EVENTS</text>
+    </g>
+
+    <path d="M348 115H368" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <g id="compute-plane" transform="translate(378 52)">
+      <rect width="306" height="126" rx="12" fill="#171D1B" stroke="#78F5A4"/>
+      <text x="18" y="31" fill="#78F5A4" font-size="19" font-weight="700">RAYON / CPU PLANE</text>
+      <text x="18" y="65" fill="#F2F5F3" font-size="19">SEARCH · HASH · DIFF</text>
+      <text x="18" y="96" fill="#B8C2BD" font-size="18">WORK STEALING · N CORES</text>
     </g>
   </g>
 
-  <g id="output-path" transform="translate(790 274)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
-    <g id="store">
-      <rect width="166" height="116" rx="16" fill="#0E1314" stroke="#344039"/>
-      <text x="18" y="32" fill="#8B9690" font-size="18" font-weight="700">CAPTURE</text>
-      <text x="18" y="65" fill="#F2F5F3" font-size="20" font-weight="700">STORE @N</text>
-      <text x="18" y="92" fill="#78F5A4" font-size="18">BOUNDED</text>
-    </g>
+  <g id="operations" transform="translate(790 246)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <rect width="362" height="202" rx="16" fill="#0E1314" stroke="#344039"/>
+    <text x="20" y="32" fill="#8B9690" font-size="18" font-weight="700">PORTABLE OPERATIONS</text>
+    <text x="20" y="72" fill="#F2F5F3" font-size="22" font-weight="700">X  R  L  G  P</text>
+    <text x="20" y="108" fill="#F2F5F3" font-size="22" font-weight="700">F  B  H  S  K</text>
+    <rect x="20" y="132" width="322" height="48" rx="10" fill="#162019" stroke="#405048"/>
+    <text x="181" y="163" text-anchor="middle" fill="#78F5A4" font-size="18" font-weight="700">STABLE KEY MERGE</text>
+  </g>
 
-    <path d="M166 58H196" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M752 347H782" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M400 448V472" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M970 448V472" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
 
-    <g id="reduce" transform="translate(206 0)">
-      <rect width="156" height="116" rx="16" fill="#0E1314" stroke="#344039"/>
-      <text x="18" y="32" fill="#8B9690" font-size="18" font-weight="700">REDUCE</text>
-      <text x="18" y="65" fill="#F2F5F3" font-size="20" font-weight="700">PROJECT</text>
-      <text x="18" y="92" fill="#78F5A4" font-size="18">DEDUPE</text>
+  <g id="platforms" transform="translate(48 480)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <rect width="704" height="96" rx="16" fill="#0E1314" stroke="#344039"/>
+    <text x="20" y="28" fill="#8B9690" font-size="18" font-weight="700">NATIVE PROCESS + FILESYSTEM BOUNDARY</text>
+    <g transform="translate(20 42)" font-size="19" font-weight="700">
+      <rect width="202" height="38" rx="9" fill="#171D1B"/>
+      <text x="101" y="26" text-anchor="middle" fill="#F2F5F3">LINUX</text>
+      <rect x="231" width="202" height="38" rx="9" fill="#171D1B"/>
+      <text x="332" y="26" text-anchor="middle" fill="#F2F5F3">MACOS</text>
+      <rect x="462" width="202" height="38" rx="9" fill="#171D1B"/>
+      <text x="563" y="26" text-anchor="middle" fill="#F2F5F3">WINDOWS</text>
     </g>
   </g>
 
-  <path d="M752 332H782" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
-
-  <path d="M1148 390V442H250" fill="none" stroke="#66746D" stroke-width="2" marker-end="url(#arrow)"/>
-
-  <g id="result" transform="translate(48 434)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
-    <rect width="190" height="62" rx="14" fill="#162019" stroke="#78F5A4"/>
-    <text x="20" y="26" fill="#78F5A4" font-size="18" font-weight="700">06 / RESULT</text>
-    <text x="20" y="49" fill="#F2F5F3" font-size="20" font-weight="700">ASON + REF</text>
+  <g id="result-path" transform="translate(790 480)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <rect width="362" height="96" rx="16" fill="#162019" stroke="#78F5A4"/>
+    <text x="18" y="29" fill="#78F5A4" font-size="18" font-weight="700">05 / MODEL CONTEXT</text>
+    <text x="18" y="61" fill="#F2F5F3" font-size="20" font-weight="700">STORE @N → REDUCE → ASON</text>
+    <text x="18" y="84" fill="#8B9690" font-size="18">BOUNDED · CANONICAL</text>
   </g>
 
-  <text x="286" y="472" fill="#8B9690" font-size="19" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">only the selected evidence enters model context</text>
-  <circle cx="1118" cy="472" r="7" fill="#78F5A4"/>
-  <text x="1095" y="479" text-anchor="end" fill="#F2F5F3" font-size="18" font-weight="700" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">ONE CONTRACT</text>
+  <text x="48" y="604" fill="#8B9690" font-size="18" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">parallel completion order never becomes protocol order</text>
+  <circle cx="1120" cy="598" r="6" fill="#78F5A4"/>
+  <text x="1098" y="604" text-anchor="end" fill="#F2F5F3" font-size="18" font-weight="700" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">DETERMINISTIC</text>
 </svg>

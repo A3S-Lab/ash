@@ -200,9 +200,13 @@ Runtime measurements isolate `ash` overhead from the executed tool:
 - result-store spill and fetch;
 - path dictionary lookup;
 - graph scheduling at several node counts;
+- directory traversal, literal search, regular-expression search, hashing, and reduction at 1, 2, 4, 8, and host-default compute workers;
+- mixed-load I/O latency while the compute pool is saturated;
 - cancellation-to-process-tree-empty latency.
 
-Each measurement reports p50, p95, p99, sample count, host description, and raw observations.
+Each measurement reports p50, p95, p99, sample count, host description, logical and available CPU count, configured I/O and compute workers, peak resident memory, CPU utilization, and raw observations. Scaling reports include throughput, speedup relative to one worker, and parallel efficiency. Results from different hosts are not combined into one scaling curve.
+
+Parallel and sequential runs consume the same fixture and must emit byte-identical canonical ASON. A faster run with reordered, missing, or duplicated records is a correctness failure rather than a performance result. Fixtures include many small files, fewer large files, skewed directory trees, binary files, ignored paths, sparse matches, dense matches, and simultaneous process-output pressure.
 
 ## 10. Proposed release gates
 
@@ -212,6 +216,8 @@ These are engineering targets, not achieved claims:
 - Median total tokens per successful task are at most 50% of the native-shell baseline across the full corpus.
 - Search, repository tree, verbose build, test failure, and diff families target at most 30% of baseline tokens.
 - Warm protocol dispatch p95 adds less than 1 ms, excluding the operation itself.
+- Saturating the compute pool does not violate the RPC, pipe-drain, or cancellation latency gates.
+- Multi-core search and hashing show positive scaling on the published release hosts; exact speedup becomes a release gate only after stable infrastructure evidence exists.
 - Cancellation leaves no owned process after the platform-specific cleanup deadline.
 - No immediate result exceeds its declared record, byte, or token budget.
 - Every truncated result has a usable reference unless retention was explicitly disabled.

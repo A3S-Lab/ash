@@ -59,6 +59,10 @@ Programs have limits for elapsed time, parallelism, child processes, bytes read,
 
 Reduction may omit data from the immediate response, but it must never silently destroy the ability to inspect that data. Reduced or truncated content carries a session result reference unless retention was explicitly disabled.
 
+### 2.7 Parallelize work, not observable order
+
+Independent graph nodes and splittable operations use all available CPU cores when the workload is large enough to repay scheduling cost. I/O readiness and CPU work run on separate executors so repository scans cannot delay pipe draining, cancellation, or RPC progress. Parallel completion order is never protocol order: records pass through a stable merge before reduction and ASON encoding.
+
 ## 3. System context
 
 ```text
@@ -72,7 +76,9 @@ Protocol gateway
 Typed Program IR
     |
     +--> validation and capability policy
-    +--> scheduler and cancellation tree
+    +--> scheduler, governor, and cancellation tree
+    |        |--> async I/O plane
+    |        `--> work-stealing compute plane
     +--> operation engine
              |
              +--> process backend
@@ -109,6 +115,8 @@ Owns:
 - immutable execution-context capture;
 - dependency graph construction;
 - concurrency scheduling and failure propagation;
+- global, session, program, and node concurrency governance;
+- I/O-plane and compute-plane dispatch;
 - cancellation trees and deadlines;
 - resource-budget allocation;
 - operation dispatch;
@@ -225,6 +233,29 @@ An execution context includes workspace root, logical current directory, environ
 
 There is no implicit `cd` operation inside a graph. A session may update its default context between programs; every submitted program receives an immutable snapshot.
 
+### 5.5 Multi-core execution model
+
+`ash` uses two bounded execution planes because asynchronous I/O and CPU parallelism solve different problems.
+
+| Work class | Executor | Typical work | Ordering boundary |
+| --- | --- | --- | --- |
+| I/O and control | Tokio multi-thread runtime | stdio RPC, timers, process pipes, cancellation, bounded channels | request and event sequence numbers |
+| CPU partitions | Fixed Rayon work-stealing pool | search, hashing, diffing, structured reduction, large merges | stable operation-specific keys |
+| Child processes | Native platform backend, observed asynchronously | compilers, tests, tools, direct executable calls | typed node dependencies |
+
+The compute pool defaults to `std::thread::available_parallelism()` workers, so a CPU-bound operation can occupy every CPU made available to the process by the operating system or container. The I/O runtime uses a smaller independently bounded worker set; CPU work is never executed inline on an I/O worker. Explicit configuration can lower both limits for shared hosts and repeatable benchmarks.
+
+Parallel work follows these rules:
+
+- The DAG scheduler starts independent ready nodes concurrently while respecting program priority, dependency, mutation, and process limits.
+- `list`, `search`, snapshot hashing, multi-file patch preparation, and result reduction partition by directory, file, or bounded byte range. Small inputs remain sequential when parallel setup would cost more than the work.
+- Large-file partitions overlap only enough bytes to preserve line and pattern boundaries, then discard duplicate boundary matches during merge.
+- Workers reuse bounded scratch buffers. Immutable inputs use shared ownership rather than one copy per worker, and oversized content spills to the session store.
+- Cooperative cancellation is checked between partitions and during long scans. No operation can fill an unbounded queue while a downstream consumer is slow.
+- Stable merge keys include the logical path byte order and operation-specific position, such as line, column, node identifier, or input index. Equal inputs therefore produce byte-identical canonical ASON regardless of worker completion order.
+
+A hierarchical governor owns weighted permits for runnable nodes, child processes, filesystem descriptors, compute partitions, captured bytes, and retained bytes. System limits bound all sessions; a session limit bounds its programs; a program budget is reserved before execution; node limits are the final boundary. This prevents a wide graph from multiplying intra-operation parallelism until the host is oversubscribed.
+
 ## 6. Request lifecycle
 
 1. The protocol gateway validates framing and message size.
@@ -234,7 +265,7 @@ There is no implicit `cd` operation inside a graph. A session may update its def
 5. Capability and workspace-boundary checks run before side effects.
 6. The graph is validated and normalized.
 7. Budgets are reserved for nodes and retained output.
-8. The scheduler starts eligible nodes up to the concurrency limit.
+8. The scheduler acquires hierarchical permits and starts eligible nodes on the appropriate I/O or compute plane.
 9. Events enter bounded internal streams and the session store.
 10. Deterministic reducers produce the immediate result projection.
 11. The ASON encoder emits a canonical response and any reference metadata.
@@ -302,6 +333,7 @@ An explicit non-portable shell operation may be added later, but it must declare
 - Exit code, signal, forced termination, spawn failure, and lost-process state are distinct.
 - Output is drained during termination up to the remaining budget.
 - No production path waits indefinitely for a child, pipe, or cleanup task.
+- Concurrent child processes are bounded separately from compute partitions, preventing graph width from starving pipe readers or the host.
 
 ## 9. Filesystem semantics
 
@@ -428,13 +460,16 @@ ash/
 |   `-- platform-contract/
 |-- assets/readme/
 |-- docs/
+|   `-- decisions/
 |-- install.sh
 |-- install.ps1
 |-- xtask/
 `-- .github/workflows/
 ```
 
-The root is a Cargo workspace rather than an executable package. Public types cross crate boundaries only when ownership requires it. The CLI binary is assembled in `ash-cli`.
+The root is a Cargo workspace rather than an executable package. Public types cross crate boundaries only when ownership requires it. The CLI binary is assembled in `ash-cli` and published as the `ash` executable.
+
+The repository remains independently buildable and releasable at `A3S-Lab/ash`. The A3S umbrella repository registers the same Git history as the `crates/ash` Git submodule; it does not copy the sources or absorb this workspace into its root package. A3S integration pins a tested ash commit, while standalone users receive the same release artifacts.
 
 ## 15. Verification strategy
 
@@ -453,6 +488,10 @@ The root is a Cargo workspace rather than an executable package. Public types cr
 - budget reservation and exhaustion;
 - partial failure and skip propagation;
 - session disconnect cleanup.
+- deterministic results across 1, 2, 4, 8, and host-default compute workers;
+- nested graph and intra-operation parallelism without oversubscription;
+- I/O progress and cancellation while every compute worker is occupied;
+- bounded queue, descriptor, memory, and retained-byte pressure.
 
 ### 15.3 Platform
 
@@ -473,7 +512,7 @@ The root is a Cargo workspace rather than an executable package. Public types cr
 
 ### 15.5 Agent efficiency
 
-The benchmark contract in [benchmarks.md](./benchmarks.md) measures correctness, total tokens, retries, tool calls, latency, memory, and retained bytes against native-shell baselines.
+The benchmark contract in [benchmarks.md](./benchmarks.md) measures correctness, total tokens, retries, tool calls, latency, memory, retained bytes, CPU utilization, and multi-core scaling against native-shell baselines.
 
 ## 16. Delivery milestones
 
@@ -488,6 +527,7 @@ The benchmark contract in [benchmarks.md](./benchmarks.md) measures correctness,
 
 - persistent session and one-shot paths;
 - `exec`, `read`, `list`, and `search`;
+- dual-plane runtime, hierarchical concurrency governor, and deterministic parallel merge;
 - cancellation, deadlines, output budgets, reducers, and result references;
 - x86-64 and ARM64 builds for all three operating systems;
 - one-click installers tested on clean hosts.
@@ -514,6 +554,9 @@ The benchmark contract in [benchmarks.md](./benchmarks.md) measures correctness,
 | Product position | AI Native Shell |
 | Primary caller | Coding agent or agent harness |
 | Core language | Rust |
+| Runtime concurrency | Tokio I/O plane plus Rayon compute plane |
+| Compute workers | Available host parallelism, explicitly bounded and configurable |
+| Parallel output | Stable merge before canonical ASON encoding |
 | Default integration | Persistent framed stdio |
 | Fallback integration | One-shot `ash` process |
 | Default execution | Direct executable plus argument vector |

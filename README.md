@@ -1,15 +1,15 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="ash — AI Native Shell with a compact ASON result specimen">
+  <img src="./assets/readme/hero.svg" width="100%" alt="ash — AI Native Shell executing typed work across bounded I/O and CPU planes and returning compact ASON evidence">
 </p>
 
-<p align="center"><strong>AI Native Shell</strong></p>
+<p align="center"><strong>AI Native Shell</strong> · typed parallel execution · compact model context</p>
 
 > [!IMPORTANT]
-> `ash` is currently an architecture-stage project. The protocol, runtime boundaries, cross-platform contract, and release plan are specified; no executable release is published yet.
+> `ash` is pre-release. The architecture baseline and initial Rust workspace exist, but no usable shell release is published yet.
 
-`ash` is a greenfield shell designed around coding agents rather than terminal users. It expresses shell work as typed operations, executes it through a deterministic local runtime, and reduces results before they enter an LLM context.
+`ash` is a greenfield shell designed around coding agents rather than terminal users. It turns shell work into typed programs, executes independent work across bounded I/O and CPU planes, and returns only the evidence worth placing in an LLM context.
 
-## The interface starts with the result
+## Proof starts at the result
 
 The default LLM-facing representation is **ASON**, the native structured format designed and implemented by `ash` for LLM exchange. Homogeneous records are emitted in columns, paths are interned once per session, and large values become references instead of repeated text.
 
@@ -28,51 +28,68 @@ z:0
 r:~
 ```
 
-The schema for these short fields is negotiated once. Full output remains available through a bounded session reference; truncation is always explicit.
+The schema for these short fields is negotiated once. Full output remains available through a bounded session reference; truncation is explicit instead of silently destructive.
 
-## Design contract
+## Why ash is different
 
 - **Agent-first semantics.** Programs are typed graphs, not human-oriented command strings.
 - **Token cost is a runtime concern.** Filtering, projection, deduplication, path interning, and output budgets happen before serialization.
+- **Multi-core by design.** Independent graph nodes and repository partitions use a work-stealing compute pool while process and RPC I/O stay responsive.
 - **Portable by construction.** Linux, macOS, and Windows share one semantic contract; platform behavior is isolated behind native backends.
-- **Deterministic execution.** `argv` is passed directly to processes. Shell expansion, quoting, and implicit host-shell behavior are not part of the default path.
+- **Deterministic at the boundary.** Parallel workers may finish in any order; stable merge produces byte-identical canonical ASON.
 - **Loss is visible.** Every omitted byte is recoverable by reference, and every reduced result declares its status.
 
-## Architecture
+## One runtime, two execution planes
 
 <p align="center">
-  <img src="./assets/readme/architecture.svg" width="100%" alt="ash architecture from coding agent through protocol, typed program scheduler, operation engine, platform backends, reducers, and ASON results">
+  <img src="./assets/readme/architecture.svg" width="100%" alt="ash architecture from coding agent through typed program and hierarchical governor into separate Tokio I/O and Rayon CPU planes, native backends, stable merge, and canonical ASON">
 </p>
 
-A persistent stdio session is the primary integration. One-shot CLI calls remain available for harnesses that can only launch commands. Both routes compile into the same typed program IR, capability checks, scheduler, operation engine, and output pipeline.
+A persistent stdio session is the primary integration. One-shot calls use the same engine. Tokio owns RPC, child processes, pipes, deadlines, and cancellation; a fixed Rayon work-stealing pool owns search, hashing, diffing, reduction, and other splittable CPU work. A shared governor prevents a wide graph from multiplying inner parallelism beyond host and request budgets.
 
-The architecture deliberately separates three representations:
+The externally visible path remains deterministic:
 
 1. **Semantic IR** — typed programs, nodes, edges, values, budgets, and capabilities.
-2. **Transport framing** — length-prefixed ASON over stdio.
-3. **LLM presentation** — the same canonical ASON after deterministic reduction.
+2. **Parallel runtime** — dependency-aware nodes plus bounded operation partitions.
+3. **Stable merge** — logical path and position keys erase worker completion order.
+4. **LLM presentation** — deterministic reduction followed by canonical ASON.
 
-Read the complete design:
+Read the complete contracts:
 
 - [System architecture](./docs/architecture.md)
 - [ASH/1 protocol and ASON specification](./docs/protocol.md)
 - [Cross-platform distribution and one-click installation](./docs/distribution.md)
 - [Token-efficiency benchmark contract](./docs/benchmarks.md)
+- [Rust and dual-plane runtime decision](./docs/decisions/0001-rust-and-dual-plane-runtime.md)
 
-## First release contract
+## Verify the current baseline
+
+```sh
+git clone https://github.com/A3S-Lab/ash.git
+cd ash
+cargo test --workspace --all-targets
+```
+
+The pinned Rust workspace currently verifies the crate boundaries, stable ASH/1 operation identifiers, detected worker limits, and deterministic ordered collection from the multi-core compute pool. This is a development checkpoint, not an installation path.
+
+## Release contract
 
 The first usable release must ship as one native `ash` binary and include:
 
 - persistent stdio RPC and one-shot invocation;
 - direct process execution with cancellation, timeouts, and process-tree cleanup;
 - bounded read, list, search, patch, filesystem mutation, snapshot, and result-reference operations;
-- batch and dependency-graph execution;
+- deterministic multi-core batch and dependency-graph execution;
 - Linux and macOS `install.sh`, Windows `install.ps1`, verified release artifacts, self-update, and rollback;
 - native builds for x86-64 and ARM64 on Linux, macOS, and Windows.
 
 Installation commands will be published only when signed binaries and end-to-end installer tests exist. The required entrypoints are already fixed in the [distribution design](./docs/distribution.md).
 
-## Boundaries
+## Repository ownership
+
+`A3S-Lab/ash` is an independently buildable Rust workspace and release unit. The A3S umbrella repository consumes the same history as its `crates/ash` Git submodule, matching the existing A3S component model without turning the a3s root package into a Cargo workspace.
+
+## Deliberate boundaries
 
 `ash` is not a Bash, Zsh, PowerShell, or CMD compatibility layer. Version one does not include a human REPL, prompt themes, completion, aliases, interactive job control, an embedded model, remote execution, or a universal security sandbox.
 
@@ -81,7 +98,7 @@ It is a local execution boundary for coding agents. Workspace capabilities, reso
 ## Delivery order
 
 1. Freeze ASH/1 fixtures and the cross-platform benchmark corpus.
-2. Ship the smallest vertical slice: session, `exec`, `read`, `list`, `search`, reducer, and result store.
+2. Ship the smallest vertical slice: dual-plane session runtime, `exec`, `read`, `list`, `search`, reducer, and result store.
 3. Release and test all six platform artifacts plus both one-click installers.
 4. Add graph execution, patch transactions, workspace deltas, and approval permits.
 5. Gate releases on correctness, token cost, latency, cancellation, installer, and upgrade evidence.
