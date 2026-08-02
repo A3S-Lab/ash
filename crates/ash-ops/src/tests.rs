@@ -12,9 +12,10 @@ use ash_protocol::request::{
     SNAPSHOT_INCLUDE_HIDDEN, SearchArgs, SnapshotArgs, SnapshotMode,
 };
 use ash_protocol::response::{
-    ErrorCode, RESULT_REDUCED, RESULT_RETAINED, RESULT_TRUNCATED, Status,
+    ErrorCode, RESULT_PARTIAL, RESULT_REDUCED, RESULT_RETAINED, RESULT_TRUNCATED, Status,
 };
 use ash_protocol::{ApprovalChallenge, Capability};
+use ash_store::StoreLimits;
 
 use super::{AuthorizationPolicy, PermitAuthority, PortableOperations};
 
@@ -179,7 +180,7 @@ fn compile_helper(directory: &TestDirectory) -> String {
     fs::write(
         &source,
         r#"
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::time::Duration;
 
 fn main() {
@@ -190,6 +191,17 @@ fn main() {
             std::process::exit(7);
         }
         Some("wait") => std::thread::sleep(Duration::from_secs(5)),
+        Some("flood") => {
+            let mut output = io::BufWriter::new(io::stdout().lock());
+            let block = [b'x'; 16 * 1024];
+            for _ in 0..256 {
+                output.write_all(&block).expect("write flood block");
+            }
+            output
+                .write_all(b"ASH_CAPTURE_TAIL")
+                .expect("write flood tail");
+            output.flush().expect("flush flood output");
+        }
         Some("rendezvous") => {
             let own = arguments.next().expect("own marker");
             let peer = arguments.next().expect("peer marker");
@@ -413,6 +425,90 @@ async fn exec_handles_environment_stdin_failure_and_timeout_without_a_shell() {
     assert!(response.starts_with("t:3\ni:52\ns:6\n"));
     assert!(response.contains("d{k,c,ms,o,e,ro,re}:\n2,~,"));
     assert!(response.contains("e{c,q,p,x,a}:\n402,2,4,~,~\n"));
+}
+
+#[tokio::test]
+async fn exec_retained_reference_preserves_bytes_beyond_the_projection_window() {
+    let directory = TestDirectory::new();
+    let executable = compile_helper(&directory);
+    let (session, operations) = runtime(&directory);
+    let request = Request::new(
+        53,
+        Arguments::Exec(
+            ExecArgs::new(
+                executable,
+                vec!["flood".to_owned()],
+                ".",
+                vec![],
+                InputSource::None,
+                0,
+            )
+            .expect("exec"),
+        ),
+        budget(1024, 8),
+    )
+    .expect("request");
+    let program = session.begin(&request).await.expect("program");
+    let response = operations
+        .execute(&request, &program)
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), Status::Success);
+    assert_eq!(
+        response.flags() & (RESULT_RETAINED | RESULT_TRUNCATED),
+        RESULT_RETAINED | RESULT_TRUNCATED
+    );
+    assert_eq!(response.flags() & RESULT_PARTIAL, 0);
+    let retained = program.store().get(1).expect("complete stdout reference");
+    assert_eq!(retained.len(), 4 * 1024 * 1024 + 16);
+    assert!(retained.ends_with(b"ASH_CAPTURE_TAIL"));
+}
+
+#[tokio::test]
+async fn exec_output_beyond_retention_quota_fails_without_a_partial_reference() {
+    let directory = TestDirectory::new();
+    let executable = compile_helper(&directory);
+    let parallelism = Parallelism::for_available_cpus(2);
+    let engine = Engine::new(parallelism).expect("engine");
+    let mut config = SessionConfig::new(2, ".", 64 * 1024, parallelism);
+    config.store_limits = StoreLimits {
+        max_bytes: 4 * 1024 * 1024,
+        max_entries: 8,
+    };
+    let session = engine.open_session(config).expect("limited session");
+    let operations = PortableOperations::new(Workspace::new(&directory.0).expect("workspace"));
+    let request = Request::new(
+        54,
+        Arguments::Exec(
+            ExecArgs::new(
+                executable,
+                vec!["flood".to_owned()],
+                ".",
+                vec![],
+                InputSource::None,
+                0,
+            )
+            .expect("exec"),
+        ),
+        budget(1024, 8),
+    )
+    .expect("request");
+    let program = session.begin(&request).await.expect("program");
+    let response = operations
+        .execute(&request, &program)
+        .await
+        .expect("typed quota response");
+
+    assert_eq!(response.status(), Status::BudgetExceeded);
+    assert_eq!(
+        response.error().expect("storage error").code,
+        ErrorCode::StorageBudget
+    );
+    assert_eq!(response.flags(), 0);
+    let usage = program.store().usage().expect("store usage");
+    assert_eq!(usage.bytes, 0);
+    assert_eq!(usage.entries, 0);
 }
 
 #[tokio::test]

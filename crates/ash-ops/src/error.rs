@@ -167,7 +167,11 @@ impl OperationError {
                 RetryClass::CorrectRequest,
                 ErrorStage::Reduce,
             ),
-            Self::Store(StoreError::ByteQuota { .. } | StoreError::EntryQuota { .. }) => (
+            Self::Store(
+                StoreError::ContentTooLarge
+                | StoreError::ByteQuota { .. }
+                | StoreError::EntryQuota { .. },
+            ) => (
                 Status::BudgetExceeded,
                 ErrorCode::StorageBudget,
                 RetryClass::CorrectRequest,

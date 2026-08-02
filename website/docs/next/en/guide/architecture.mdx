@@ -45,6 +45,11 @@ Owns stdio RPC, child processes, pipes, deadlines, cancellation, update download
 and bounded file I/O. Programs launch through executable + argv by default, never
 through an implicit Bash, PowerShell, or CMD layer.
 
+Stdout and stderr drain concurrently. Crossing the 4 MiB per-stream head charges
+the complete capture against the session store while it is still in flight;
+streams that need references commit together, and quota failure publishes no
+partial alias. Retention hashing moves to Rayon before the final ASON response.
+
 ### Rayon CPU
 
 Owns search preparation, hashing, diffs, reduction, and other splittable work. A

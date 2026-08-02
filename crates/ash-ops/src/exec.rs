@@ -8,15 +8,16 @@ use ash_platform::{EnvironmentChange, ProcessExit, ProcessSpec, Workspace};
 use ash_protocol::request::{EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource, Request};
 use ash_protocol::response::{
     ErrorCode, ErrorRecord, ErrorStage, FinalResponse, ProcessResult, RESULT_NORMALIZED_TEXT,
-    RESULT_PARTIAL, RESULT_REDUCED, RESULT_RETAINED, RESULT_TRUNCATED, ResultData, RetryClass,
-    Status, StreamResult, TerminationKind,
+    RESULT_REDUCED, RESULT_RETAINED, RESULT_TRUNCATED, ResultData, RetryClass, Status,
+    StreamResult, TerminationKind,
 };
+use ash_store::{ResultStore, StoreError, StoreReservation};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::OperationError;
 use crate::projection::{charge, presentation_limit};
 
-const MAX_CAPTURE_BYTES_PER_STREAM: usize = 4 * 1024 * 1024;
+const MAX_UNCHARGED_CAPTURE_BYTES_PER_STREAM: usize = 4 * 1024 * 1024;
 const MAX_STDIN_BYTES: usize = 64 * 1024 * 1024;
 
 pub async fn execute(
@@ -40,8 +41,8 @@ pub async fn execute(
     })?;
     let stdout = process.take_stdout().ok_or(OperationError::WorkLimit)?;
     let stderr = process.take_stderr().ok_or(OperationError::WorkLimit)?;
-    let stdout_task = tokio::spawn(capture(stdout));
-    let stderr_task = tokio::spawn(capture(stderr));
+    let stdout_task = tokio::spawn(capture(stdout, Arc::clone(program.store())));
+    let stderr_task = tokio::spawn(capture(stderr, Arc::clone(program.store())));
     let stdin_task = match (process.take_stdin(), stdin) {
         (Some(mut writer), Some(bytes)) => Some(tokio::spawn(async move {
             let result = writer.write_all(&bytes).await;
@@ -68,10 +69,11 @@ pub async fn execute(
             Err(error) => return Err(error.into()),
         }
     }
-    let stdout = stdout_task.await??;
-    let stderr = stderr_task.await??;
+    let (stdout, stderr) = tokio::join!(stdout_task, stderr_task);
+    let stdout = stdout??;
+    let stderr = stderr??;
     let elapsed_millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    build_response(request.id(), stop, stdout, stderr, elapsed_millis, program)
+    build_response(request.id(), stop, stdout, stderr, elapsed_millis, program).await
 }
 
 enum Stop {
@@ -82,34 +84,69 @@ enum Stop {
 
 struct Capture {
     bytes: Vec<u8>,
-    overflowed: bool,
+    reservation: StoreReservation,
+    quota_error: Option<StoreError>,
 }
 
-async fn capture(mut reader: impl AsyncRead + Unpin) -> Result<Capture, std::io::Error> {
+impl Capture {
+    fn into_retained(self, retained: bool) -> Option<(StoreReservation, Vec<u8>)> {
+        retained.then_some((self.reservation, self.bytes))
+    }
+}
+
+async fn capture(
+    mut reader: impl AsyncRead + Unpin,
+    store: Arc<ResultStore>,
+) -> Result<Capture, std::io::Error> {
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 16 * 1024];
-    let mut overflowed = false;
+    let mut reservation = store.capture_reservation();
+    let mut quota_error = None;
     loop {
         let read = reader.read(&mut buffer).await?;
         if read == 0 {
             break;
         }
-        let remaining = MAX_CAPTURE_BYTES_PER_STREAM.saturating_sub(bytes.len());
-        let retained = remaining.min(read);
-        bytes.extend_from_slice(&buffer[..retained]);
-        overflowed |= retained < read;
+        if quota_error.is_some() {
+            continue;
+        }
+        let charged = if reservation.bytes() == 0
+            && bytes.len().saturating_add(read) > MAX_UNCHARGED_CAPTURE_BYTES_PER_STREAM
+        {
+            bytes.len().saturating_add(read)
+        } else if reservation.bytes() > 0 {
+            read
+        } else {
+            0
+        };
+        if let Err(error) = reservation.reserve(charged) {
+            quota_error = Some(error);
+            continue;
+        }
+        if bytes.try_reserve(read).is_err() {
+            quota_error = Some(StoreError::ContentTooLarge);
+            continue;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
     }
-    Ok(Capture { bytes, overflowed })
+    Ok(Capture {
+        bytes,
+        reservation,
+        quota_error,
+    })
 }
 
-fn build_response(
+async fn build_response(
     request_id: u64,
     stop: Stop,
-    stdout: Capture,
-    stderr: Capture,
+    mut stdout: Capture,
+    mut stderr: Capture,
     elapsed_millis: u64,
     program: &Program,
 ) -> Result<FinalResponse, OperationError> {
+    if let Some(error) = stdout.quota_error.take().or(stderr.quota_error.take()) {
+        return Err(error.into());
+    }
     let failed = !matches!(stop, Stop::Exited(ProcessExit { success: true, .. }));
     let limit = presentation_limit(program);
     let (stdout_budget, stderr_budget) = if failed {
@@ -119,17 +156,13 @@ fn build_response(
     };
     let stdout_projection = project(&stdout.bytes, stdout_budget);
     let stderr_projection = project(&stderr.bytes, stderr_budget);
-    let stdout_retained = stdout.overflowed
-        || stdout_projection.reduced
+    let stdout_retained = stdout_projection.reduced
         || stdout_projection.normalized
         || stdout_projection.text.is_none() && !stdout.bytes.is_empty();
-    let stderr_retained = stderr.overflowed
-        || stderr_projection.reduced
+    let stderr_retained = stderr_projection.reduced
         || stderr_projection.normalized
         || stderr_projection.text.is_none() && !stderr.bytes.is_empty();
     let result_flags = flags(
-        &stdout,
-        &stderr,
         &stdout_projection,
         &stderr_projection,
         stdout_retained || stderr_retained,
@@ -147,16 +180,38 @@ fn build_response(
         return Err(OperationError::OutputBudget);
     }
 
+    let mut captures =
+        Vec::with_capacity(usize::from(stdout_retained) + usize::from(stderr_retained));
+    if let Some(capture) = stdout.into_retained(stdout_retained) {
+        captures.push(capture);
+    }
+    if let Some(capture) = stderr.into_retained(stderr_retained) {
+        captures.push(capture);
+    }
+    let aliases = if captures.is_empty() {
+        Vec::new()
+    } else {
+        let _compute = program.acquire(PermitKind::Compute).await?;
+        let store = Arc::clone(program.store());
+        program
+            .compute_pool()
+            .run(move || store.retain_reserved_many(captures))
+            .await??
+    };
+    let mut aliases = aliases.into_iter();
     let stdout_reference = if stdout_retained {
-        Some(program.store().retain(stdout.bytes)?)
+        Some(aliases.next().ok_or(StoreError::Invariant)?)
     } else {
         None
     };
     let stderr_reference = if stderr_retained {
-        Some(program.store().retain(stderr.bytes)?)
+        Some(aliases.next().ok_or(StoreError::Invariant)?)
     } else {
         None
     };
+    if aliases.next().is_some() {
+        return Err(StoreError::Invariant.into());
+    }
     let response = response(
         request_id,
         &stop,
@@ -190,49 +245,37 @@ fn response(
         stdout,
         stderr,
     });
-    let response = if flags & RESULT_PARTIAL != 0 {
-        FinalResponse::failure(
+    let response = match stop {
+        Stop::Exited(exit) if exit.success => {
+            FinalResponse::success(request_id, vec![], data, flags, None)?
+        }
+        Stop::Exited(_) => FinalResponse::failure(
             request_id,
-            Status::BudgetExceeded,
-            error(ErrorCode::StorageBudget, RetryClass::CorrectRequest),
+            Status::Failed,
+            error(ErrorCode::ProcessFailed, RetryClass::Never),
             vec![],
             Some(data),
             flags,
             None,
-        )?
-    } else {
-        match stop {
-            Stop::Exited(exit) if exit.success => {
-                FinalResponse::success(request_id, vec![], data, flags, None)?
-            }
-            Stop::Exited(_) => FinalResponse::failure(
-                request_id,
-                Status::Failed,
-                error(ErrorCode::ProcessFailed, RetryClass::Never),
-                vec![],
-                Some(data),
-                flags,
-                None,
-            )?,
-            Stop::TimedOut => FinalResponse::failure(
-                request_id,
-                Status::TimedOut,
-                error(ErrorCode::ProcessTimedOut, RetryClass::RetrySame),
-                vec![],
-                Some(data),
-                flags,
-                None,
-            )?,
-            Stop::Cancelled => FinalResponse::failure(
-                request_id,
-                Status::Cancelled,
-                error(ErrorCode::ProcessCancelled, RetryClass::Never),
-                vec![],
-                Some(data),
-                flags,
-                None,
-            )?,
-        }
+        )?,
+        Stop::TimedOut => FinalResponse::failure(
+            request_id,
+            Status::TimedOut,
+            error(ErrorCode::ProcessTimedOut, RetryClass::RetrySame),
+            vec![],
+            Some(data),
+            flags,
+            None,
+        )?,
+        Stop::Cancelled => FinalResponse::failure(
+            request_id,
+            Status::Cancelled,
+            error(ErrorCode::ProcessCancelled, RetryClass::Never),
+            vec![],
+            Some(data),
+            flags,
+            None,
+        )?,
     };
     Ok(response)
 }
@@ -325,31 +368,16 @@ fn stream_result(projection: &Projection, reference: Option<u64>) -> StreamResul
     }
 }
 
-fn flags(
-    stdout: &Capture,
-    stderr: &Capture,
-    stdout_projection: &Projection,
-    stderr_projection: &Projection,
-    retained: bool,
-) -> u32 {
+fn flags(stdout_projection: &Projection, stderr_projection: &Projection, retained: bool) -> u32 {
     let reduced = stdout_projection.reduced || stderr_projection.reduced;
     (if reduced { RESULT_REDUCED } else { 0 })
-        | (if reduced && !stdout.overflowed && !stderr.overflowed {
-            RESULT_TRUNCATED
-        } else {
-            0
-        })
+        | (if reduced { RESULT_TRUNCATED } else { 0 })
         | (if stdout_projection.normalized || stderr_projection.normalized {
             RESULT_NORMALIZED_TEXT
         } else {
             0
         })
         | (if retained { RESULT_RETAINED } else { 0 })
-        | (if stdout.overflowed || stderr.overflowed {
-            RESULT_PARTIAL
-        } else {
-            0
-        })
 }
 
 fn stdin_bytes(

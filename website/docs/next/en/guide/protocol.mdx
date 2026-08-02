@@ -44,6 +44,13 @@ a:[@7,d,0,64,p,l,t]
 
 This is the compact wire form of `π_{p,l,t}(d[0:64])` over `@7`. Operators `/ # ? - | >` mean byte slice, line slice, search, release, table projection, and workspace materialization. Formula arity is exact. `>` also requires workspace-write capability and follows the journaled no-overwrite transaction path. The six formulas measure 80 tokens in both pinned tokenizers, matching the direct ASCII-letter floor and beating direct Greek at 86/86 plus the former wrapper at 97/98.
 
+## Lossless process evidence
+
+`exec` drains stdout and stderr concurrently. A reduced projection retains every
+original byte, including output beyond 4 MiB, and publishes stdout/stderr aliases
+atomically. If the session cannot retain the complete capture, error `601` is
+returned with no partial reference.
+
 ## Concurrency and order
 
 A persistent RPC session can run independent requests concurrently. Final frames

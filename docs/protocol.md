@@ -340,6 +340,8 @@ A process result contains:
 - truncation and redaction flags;
 - observed workspace delta when requested.
 
+The current `exec` path drains stdout and stderr concurrently. Once either stream exceeds its 4 MiB uncharged capture head, the complete stream is charged incrementally against the session retained-byte ceiling. Streams needing references are BLAKE3-identified on the compute plane and committed atomically in stdout/stderr order. A successful truncated projection therefore points to every original byte, including bytes beyond the head; insufficient quota returns storage-budget error `601` with no partial reference.
+
 Core result data uses these schemas; reference projection intentionally substitutes its validated requested column vector for `C...`:
 
 | Operation | Result header | Row or record semantics |

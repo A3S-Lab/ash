@@ -43,6 +43,10 @@ RPC / timeout      diff / reduce     snapshots
 负责标准输入/输出 RPC、子进程、管道、超时、取消、更新下载和有界文件 I/O。外部程序
 默认通过 executable + argv 直接启动，不隐式进入 Bash、PowerShell 或 CMD。
 
+stdout 与 stderr 始终并发排空。单路超过 4 MiB 后，完整捕获会在执行中计入会话存储
+额度；需要引用的两路输出一起提交，额度失败时不会发布半截 Alias。最终 ASON 返回前，
+保留内容的哈希计算转移到 Rayon 平面。
+
 ### Rayon CPU
 
 负责搜索准备、哈希、Diff、归约和其他可拆分计算。固定工作窃取池使用主机可用核心，

@@ -6,4 +6,6 @@ mod path_dictionary;
 mod result_store;
 
 pub use path_dictionary::{InternedPaths, PathDictionary, PathDictionaryError, PathEntry};
-pub use result_store::{ContentId, ResultStore, StoreError, StoreLimits, StoreUsage};
+pub use result_store::{
+    ContentId, ResultStore, StoreError, StoreLimits, StoreReservation, StoreUsage,
+};
