@@ -193,11 +193,16 @@ if (
 }
 
 for (const marker of [
-  'schema: 12',
+  'schema: 13',
   '"list-recursive"',
   '"search-literal"',
   '"search-regex"',
   '"snapshot-blake3"',
+  '"exec-capture-fragmented"',
+  '"exec-capture-bursty"',
+  'const FRAGMENTED_CHUNKS: &[usize] = &[1, 7, 31, 257, 4_093, 16_384, 65_521]',
+  'const BURST_PAUSE_MICROS: u64 = 2_000',
+  'capture_profile_descriptor()',
   'require_equivalent_output(&scenarios, "search-literal", "search-regex")',
   'reducer::measure_structured_projection_scenario(',
   'reducer::measure_repeated_line_scenario(&config)',
@@ -279,12 +284,12 @@ for (const marker of [
 for (const [document, markers, label] of [
   [
     benchmarkZh,
-    ['schema 12', '十八个场景', '⋯N'],
+    ['schema 13', '二十个场景', 'fragmented', 'bursty', '⋯N'],
     'Chinese benchmark documentation',
   ],
   [
     benchmarkEn,
-    ['Schema 12', 'eighteen scenarios', '⋯N'],
+    ['Schema 13', 'twenty scenarios', 'fragmented', 'bursty', '⋯N'],
     'English benchmark documentation',
   ],
 ]) {

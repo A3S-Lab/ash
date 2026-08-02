@@ -46,10 +46,10 @@ cargo build -p a3s-ash --release --locked
 cargo run -p a3s-ash-bench --release --locked -- --runtime
 ```
 
-Schema 12 contains eighteen scenarios. Eleven end-to-end paths cover recursive
+Schema 13 contains twenty scenarios. Thirteen end-to-end paths cover recursive
 directory traversal, literal search, regular-expression search, BLAKE3
 snapshot, disk spill/fetch, fresh `ash run` startup, empty child spawn,
-dual-pipe pressure, process-tree cancellation, warm framed RPC dispatch, and
+three dual-pipe capture profiles, process-tree cancellation, warm framed RPC dispatch, and
 `|` column projection over retained ASON. Structured projection reads and
 decodes a 16,384-row source table, then selects six columns in stable order on
 the configured Rayon pool; every worker count must emit identical rows and
@@ -70,6 +70,15 @@ excludes only its handshake. Changed canonical evidence fails the report; the
 intentionally equivalent literal and regex queries must also emit the same
 result. Timing remains host-local.
 
+All three capture profiles write 8 MiB to each of stdout and stderr and verify
+the final 64 KiB of each disk-backed retained value. `steady` writes consecutive
+16 KiB chunks. `fragmented` cycles through
+`[1, 7, 31, 257, 4093, 16384, 65521]` and flushes each write. `bursty` cycles
+through `[512, 4096, 16384, 65536]`, then flushes and pauses for 2,000
+microseconds at every 256 KiB boundary. The report carries these parameters and
+a profile-descriptor digest; the compiled fixture must describe the same
+configuration before timing begins.
+
 ## Native-shell task seed
 
 ```bash
@@ -89,7 +98,7 @@ native shell; it does not run a model or claim an ash task result.
 - Rust unit and integration suites across every workspace crate.
 - `cargo check` and tests on Linux, macOS, and Windows.
 - Real release builds exercised by all three platform installers.
-- Eleven end-to-end runtime paths, three multicore output reducers, hot path-dictionary lookup, and three-size DAG scheduling evidence.
+- Thirteen end-to-end runtime paths, three multicore output reducers, hot path-dictionary lookup, and three-size DAG scheduling evidence.
 - Three locked tasks with Linux, macOS, and Windows native-shell baselines.
 - Fuzz targets for ASON, bounded ASH/1 frames, typed requests, and update metadata.
 - File-transaction crash cutpoints, update activation/recovery, and cancellation race tests.
