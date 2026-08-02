@@ -44,6 +44,7 @@ const [
   config,
   home,
   switcher,
+  alignedStyles,
 ] = await Promise.all([
   text('Cargo.toml'),
   text('install.sh'),
@@ -52,6 +53,7 @@ const [
   text('website/rspress.config.ts'),
   text('website/theme/components/HomeLayout.tsx'),
   text('website/theme/components/InstallSwitcher.tsx'),
+  text('website/theme/a3s-aligned.css'),
 ]);
 const snapshots = JSON.parse(await text('website/version-snapshots.json'));
 const report = JSON.parse(await text('benches/reports/v0.1.0/format.json'));
@@ -128,6 +130,25 @@ requireIncludes(
   'Homepage evidence',
 );
 requireIncludes(home, "metricTargetsValue: '6'", 'Homepage evidence');
+
+for (const marker of [
+  '--ash-type-caption: 10px',
+  '--ash-type-label: 11px',
+  '--ash-type-body: 13px',
+  '--ash-type-code: 13px',
+]) {
+  requireIncludes(alignedStyles, marker, 'Homepage typography');
+}
+const undersizedTypography = [
+  ...alignedStyles.matchAll(/font-size:\s*(\d+(?:\.\d+)?)px/g),
+]
+  .map((match) => Number(match[1]))
+  .filter((size) => size < 10);
+if (undersizedTypography.length > 0) {
+  throw new Error(
+    `Homepage typography must remain at least 10px; found: ${undersizedTypography.join(', ')}`,
+  );
+}
 
 const archiveRoot = path.join(websiteRoot, 'docs', archive.version);
 for (const file of await collectTextFiles(archiveRoot)) {
