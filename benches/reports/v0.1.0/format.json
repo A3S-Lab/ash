@@ -1,5 +1,5 @@
 {
-  "schema": 2,
+  "schema": 3,
   "corpus": "benches/corpus/v1.json",
   "corpus_sha256": "a8f043656e10a1b72af64648bf111fce27024670e27b591657c853707c23bd70",
   "workspace_lock_sha256": "8d682a0aba9041fefe93fea38cf8dd63d8bbf03233a019325d243babcad481f4",
@@ -225,6 +225,29 @@
       "canonical_vs_legacy_o200k_percent": 82,
       "required_max_percent": 85,
       "matches_direct_ascii_token_floor": true,
+      "passed": true
+    }
+  },
+  "repeated_line_reduction": {
+    "source_lines": 8192,
+    "projected_lines": 128,
+    "collapsed_runs": 64,
+    "omitted_lines": 8128,
+    "source": {
+      "bytes": 573440,
+      "cl100k_tokens": 155648,
+      "o200k_tokens": 155648
+    },
+    "projection": {
+      "bytes": 4864,
+      "cl100k_tokens": 1408,
+      "o200k_tokens": 1408
+    },
+    "gates": {
+      "projection_vs_source_bytes_percent": 1,
+      "projection_vs_source_cl100k_percent": 1,
+      "projection_vs_source_o200k_percent": 1,
+      "required_max_percent": 5,
       "passed": true
     }
   },
