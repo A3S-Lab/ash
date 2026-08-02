@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use ash_engine::{ComputePool, Engine, Parallelism, SessionConfig};
 use ash_ops::{
-    PortableOperations, RepeatedBlockReduction, RepeatedLineReduction, collapse_repeated_blocks,
-    collapse_repeated_lines,
+    ErrorFocusedReduction, PortableOperations, RepeatedBlockReduction, RepeatedLineReduction,
+    collapse_repeated_blocks, collapse_repeated_lines, focus_error_output,
 };
 use ash_protocol::ason::{Atom, Cell, Document, Field, Key, Table, Value};
 use ash_protocol::request::{
@@ -32,6 +32,12 @@ const MAX_REPEATED_LINES: usize = 262_144;
 const REPEATED_BLOCK_LINES: usize = 8;
 const REPEATED_BLOCK_REPETITIONS: usize = 64;
 const MAX_REPEATED_BLOCK_GROUPS: usize = 512;
+const ERROR_FOCUS_LINES_PER_GROUP: usize = 512;
+const ERROR_FOCUS_ANCHOR_LINE: usize = 256;
+const ERROR_FOCUS_CONTEXT_BEFORE: usize = 2;
+const ERROR_FOCUS_CONTEXT_AFTER: usize = 6;
+const ERROR_FOCUS_EDGE_LINES: usize = 2;
+const MAX_ERROR_FOCUS_GROUPS: usize = 512;
 
 struct ProjectionWorkload {
     source: Vec<u8>,
@@ -56,6 +62,16 @@ struct RepeatedBlockWorkload {
     lines: usize,
     collapsed_blocks: usize,
     omitted_repetitions: usize,
+    omitted_lines: usize,
+    input_sha256: String,
+}
+
+struct ErrorFocusWorkload {
+    input: String,
+    expected: String,
+    lines: usize,
+    diagnostic_lines: usize,
+    omitted_spans: usize,
     omitted_lines: usize,
     input_sha256: String,
 }
@@ -220,6 +236,53 @@ pub(super) fn measure_repeated_block_scenario(
     })
 }
 
+pub(super) fn measure_error_focus_scenario(
+    config: &RuntimeConfig,
+) -> Result<ScenarioReport, Box<dyn Error>> {
+    let workload = ErrorFocusWorkload::new(config.files)?;
+    let mut runs = Vec::with_capacity(config.worker_counts.len());
+    let mut expected_output = None;
+    let mut baseline = None;
+
+    for &workers in &config.worker_counts {
+        let parallelism = Parallelism::for_available_cpus(workers);
+        let pool = ComputePool::new(parallelism)?;
+        let (warm_output, _) = execute_error_focus_once(&pool, &workload)?;
+        require_stable_output(&mut expected_output, &warm_output)?;
+
+        let mut observations = Vec::with_capacity(config.samples);
+        for _ in 0..config.samples {
+            let (output, elapsed) = execute_error_focus_once(&pool, &workload)?;
+            require_stable_output(&mut expected_output, &output)?;
+            observations.push(elapsed);
+        }
+
+        let output = expected_output
+            .as_ref()
+            .ok_or_else(|| io::Error::other("error-focus reduction emitted no output"))?;
+        runs.push(runtime_run(
+            parallelism,
+            observations,
+            &mut baseline,
+            u128::try_from(workload.lines)?,
+            u128::try_from(workload.input.len())?,
+            output,
+        ));
+    }
+
+    let output =
+        expected_output.ok_or_else(|| io::Error::other("missing error-focus reduction output"))?;
+    Ok(ScenarioReport {
+        id: "reduce-error-focused",
+        work_items: workload.lines,
+        work_bytes: u64::try_from(workload.input.len())?,
+        input_sha256: workload.input_sha256,
+        output_bytes: output.len(),
+        output_sha256: sha256_hex(&output),
+        runs,
+    })
+}
+
 impl ProjectionWorkload {
     fn new(fixture_files: usize) -> Result<Self, Box<dyn Error>> {
         let rows = fixture_files
@@ -330,6 +393,66 @@ impl RepeatedBlockWorkload {
             input_sha256: sha256_hex(&evidence),
         })
     }
+}
+
+impl ErrorFocusWorkload {
+    fn new(fixture_files: usize) -> Result<Self, Box<dyn Error>> {
+        let groups = fixture_files.clamp(1, MAX_ERROR_FOCUS_GROUPS);
+        let lines = groups
+            .checked_mul(ERROR_FOCUS_LINES_PER_GROUP)
+            .ok_or_else(|| io::Error::other("error-focus fixture count overflow"))?;
+        let mut input = String::new();
+        for line in 0..lines {
+            input.push_str(&error_focus_line(
+                line / ERROR_FOCUS_LINES_PER_GROUP,
+                line % ERROR_FOCUS_LINES_PER_GROUP,
+            ));
+        }
+
+        let mut expected = String::new();
+        let mut omitted_spans = 0_usize;
+        let mut omitted_lines = 0_usize;
+        let mut line = 0_usize;
+        while line < lines {
+            if error_focus_line_is_retained(line, lines) {
+                expected.push_str(&error_focus_line(
+                    line / ERROR_FOCUS_LINES_PER_GROUP,
+                    line % ERROR_FOCUS_LINES_PER_GROUP,
+                ));
+                line += 1;
+                continue;
+            }
+            let start = line;
+            while line < lines && !error_focus_line_is_retained(line, lines) {
+                line += 1;
+            }
+            let omitted = line - start;
+            expected.push_str(&format!("⋯{omitted}\n"));
+            omitted_spans += 1;
+            omitted_lines += omitted;
+        }
+        let mut evidence = b"reduce-error-focused-v1".to_vec();
+        append_evidence(&mut evidence, input.as_bytes())?;
+        Ok(Self {
+            input,
+            expected,
+            lines,
+            diagnostic_lines: groups,
+            omitted_spans,
+            omitted_lines,
+            input_sha256: sha256_hex(&evidence),
+        })
+    }
+}
+
+fn error_focus_line_is_retained(line: usize, total_lines: usize) -> bool {
+    if line < ERROR_FOCUS_EDGE_LINES || line >= total_lines.saturating_sub(ERROR_FOCUS_EDGE_LINES) {
+        return true;
+    }
+    let local = line % ERROR_FOCUS_LINES_PER_GROUP;
+    (ERROR_FOCUS_ANCHOR_LINE - ERROR_FOCUS_CONTEXT_BEFORE
+        ..=ERROR_FOCUS_ANCHOR_LINE + ERROR_FOCUS_CONTEXT_AFTER)
+        .contains(&local)
 }
 
 fn execute_repeated_line_once(
@@ -443,6 +566,69 @@ fn repeated_block(group: usize) -> String {
         ));
     }
     block
+}
+
+fn execute_error_focus_once(
+    pool: &ComputePool,
+    workload: &ErrorFocusWorkload,
+) -> Result<(Vec<u8>, u128), Box<dyn Error>> {
+    let started = Instant::now();
+    let reduction = pool.install(|| focus_error_output(&workload.input));
+    let elapsed = started.elapsed().as_nanos().max(1);
+    validate_error_focus_reduction(&reduction, workload)?;
+    Ok((error_focus_evidence(&reduction)?, elapsed))
+}
+
+fn validate_error_focus_reduction(
+    reduction: &ErrorFocusedReduction,
+    workload: &ErrorFocusWorkload,
+) -> Result<(), io::Error> {
+    if reduction.text() != workload.expected
+        || reduction.diagnostic_lines() != workload.diagnostic_lines
+        || reduction.omitted_spans() != workload.omitted_spans
+        || reduction.omitted_lines() != workload.omitted_lines
+    {
+        return Err(io::Error::other(
+            "error-focus reduction changed windows, counts, or stable output",
+        ));
+    }
+    Ok(())
+}
+
+fn error_focus_evidence(reduction: &ErrorFocusedReduction) -> Result<Vec<u8>, io::Error> {
+    let mut output = b"reduce-error-focused-output-v1".to_vec();
+    for value in [
+        reduction.diagnostic_lines(),
+        reduction.omitted_spans(),
+        reduction.omitted_lines(),
+    ] {
+        output.extend_from_slice(
+            &u64::try_from(value)
+                .map_err(io::Error::other)?
+                .to_le_bytes(),
+        );
+    }
+    append_evidence(&mut output, reduction.text().as_bytes())?;
+    Ok(output)
+}
+
+fn error_focus_line(group: usize, line: usize) -> String {
+    let seed = u64::try_from(group)
+        .unwrap_or(u64::MAX)
+        .wrapping_mul(0x517c_c1b7_2722_0a95)
+        .wrapping_add(u64::try_from(line).unwrap_or(u64::MAX));
+    if line == ERROR_FOCUS_ANCHOR_LINE {
+        format!(
+            "error[E{:03}] group={group:06} path=src/d{:02}/f{group:06}.rs payload={seed:016x}\n",
+            group % 256,
+            group % 64,
+        )
+    } else {
+        format!(
+            "trace group={group:06} step={line:03} path=src/d{:02}/f{group:06}.rs payload={seed:016x}\n",
+            group % 64,
+        )
+    }
 }
 
 async fn execute_once(
