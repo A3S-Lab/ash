@@ -17,7 +17,7 @@ use ash_store::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::projection::{charge, presentation_limit};
-use crate::{OperationError, collapse_repeated_lines};
+use crate::{OperationError, collapse_repeated_blocks, collapse_repeated_lines};
 
 const MAX_STDIN_BYTES: usize = 64 * 1024 * 1024;
 
@@ -344,9 +344,11 @@ fn project(bytes: &[u8], limit: usize) -> Projection {
     } else {
         text.to_owned()
     };
-    let reduction = collapse_repeated_lines(&normalized_text);
-    let reduced = reduction.reduced();
-    let normalized_text = reduction.into_text();
+    let line_reduction = collapse_repeated_lines(&normalized_text);
+    let line_reduced = line_reduction.reduced();
+    let block_reduction = collapse_repeated_blocks(line_reduction.text());
+    let reduced = line_reduced || block_reduction.reduced();
+    let normalized_text = block_reduction.into_text();
     if normalized_text.len() <= limit {
         return Projection {
             text: (!normalized_text.is_empty()).then_some(normalized_text),
@@ -637,6 +639,21 @@ mod tests {
         assert_eq!(normalized.text.as_deref(), Some("same\n×4\n"));
         assert!(normalized.reduced);
         assert!(normalized.normalized);
+    }
+
+    #[test]
+    fn projection_collapses_repeated_blocks_after_line_reduction() {
+        let block = "compile crate-a\nlink crate-a\n".repeat(6);
+        let projection = project(block.as_bytes(), 1_024);
+        assert_eq!(
+            projection.text.as_deref(),
+            Some("compile crate-a\nlink crate-a\n×6#2\n")
+        );
+        assert!(projection.reduced);
+
+        let no_saving = project(b"a\nb\na\nb\n", 1_024);
+        assert_eq!(no_saving.text.as_deref(), Some("a\nb\na\nb\n"));
+        assert!(!no_saving.reduced);
     }
 
     #[test]

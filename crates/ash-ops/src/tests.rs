@@ -215,6 +215,15 @@ fn main() {
             }
             output.flush().expect("flush repeated output");
         }
+        Some("block-repeat") => {
+            let mut output = io::BufWriter::new(io::stdout().lock());
+            for _ in 0..1_024 {
+                output
+                    .write_all(b"compile crate-a\nlink crate-a\nfinish crate-a\n")
+                    .expect("write repeated block");
+            }
+            output.flush().expect("flush repeated block output");
+        }
         Some("rendezvous") => {
             let own = arguments.next().expect("own marker");
             let peer = arguments.next().expect("peer marker");
@@ -546,6 +555,61 @@ async fn exec_collapses_repeated_lines_and_retains_exact_source() {
     assert_eq!(
         retained.as_ref(),
         "same diagnostic\n".repeat(4_096).as_bytes()
+    );
+}
+
+#[tokio::test]
+async fn exec_collapses_repeated_blocks_and_retains_exact_source() {
+    let directory = TestDirectory::new();
+    let executable = compile_helper(&directory);
+    let (session, operations) = runtime(&directory);
+    let request = Request::new(
+        56,
+        Arguments::Exec(
+            ExecArgs::new(
+                executable,
+                vec!["block-repeat".to_owned()],
+                ".",
+                vec![],
+                InputSource::None,
+                0,
+            )
+            .expect("exec"),
+        ),
+        budget(1_024, 8),
+    )
+    .expect("request");
+    let program = session.begin(&request).await.expect("program");
+    let response = operations
+        .execute(&request, &program)
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), Status::Success);
+    assert_eq!(
+        response.flags(),
+        RESULT_TRUNCATED | RESULT_REDUCED | RESULT_RETAINED
+    );
+    let Some(ResultData::Exec(result)) = response.data() else {
+        panic!("expected exec result");
+    };
+    assert_eq!(
+        result.stdout.projection.as_deref(),
+        Some("compile crate-a\nlink crate-a\nfinish crate-a\n×1024#3\n")
+    );
+    assert_eq!(result.stdout.reference, Some(1));
+    let retained = program
+        .store()
+        .get(1)
+        .expect("retained stdout")
+        .read_all(128 * 1_024)
+        .await
+        .expect("read retained stdout");
+    assert_eq!(
+        retained.as_ref(),
+        "compile crate-a\nlink crate-a\nfinish crate-a\n"
+            .repeat(1_024)
+            .as_bytes()
     );
 }
 

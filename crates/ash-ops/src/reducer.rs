@@ -2,6 +2,8 @@ use rayon::prelude::*;
 
 const PARALLEL_LINE_THRESHOLD: usize = 2_048;
 const PARTITION_LINES: usize = 1_024;
+const BLOCK_CANDIDATE_BATCH_LINES: usize = 4_096;
+const MAX_BLOCK_LINES: usize = 32;
 const REPEAT_SYMBOL: char = '×';
 
 /// Deterministic projection produced by consecutive-line reduction.
@@ -10,6 +12,47 @@ pub struct RepeatedLineReduction {
     text: String,
     collapsed_runs: usize,
     omitted_lines: usize,
+}
+
+/// Deterministic projection produced by consecutive-block reduction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepeatedBlockReduction {
+    text: String,
+    collapsed_blocks: usize,
+    omitted_repetitions: usize,
+    omitted_lines: usize,
+}
+
+impl RepeatedBlockReduction {
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    #[must_use]
+    pub fn into_text(self) -> String {
+        self.text
+    }
+
+    #[must_use]
+    pub const fn reduced(&self) -> bool {
+        self.collapsed_blocks != 0
+    }
+
+    #[must_use]
+    pub const fn collapsed_blocks(&self) -> usize {
+        self.collapsed_blocks
+    }
+
+    #[must_use]
+    pub const fn omitted_repetitions(&self) -> usize {
+        self.omitted_repetitions
+    }
+
+    #[must_use]
+    pub const fn omitted_lines(&self) -> usize {
+        self.omitted_lines
+    }
 }
 
 impl RepeatedLineReduction {
@@ -62,6 +105,322 @@ pub fn collapse_repeated_lines(text: &str) -> RepeatedLineReduction {
     };
     let runs = merge_runs(&lines, partitions);
     encode_runs(text, &lines, &runs)
+}
+
+/// Collapses consecutive repeated blocks as `B ×N#K` when that saves bytes.
+///
+/// `K` is the number of LF-terminated lines in the retained block and `N` is
+/// the total repetition count. At each source position the maximum byte-saving
+/// candidate wins; ties prefer smaller `K`, then larger `N`. Candidate search
+/// uses ordered Rayon batches and exact bytes are verified before projection.
+#[must_use]
+pub fn collapse_repeated_blocks(text: &str) -> RepeatedBlockReduction {
+    let layout = LineLayout::new(text);
+    if layout.complete_lines < 4 {
+        return unchanged_blocks(text);
+    }
+    let hashes = BlockHashes::new(&layout);
+    let mut output = String::with_capacity(text.len());
+    let mut collapsed_blocks = 0_usize;
+    let mut omitted_repetitions = 0_usize;
+    let mut omitted_lines = 0_usize;
+    let mut index = 0_usize;
+
+    while index < layout.total_lines() {
+        if index >= layout.complete_lines {
+            output.push_str(layout.line(index));
+            index += 1;
+            continue;
+        }
+        let batch_start = index;
+        let batch_end = (batch_start + BLOCK_CANDIDATE_BATCH_LINES).min(layout.complete_lines);
+        let candidates = if batch_end - batch_start >= PARALLEL_LINE_THRESHOLD {
+            (batch_start..batch_end)
+                .into_par_iter()
+                .map(|start| best_hashed_candidate(&layout, &hashes, start))
+                .collect::<Vec<_>>()
+        } else {
+            (batch_start..batch_end)
+                .map(|start| best_hashed_candidate(&layout, &hashes, start))
+                .collect::<Vec<_>>()
+        };
+
+        while index < batch_end {
+            let hashed = candidates[index - batch_start];
+            let candidate = verified_candidate(&layout, index, hashed);
+            if candidate.present() {
+                let block_lines = usize::from(candidate.block_lines);
+                let repetitions = candidate.repetitions as usize;
+                output.push_str(layout.span(index, block_lines));
+                output.push_str(&block_marker(repetitions, block_lines));
+                collapsed_blocks += 1;
+                omitted_repetitions += repetitions - 1;
+                omitted_lines += block_lines * (repetitions - 1);
+                index += block_lines * repetitions;
+                continue;
+            }
+            output.push_str(layout.line(index));
+            index += 1;
+        }
+    }
+
+    RepeatedBlockReduction {
+        text: output,
+        collapsed_blocks,
+        omitted_repetitions,
+        omitted_lines,
+    }
+}
+
+struct LineLayout<'a> {
+    text: &'a str,
+    ends: Vec<usize>,
+    complete_lines: usize,
+}
+
+impl<'a> LineLayout<'a> {
+    fn new(text: &'a str) -> Self {
+        let mut ends = text
+            .match_indices('\n')
+            .map(|(offset, _)| offset + 1)
+            .collect::<Vec<_>>();
+        let complete_lines = ends.len();
+        if !text.is_empty() && ends.last().copied() != Some(text.len()) {
+            ends.push(text.len());
+        }
+        Self {
+            text,
+            ends,
+            complete_lines,
+        }
+    }
+
+    fn total_lines(&self) -> usize {
+        self.ends.len()
+    }
+
+    fn line_start(&self, line: usize) -> usize {
+        if line == 0 { 0 } else { self.ends[line - 1] }
+    }
+
+    fn line(&self, line: usize) -> &'a str {
+        self.span(line, 1)
+    }
+
+    fn span(&self, start: usize, lines: usize) -> &'a str {
+        let byte_start = self.line_start(start);
+        let byte_end = self.ends[start + lines - 1];
+        &self.text[byte_start..byte_end]
+    }
+
+    fn span_len(&self, start: usize, lines: usize) -> usize {
+        self.ends[start + lines - 1] - self.line_start(start)
+    }
+}
+
+struct BlockHashes {
+    first: Vec<u64>,
+    second: Vec<u64>,
+}
+
+impl BlockHashes {
+    fn new(layout: &LineLayout<'_>) -> Self {
+        let mut first: Vec<u64> = Vec::with_capacity(layout.complete_lines + 1);
+        let mut second: Vec<u64> = Vec::with_capacity(layout.complete_lines + 1);
+        first.push(0);
+        second.push(0);
+        for line in 0..layout.complete_lines {
+            let bytes = layout.line(line).as_bytes();
+            let left = line_fingerprint(bytes, 0x9e37_79b1_85eb_ca87);
+            let right = line_fingerprint(bytes, 0xc2b2_ae3d_27d4_eb4f);
+            first.push(first.last().copied().unwrap_or_default().rotate_left(1) ^ left);
+            second.push(second.last().copied().unwrap_or_default().rotate_left(23) ^ right);
+        }
+        Self { first, second }
+    }
+
+    fn ranges_equal(&self, left: usize, right: usize, lines: usize) -> bool {
+        range_hash(&self.first, left, lines, 1) == range_hash(&self.first, right, lines, 1)
+            && range_hash(&self.second, left, lines, 23)
+                == range_hash(&self.second, right, lines, 23)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BlockCandidate {
+    block_lines: u16,
+    repetitions: u32,
+    savings: usize,
+}
+
+impl BlockCandidate {
+    const NONE: Self = Self {
+        block_lines: 0,
+        repetitions: 0,
+        savings: 0,
+    };
+
+    const fn present(self) -> bool {
+        self.block_lines != 0
+    }
+}
+
+fn best_hashed_candidate(
+    layout: &LineLayout<'_>,
+    hashes: &BlockHashes,
+    start: usize,
+) -> BlockCandidate {
+    let remaining = layout.complete_lines - start;
+    let max_block_lines = MAX_BLOCK_LINES.min(remaining / 2);
+    let mut best = BlockCandidate::NONE;
+    for block_lines in 2..=max_block_lines {
+        if !hashes.ranges_equal(start, start + block_lines, block_lines) {
+            continue;
+        }
+        let lcp = hashed_longest_common_prefix(layout, hashes, start, block_lines);
+        let repetitions = 1 + lcp / block_lines;
+        if let Some(candidate) = block_candidate(layout, start, block_lines, repetitions) {
+            best = preferred_candidate(best, candidate);
+        }
+    }
+    best
+}
+
+fn hashed_longest_common_prefix(
+    layout: &LineLayout<'_>,
+    hashes: &BlockHashes,
+    start: usize,
+    block_lines: usize,
+) -> usize {
+    let mut low = block_lines;
+    let mut high = layout.complete_lines - start - block_lines;
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if hashes.ranges_equal(start, start + block_lines, middle) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    low
+}
+
+fn best_exact_candidate(layout: &LineLayout<'_>, start: usize) -> BlockCandidate {
+    let remaining = layout.complete_lines - start;
+    let max_block_lines = MAX_BLOCK_LINES.min(remaining / 2);
+    let mut best = BlockCandidate::NONE;
+    for block_lines in 2..=max_block_lines {
+        let mut repetitions = 1_usize;
+        while start + (repetitions + 1) * block_lines <= layout.complete_lines
+            && layout.span(start, block_lines)
+                == layout.span(start + repetitions * block_lines, block_lines)
+        {
+            repetitions += 1;
+        }
+        if let Some(candidate) = block_candidate(layout, start, block_lines, repetitions) {
+            best = preferred_candidate(best, candidate);
+        }
+    }
+    best
+}
+
+fn block_candidate(
+    layout: &LineLayout<'_>,
+    start: usize,
+    block_lines: usize,
+    repetitions: usize,
+) -> Option<BlockCandidate> {
+    if repetitions < 2 {
+        return None;
+    }
+    let consumed_lines = block_lines.checked_mul(repetitions)?;
+    if start.checked_add(consumed_lines)? > layout.complete_lines {
+        return None;
+    }
+    let omitted_bytes = layout.span_len(start + block_lines, consumed_lines - block_lines);
+    let marker_bytes = block_marker_len(repetitions, block_lines);
+    if marker_bytes >= omitted_bytes {
+        return None;
+    }
+    Some(BlockCandidate {
+        block_lines: u16::try_from(block_lines).ok()?,
+        repetitions: u32::try_from(repetitions).ok()?,
+        savings: omitted_bytes - marker_bytes,
+    })
+}
+
+fn preferred_candidate(current: BlockCandidate, candidate: BlockCandidate) -> BlockCandidate {
+    if !current.present()
+        || candidate.savings > current.savings
+        || candidate.savings == current.savings
+            && (candidate.block_lines < current.block_lines
+                || candidate.block_lines == current.block_lines
+                    && candidate.repetitions > current.repetitions)
+    {
+        candidate
+    } else {
+        current
+    }
+}
+
+fn candidate_is_exact(layout: &LineLayout<'_>, start: usize, candidate: BlockCandidate) -> bool {
+    let block_lines = usize::from(candidate.block_lines);
+    let repetitions = candidate.repetitions as usize;
+    let matches = |repetition| {
+        layout.span(start, block_lines)
+            == layout.span(start + repetition * block_lines, block_lines)
+    };
+    if block_lines * repetitions >= PARALLEL_LINE_THRESHOLD {
+        (1..repetitions).into_par_iter().all(matches)
+    } else {
+        (1..repetitions).all(matches)
+    }
+}
+
+fn verified_candidate(
+    layout: &LineLayout<'_>,
+    start: usize,
+    candidate: BlockCandidate,
+) -> BlockCandidate {
+    if candidate.present() && candidate_is_exact(layout, start, candidate) {
+        candidate
+    } else if candidate.present() {
+        best_exact_candidate(layout, start)
+    } else {
+        BlockCandidate::NONE
+    }
+}
+
+fn range_hash(prefix: &[u64], start: usize, lines: usize, rotation: u32) -> u64 {
+    let shift = ((lines & 63) as u32 * rotation) & 63;
+    prefix[start + lines] ^ prefix[start].rotate_left(shift)
+}
+
+fn line_fingerprint(bytes: &[u8], seed: u64) -> u64 {
+    let mut hash = seed ^ (bytes.len() as u64).wrapping_mul(0x9e37_79b1_85eb_ca87);
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        hash ^= hash >> 29;
+    }
+    hash ^ hash.rotate_left(31)
+}
+
+fn block_marker(repetitions: usize, block_lines: usize) -> String {
+    format!("{REPEAT_SYMBOL}{repetitions}#{block_lines}\n")
+}
+
+fn block_marker_len(repetitions: usize, block_lines: usize) -> usize {
+    REPEAT_SYMBOL.len_utf8() + decimal_digits(repetitions) + decimal_digits(block_lines) + 2
+}
+
+fn decimal_digits(mut value: usize) -> usize {
+    let mut digits = 1_usize;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
 }
 
 #[derive(Clone, Copy)]
@@ -137,11 +496,94 @@ fn unchanged(text: &str) -> RepeatedLineReduction {
     }
 }
 
+fn unchanged_blocks(text: &str) -> RepeatedBlockReduction {
+    RepeatedBlockReduction {
+        text: text.to_owned(),
+        collapsed_blocks: 0,
+        omitted_repetitions: 0,
+        omitted_lines: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rayon::ThreadPoolBuilder;
 
-    use super::collapse_repeated_lines;
+    use super::{
+        BlockHashes, LineLayout, best_hashed_candidate, collapse_repeated_blocks,
+        collapse_repeated_lines, verified_candidate,
+    };
+
+    fn block(prefix: &str, lines: usize) -> String {
+        (0..lines)
+            .map(|line| format!("{prefix}-frame-{line:02}\n"))
+            .collect()
+    }
+
+    #[test]
+    fn block_projection_prefers_the_smallest_maximum_saving_period() {
+        let input = "alpha\nbeta\n".repeat(8);
+        let reduction = collapse_repeated_blocks(&input);
+
+        assert_eq!(reduction.text(), "alpha\nbeta\n×8#2\n");
+        assert_eq!(reduction.collapsed_blocks(), 1);
+        assert_eq!(reduction.omitted_repetitions(), 7);
+        assert_eq!(reduction.omitted_lines(), 14);
+    }
+
+    #[test]
+    fn block_projection_preserves_utf8_tail_and_non_saving_runs() {
+        let utf8 = format!("{}尾部", "诊断\n位置\n".repeat(3));
+        let reduced = collapse_repeated_blocks(&utf8);
+        assert_eq!(reduced.text(), "诊断\n位置\n×3#2\n尾部");
+        assert_eq!(reduced.collapsed_blocks(), 1);
+
+        let short = "a\nb\na\nb\n";
+        let unchanged = collapse_repeated_blocks(short);
+        assert_eq!(unchanged.text(), short);
+        assert!(!unchanged.reduced());
+    }
+
+    #[test]
+    fn block_projection_is_worker_stable_across_candidate_batches() {
+        let first = block("first", 7);
+        let second = block("second", 5);
+        let input = format!("{}{}", first.repeat(700), second.repeat(401));
+        let expected = format!("{first}×700#7\n{second}×401#5\n");
+        let one = ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("one-worker pool")
+            .install(|| collapse_repeated_blocks(&input));
+        let four = ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("four-worker pool")
+            .install(|| collapse_repeated_blocks(&input));
+
+        assert_eq!(one, four);
+        assert_eq!(one.text(), expected);
+        assert_eq!(one.collapsed_blocks(), 2);
+        assert_eq!(one.omitted_repetitions(), 1_099);
+        assert_eq!(one.omitted_lines(), 6_893);
+    }
+
+    #[test]
+    fn fingerprint_collisions_cannot_authorize_block_omission() {
+        let input = (0..128)
+            .map(|line| format!("unique-frame-{line:03}\n"))
+            .collect::<String>();
+        let layout = LineLayout::new(&input);
+        let colliding = BlockHashes {
+            first: vec![0; layout.complete_lines + 1],
+            second: vec![0; layout.complete_lines + 1],
+        };
+        let proposed = best_hashed_candidate(&layout, &colliding, 0);
+
+        assert!(proposed.present());
+        assert!(!verified_candidate(&layout, 0, proposed).present());
+        assert_eq!(collapse_repeated_blocks(&input).text(), input);
+    }
 
     #[test]
     fn partition_boundaries_merge_without_changing_order() {

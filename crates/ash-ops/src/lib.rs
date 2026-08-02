@@ -24,7 +24,10 @@ use ash_protocol::response::FinalResponse;
 
 pub use authorization::{AuthorizationError, AuthorizationPolicy, PermitAuthority};
 pub use error::OperationError;
-pub use reducer::{RepeatedLineReduction, collapse_repeated_lines};
+pub use reducer::{
+    RepeatedBlockReduction, RepeatedLineReduction, collapse_repeated_blocks,
+    collapse_repeated_lines,
+};
 
 /// Portable operations bound to one native workspace capability.
 #[derive(Clone, Debug)]
