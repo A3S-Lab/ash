@@ -58,6 +58,12 @@ still enforce independent 8, 64, or 128 MiB ceilings. A lease prevents early
 unlink; after release or session shutdown, the final lease cleans up its spool
 files.
 
+Crash-orphan recovery needs no resident daemon. When a later process first
+creates a result store, it reclaims only an ash spool whose exact marker is at
+least one hour old, whose lock can be acquired exclusively, and whose entries
+are all recognized regular files. Active, recent, malformed, symlinked, or
+foreign-content roots remain untouched; deletion is file-by-file, not recursive.
+
 ### Rayon CPU
 
 Owns search preparation, hashing, diffs, reduction, and other splittable work. A

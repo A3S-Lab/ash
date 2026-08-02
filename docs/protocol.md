@@ -342,6 +342,8 @@ A process result contains:
 
 The current `exec` path drains stdout and stderr concurrently. Each stream keeps at most 4 MiB in memory; after crossing that boundary its complete bytes move to a session-private disk spool while only a bounded head/tail sample remains resident for projection. The full prefix and every later chunk are charged incrementally against the session retained-byte ceiling before disk write. Streams needing references are BLAKE3-identified on the Rayon compute plane and committed atomically in stdout/stderr order. A successful truncated projection therefore points to every original byte, including bytes beyond the memory ceiling. Byte slicing reads only the requested spool range; full-value consumers enforce their own 8, 64, or 128 MiB work limits. Insufficient quota returns storage-budget error `601` with no partial reference, and reference release or session shutdown removes its spool files after active leases end.
 
+Each spool root carries an exact versioned owner marker and an exclusive lifetime lock. On the first result-store construction of a later process, a root older than one hour is reclaimed only if the lock proves it inactive and every entry is a recognized regular non-symlink spool file. Cleanup is non-recursive and fail-closed: active, recent, malformed, or foreign roots are not modified.
+
 Core result data uses these schemas; reference projection intentionally substitutes its validated requested column vector for `C...`:
 
 | Operation | Result header | Row or record semantics |

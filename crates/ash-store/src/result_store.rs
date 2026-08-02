@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
+use std::fs::{self, File, OpenOptions, TryLockError as FileTryLockError};
 use std::io::{Cursor, Read, SeekFrom, Write};
-use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, SystemTime};
 
 use rayon::prelude::*;
 use tempfile::{NamedTempFile, TempDir, TempPath};
@@ -12,6 +14,13 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 /// Maximum complete stream kept in memory before capture changes to a
 /// session-private disk spool.
 pub const DEFAULT_CAPTURE_MEMORY_BYTES: usize = 4 * 1024 * 1024;
+const SPOOL_DIRECTORY_PREFIX: &str = "ash-store-v1-";
+const SPOOL_STREAM_PREFIX: &str = "stream-";
+const SPOOL_OWNER_FILE: &str = ".ash-owner";
+const SPOOL_LOCK_FILE: &str = ".ash-lock";
+const SPOOL_OWNER_MARKER: &[u8] = b"ash-result-store-v1\n";
+const SPOOL_STALE_GRACE: Duration = Duration::from_secs(60 * 60);
+static SPOOL_REAPER: OnceLock<()> = OnceLock::new();
 
 /// Full immutable BLAKE3 identity used internally for retained content.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -135,7 +144,13 @@ enum Storage {
 }
 
 struct SpoolRoot {
+    _lock: File,
     directory: TempDir,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ReapReport {
+    removed: usize,
 }
 
 struct PendingContent {
@@ -837,12 +852,45 @@ impl CaptureSample {
 
 impl SpoolRoot {
     fn new() -> Result<Self, StoreError> {
+        let parent = std::env::temp_dir();
+        SPOOL_REAPER.get_or_init(|| {
+            let _ = reap_stale_spools(&parent, SystemTime::now(), SPOOL_STALE_GRACE);
+        });
+        Self::create_in(&parent)
+    }
+
+    fn create_in(parent: &Path) -> Result<Self, StoreError> {
         let directory = tempfile::Builder::new()
-            .prefix("ash-store-")
-            .tempdir()
+            .prefix(SPOOL_DIRECTORY_PREFIX)
+            .tempdir_in(parent)
             .map_err(|_| StoreError::Io)?;
         secure_directory(directory.path())?;
-        Ok(Self { directory })
+        let lock_path = directory.path().join(SPOOL_LOCK_FILE);
+        let lock = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .map_err(|_| StoreError::Io)?;
+        secure_file(&lock)?;
+        lock.try_lock().map_err(|_| StoreError::Io)?;
+
+        let owner_path = directory.path().join(SPOOL_OWNER_FILE);
+        let mut owner = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(owner_path)
+            .map_err(|_| StoreError::Io)?;
+        secure_file(&owner)?;
+        owner
+            .write_all(SPOOL_OWNER_MARKER)
+            .map_err(|_| StoreError::Io)?;
+        owner.sync_all().map_err(|_| StoreError::Io)?;
+        drop(owner);
+        Ok(Self {
+            _lock: lock,
+            directory,
+        })
     }
 
     fn path(&self) -> &Path {
@@ -850,9 +898,130 @@ impl SpoolRoot {
     }
 }
 
+fn reap_stale_spools(
+    parent: &Path,
+    now: SystemTime,
+    minimum_age: Duration,
+) -> Result<ReapReport, StoreError> {
+    let mut report = ReapReport::default();
+    for entry in fs::read_dir(parent).map_err(|_| StoreError::Io)? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name
+            .strip_prefix(SPOOL_DIRECTORY_PREFIX)
+            .is_some_and(|suffix| !suffix.is_empty())
+        {
+            continue;
+        }
+        if try_reap_stale_spool(&entry.path(), now, minimum_age) {
+            report.removed = report.removed.saturating_add(1);
+        }
+    }
+    Ok(report)
+}
+
+fn try_reap_stale_spool(root: &Path, now: SystemTime, minimum_age: Duration) -> bool {
+    let Ok(root_metadata) = fs::symlink_metadata(root) else {
+        return false;
+    };
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return false;
+    }
+    let owner_path = root.join(SPOOL_OWNER_FILE);
+    let lock_path = root.join(SPOOL_LOCK_FILE);
+    let Ok(owner_metadata) = fs::symlink_metadata(&owner_path) else {
+        return false;
+    };
+    if !owner_metadata.is_file() || owner_metadata.file_type().is_symlink() {
+        return false;
+    }
+    let Ok(modified) = owner_metadata.modified() else {
+        return false;
+    };
+    let Ok(age) = now.duration_since(modified) else {
+        return false;
+    };
+    if age < minimum_age || !owner_marker_matches(&owner_path) {
+        return false;
+    }
+    let Ok(lock_metadata) = fs::symlink_metadata(&lock_path) else {
+        return false;
+    };
+    if !lock_metadata.is_file() || lock_metadata.file_type().is_symlink() {
+        return false;
+    }
+    let Ok(lock) = OpenOptions::new().read(true).write(true).open(&lock_path) else {
+        return false;
+    };
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(FileTryLockError::WouldBlock | FileTryLockError::Error(_)) => return false,
+    }
+
+    let Some(streams) = recognized_spool_files(root) else {
+        return false;
+    };
+    for stream in streams {
+        if fs::remove_file(stream).is_err() {
+            return false;
+        }
+    }
+    drop(lock);
+    if fs::remove_file(&owner_path).is_err()
+        || fs::remove_file(&lock_path).is_err()
+        || fs::remove_dir(root).is_err()
+    {
+        return false;
+    }
+    true
+}
+
+fn owner_marker_matches(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let mut marker = [0_u8; SPOOL_OWNER_MARKER.len()];
+    if file.read_exact(&mut marker).is_err() || marker != SPOOL_OWNER_MARKER {
+        return false;
+    }
+    let mut trailing = [0_u8; 1];
+    matches!(file.read(&mut trailing), Ok(0))
+}
+
+fn recognized_spool_files(root: &Path) -> Option<Vec<PathBuf>> {
+    let mut streams = Vec::new();
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let name = name.to_str()?;
+        let metadata = fs::symlink_metadata(entry.path()).ok()?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return None;
+        }
+        if name == SPOOL_OWNER_FILE || name == SPOOL_LOCK_FILE {
+            continue;
+        }
+        if name
+            .strip_prefix(SPOOL_STREAM_PREFIX)
+            .is_some_and(|suffix| !suffix.is_empty())
+        {
+            streams.push(entry.path());
+        } else {
+            return None;
+        }
+    }
+    Some(streams)
+}
+
 fn create_spool_file(directory: &Path) -> Result<NamedTempFile, StoreError> {
     let file = tempfile::Builder::new()
-        .prefix("stream-")
+        .prefix(SPOOL_STREAM_PREFIX)
         .tempfile_in(directory)
         .map_err(|_| StoreError::Io)?;
     secure_file(file.as_file())?;
@@ -976,10 +1145,14 @@ impl Drop for StoreReservation {
 mod tests {
     use std::sync::Arc;
     use std::thread;
+    use std::time::{Duration, SystemTime};
 
     use super::{
-        Content, ResultStore, Storage, StoreError, StoreLimits, StoreResidency, StoreUsage,
+        Content, ResultStore, SpoolRoot, Storage, StoreError, StoreLimits, StoreResidency,
+        StoreUsage, reap_stale_spools,
     };
+    #[cfg(unix)]
+    use super::{SPOOL_LOCK_FILE, SPOOL_OWNER_FILE};
 
     #[tokio::test]
     async fn immutable_content_is_deduplicated_and_aliases_are_not_reused() {
@@ -1399,6 +1572,122 @@ mod tests {
         assert_eq!(store.retain(b"ok".to_vec()).expect("first alias"), 1);
     }
 
+    #[test]
+    fn stale_spool_reaper_skips_active_recent_and_unrecognized_directories() {
+        let parent = tempfile::tempdir().expect("parent");
+        let active = SpoolRoot::create_in(parent.path()).expect("active root");
+        std::fs::write(active.path().join("stream-active"), b"active").expect("active spool");
+
+        let report = reap_stale_spools(parent.path(), SystemTime::now(), Duration::ZERO)
+            .expect("scan active root");
+        assert_eq!(report.removed, 0);
+        assert!(active.path().is_dir());
+
+        let recent = SpoolRoot::create_in(parent.path()).expect("recent root");
+        let recent_path = recent.path().to_owned();
+        std::fs::write(recent_path.join("stream-recent"), b"recent").expect("recent spool");
+        let SpoolRoot {
+            _lock: recent_lock,
+            directory: recent_directory,
+        } = recent;
+        drop(recent_lock);
+        let recent_path = recent_directory.keep();
+        let report = reap_stale_spools(
+            parent.path(),
+            SystemTime::now(),
+            Duration::from_secs(60 * 60),
+        )
+        .expect("scan recent root");
+        assert_eq!(report.removed, 0);
+        assert!(recent_path.is_dir());
+
+        let unknown = SpoolRoot::create_in(parent.path()).expect("unknown root");
+        let unknown_path = unknown.path().to_owned();
+        std::fs::write(unknown_path.join("foreign"), b"do not remove").expect("foreign file");
+        let SpoolRoot {
+            _lock: unknown_lock,
+            directory: unknown_directory,
+        } = unknown;
+        drop(unknown_lock);
+        let unknown_path = unknown_directory.keep();
+        let report = reap_stale_spools(parent.path(), SystemTime::now(), Duration::ZERO)
+            .expect("scan unknown root");
+        assert_eq!(report.removed, 1);
+        assert!(!recent_path.exists());
+        assert!(unknown_path.is_dir());
+        assert_eq!(
+            std::fs::read(unknown_path.join("foreign")).expect("foreign content"),
+            b"do not remove"
+        );
+    }
+
+    #[test]
+    fn stale_spool_reaper_removes_only_a_proven_inactive_root() {
+        let parent = tempfile::tempdir().expect("parent");
+        let orphan = SpoolRoot::create_in(parent.path()).expect("orphan root");
+        let orphan_path = orphan.path().to_owned();
+        std::fs::write(orphan_path.join("stream-orphan"), b"orphan").expect("orphan spool");
+        let SpoolRoot {
+            _lock: orphan_lock,
+            directory: orphan_directory,
+        } = orphan;
+        drop(orphan_lock);
+        let orphan_path = orphan_directory.keep();
+
+        let report = reap_stale_spools(parent.path(), SystemTime::now(), Duration::ZERO)
+            .expect("reap orphan");
+        assert_eq!(report.removed, 1);
+        assert!(!orphan_path.exists());
+    }
+
+    #[test]
+    fn stale_spool_reaper_rejects_an_inexact_owner_marker() {
+        let parent = tempfile::tempdir().expect("parent");
+        let foreign = SpoolRoot::create_in(parent.path()).expect("foreign root");
+        let foreign_path = foreign.path().to_owned();
+        std::fs::write(
+            foreign_path.join(".ash-owner"),
+            b"ash-result-store-v1\nforeign",
+        )
+        .expect("replace owner marker");
+        let SpoolRoot {
+            _lock: foreign_lock,
+            directory: foreign_directory,
+        } = foreign;
+        drop(foreign_lock);
+        let foreign_path = foreign_directory.keep();
+
+        let report = reap_stale_spools(parent.path(), SystemTime::now(), Duration::ZERO)
+            .expect("scan foreign root");
+        assert_eq!(report.removed, 0);
+        assert!(foreign_path.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_spool_reaper_rejects_a_symlinked_stream() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().expect("parent");
+        let outside = parent.path().join("outside");
+        std::fs::write(&outside, b"outside").expect("outside file");
+        let foreign = SpoolRoot::create_in(parent.path()).expect("foreign root");
+        let foreign_path = foreign.path().to_owned();
+        symlink(&outside, foreign_path.join("stream-link")).expect("stream symlink");
+        let SpoolRoot {
+            _lock: foreign_lock,
+            directory: foreign_directory,
+        } = foreign;
+        drop(foreign_lock);
+        let foreign_path = foreign_directory.keep();
+
+        let report = reap_stale_spools(parent.path(), SystemTime::now(), Duration::ZERO)
+            .expect("scan symlinked root");
+        assert_eq!(report.removed, 0);
+        assert!(foreign_path.is_dir());
+        assert_eq!(std::fs::read(outside).expect("outside content"), b"outside");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn unix_spool_permissions_are_private() {
@@ -1422,6 +1711,16 @@ mod tests {
                 & 0o777,
             0o700
         );
+        for name in [SPOOL_OWNER_FILE, SPOOL_LOCK_FILE] {
+            assert_eq!(
+                std::fs::metadata(directory.join(name))
+                    .expect("metadata file")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         assert_eq!(
             std::fs::metadata(path)
                 .expect("file metadata")

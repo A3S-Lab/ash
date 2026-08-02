@@ -4,7 +4,7 @@ Status: architecture baseline plus implementation checkpoint
 
 This document defines the intended architecture of `ash` and is normative for component ownership and runtime boundaries. Statements explicitly labeled as the current source checkpoint describe implemented behavior; the remaining contracts are design targets rather than release claims.
 
-The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution with quota-bound disk-backed lossless retained output, bounded read/list/search, durable compare-and-swap patching and file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, real-operation search/snapshot scaling measurements, scheduled ASON/frame/update-metadata fuzz targets, deterministic six-target packaging, and a fail-closed native release workflow. Release-key and platform-signing credential provisioning, the first published release, sustained fuzz evidence, agent-task benchmarks, and published hardware-labelled runtime measurements remain open.
+The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution with quota-bound disk-backed lossless retained output and conservative crash-orphan cleanup, bounded read/list/search, durable compare-and-swap patching and file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, real-operation search/snapshot/spill-fetch scaling measurements, scheduled ASON/frame/update-metadata fuzz targets, deterministic six-target packaging, and a fail-closed native release workflow. Release-key and platform-signing credential provisioning, the first published release, sustained fuzz evidence, agent-task benchmarks, and published hardware-labelled runtime measurements remain open.
 
 ## 1. Product definition
 
@@ -308,6 +308,8 @@ Process stdout and stderr are captured independently as bytes and both pipes are
 
 The spool never becomes the LLM-facing value. Rayon computes the full BLAKE3 identity through a bounded 4 MiB scratch buffer, content-addressed entries deduplicate before alias allocation, and byte-range formulas seek directly into disk-backed values. Consumers that require a complete value apply their own independent ceiling: 8 MiB for structured ASON, 64 MiB for process stdin, and 128 MiB for file materialization or patch content. A lease prevents early unlink while a consumer is active; explicit release or session drop removes the temporary file once the final lease ends. Unix spool directories and files use modes `0700` and `0600`; other platforms inherit their native per-user temporary-directory protections. If quota cannot cover every captured byte, execution returns typed storage-budget error `601` instead of discarding a tail.
 
+Crash recovery is conservative and daemon-free. The first result-store construction in a process scans the operating-system temporary directory once. It removes a spool root only when the root has the current `ash` prefix, its exact versioned owner marker is at least one hour old, its regular lock file can be locked exclusively, and every entry is a recognized regular non-symlink marker, lock, or stream file. Removal is file-by-file and never recursive. Active, recent, malformed, symlinked, or foreign-content roots remain untouched; a scan failure never prevents creation of a new session spool. Consequently, a crash orphan becomes eligible on the first store construction of a later process after the grace period, without risking a live session.
+
 ### 7.2 Classification
 
 Captured data is classified as structured records, valid UTF-8 text, or opaque bytes. Raw bytes remain unchanged in storage. Text normalization is applied only to the LLM projection and records whether line endings changed.
@@ -533,6 +535,7 @@ The repository remains independently buildable and releasable at `A3S-Lab/ash`. 
 - nested graph and intra-operation parallelism without oversubscription;
 - I/O progress and cancellation while every compute worker is occupied;
 - bounded queue, descriptor, memory, and retained-byte pressure.
+- active/recent/foreign spool rejection plus proven crash-orphan reclamation.
 
 ### 15.3 Platform
 

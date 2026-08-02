@@ -11,6 +11,7 @@ use ash_protocol::request::{
     SnapshotMode,
 };
 use ash_protocol::response::Status;
+use ash_store::{StoreLimits, StoreResidency};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -18,6 +19,10 @@ use tempfile::TempDir;
 const DEFAULT_FILES: usize = 256;
 const DEFAULT_BYTES_PER_FILE: usize = 32 * 1024;
 const DEFAULT_SAMPLES: usize = 5;
+const DEFAULT_STORE_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_STORE_MEMORY_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_STORE_FETCH_BYTES: usize = 64 * 1024;
+const STORE_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 const REQUEST_MILLIS: u64 = 120_000;
 const NEEDLE: &str = "ASH_NEEDLE";
@@ -50,6 +55,7 @@ struct ScenarioReport {
     id: &'static str,
     work_items: usize,
     work_bytes: u64,
+    input_sha256: String,
     output_bytes: usize,
     output_sha256: String,
     runs: Vec<RuntimeRun>,
@@ -78,7 +84,16 @@ struct RuntimeConfig {
     files: usize,
     bytes_per_file: usize,
     samples: usize,
+    store_bytes: usize,
+    store_memory_bytes: usize,
+    store_fetch_bytes: usize,
     worker_counts: Vec<usize>,
+}
+
+struct StoreWorkload {
+    input: Vec<u8>,
+    memory_bytes: usize,
+    fetch_bytes: usize,
 }
 
 impl RuntimeConfig {
@@ -92,6 +107,9 @@ impl RuntimeConfig {
             files: DEFAULT_FILES,
             bytes_per_file: DEFAULT_BYTES_PER_FILE,
             samples: DEFAULT_SAMPLES,
+            store_bytes: DEFAULT_STORE_BYTES,
+            store_memory_bytes: DEFAULT_STORE_MEMORY_BYTES,
+            store_fetch_bytes: DEFAULT_STORE_FETCH_BYTES,
             worker_counts,
         }
     }
@@ -102,6 +120,10 @@ impl RuntimeConfig {
         if self.files == 0
             || self.bytes_per_file < NEEDLE.len() + 1
             || self.samples == 0
+            || self.store_bytes == 0
+            || self.store_memory_bytes >= self.store_bytes
+            || self.store_fetch_bytes == 0
+            || self.store_fetch_bytes > self.store_bytes
             || self.worker_counts.is_empty()
             || self.worker_counts[0] != 1
             || self.worker_counts.contains(&0)
@@ -162,7 +184,7 @@ async fn runtime_report_with_config(
     let workspace = Workspace::new(fixture.directory.path())?;
     let operations = PortableOperations::new(workspace);
     let workspace_text = fixture.directory.path().to_string_lossy().into_owned();
-    let mut scenarios = Vec::with_capacity(Scenario::ALL.len());
+    let mut scenarios = Vec::with_capacity(Scenario::ALL.len() + 1);
     for scenario in Scenario::ALL {
         scenarios.push(
             measure_scenario(
@@ -175,8 +197,9 @@ async fn runtime_report_with_config(
             .await?,
         );
     }
+    scenarios.push(measure_store_scenario(&workspace_text, &config).await?);
     Ok(RuntimeReport {
-        schema: 2,
+        schema: 3,
         host: HostReport {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
@@ -186,6 +209,127 @@ async fn runtime_report_with_config(
         samples: config.samples,
         scenarios,
     })
+}
+
+async fn measure_store_scenario(
+    workspace: &str,
+    config: &RuntimeConfig,
+) -> Result<ScenarioReport, Box<dyn Error>> {
+    let request = Scenario::Search.request()?;
+    let workload = StoreWorkload {
+        input: fixture_bytes(0x5a17, config.store_bytes),
+        memory_bytes: config.store_memory_bytes,
+        fetch_bytes: config.store_fetch_bytes,
+    };
+    let mut runs = Vec::with_capacity(config.worker_counts.len());
+    let mut expected_output = None;
+    let mut baseline = None;
+
+    for &workers in &config.worker_counts {
+        let parallelism = Parallelism::for_available_cpus(workers);
+        let engine = Engine::new(parallelism)?;
+        let (warm_output, _) =
+            execute_store_once(&engine, workspace, parallelism, &request, 10_000, &workload)
+                .await?;
+        require_stable_output(&mut expected_output, &warm_output)?;
+
+        let mut observations = Vec::with_capacity(config.samples);
+        for sample in 0..config.samples {
+            let session_id = u64::try_from(sample)?.saturating_add(10_001);
+            let (output, elapsed) = execute_store_once(
+                &engine,
+                workspace,
+                parallelism,
+                &request,
+                session_id,
+                &workload,
+            )
+            .await?;
+            require_stable_output(&mut expected_output, &output)?;
+            observations.push(elapsed);
+        }
+
+        let mut ordered = observations.clone();
+        ordered.sort_unstable();
+        let p50 = percentile(&ordered, 50);
+        let p95 = percentile(&ordered, 95);
+        let p99 = percentile(&ordered, 99);
+        let baseline = *baseline.get_or_insert(p50);
+        let speedup = ratio_basis_points(baseline, p50);
+        let output = expected_output
+            .as_ref()
+            .ok_or_else(|| io::Error::other("store benchmark emitted no output"))?;
+        runs.push(RuntimeRun {
+            workers,
+            observations_ns: observations,
+            p50_ns: p50,
+            p95_ns: p95,
+            p99_ns: p99,
+            items_per_second: throughput(1, p50),
+            bytes_per_second: throughput(workload.input.len() as u128, p50),
+            speedup_basis_points: speedup,
+            parallel_efficiency_basis_points: speedup / workers as u128,
+            output_sha256: sha256_hex(output),
+        });
+    }
+
+    let output = expected_output.ok_or_else(|| io::Error::other("missing store output"))?;
+    Ok(ScenarioReport {
+        id: "result-store-spill-fetch",
+        work_items: 1,
+        work_bytes: u64::try_from(workload.input.len())?,
+        input_sha256: sha256_hex(&workload.input),
+        output_bytes: output.len(),
+        output_sha256: sha256_hex(&output),
+        runs,
+    })
+}
+
+async fn execute_store_once(
+    engine: &Engine,
+    workspace: &str,
+    parallelism: Parallelism,
+    request: &Request,
+    session_id: u64,
+    workload: &StoreWorkload,
+) -> Result<(Vec<u8>, u128), Box<dyn Error>> {
+    let mut session_config =
+        SessionConfig::new(session_id, workspace, MAX_RESPONSE_BYTES, parallelism);
+    session_config.store_limits = StoreLimits {
+        max_bytes: u64::try_from(workload.input.len())?,
+        max_entries: 2,
+    };
+    let session = engine.open_session(session_config)?;
+    let program = session.begin(request).await?;
+    let store = program.store().clone();
+    let started = Instant::now();
+    let mut capture = store.capture(workload.memory_bytes);
+    for chunk in workload.input.chunks(STORE_CHUNK_BYTES) {
+        capture.append(chunk).await?;
+    }
+    let captured = capture.finish().await?;
+    if captured.residency() != StoreResidency::Disk {
+        return Err(io::Error::other("store benchmark did not spill").into());
+    }
+    let commit_store = store.clone();
+    let aliases = program
+        .compute_pool()
+        .run(move || commit_store.retain_captures(vec![captured]))
+        .await??;
+    let alias = *aliases
+        .first()
+        .ok_or_else(|| io::Error::other("store benchmark returned no alias"))?;
+    let lease = store.get(alias)?;
+    let fetch_bytes = u64::try_from(workload.fetch_bytes)?;
+    let offset = lease.len().saturating_sub(fetch_bytes);
+    let output = lease.read_range(offset, fetch_bytes, fetch_bytes).await?;
+    drop(lease);
+    store.release(alias)?;
+    drop(store);
+    drop(program);
+    drop(session);
+    let elapsed = started.elapsed().as_nanos().max(1);
+    Ok((output, elapsed))
 }
 
 async fn measure_scenario(
@@ -252,6 +396,7 @@ async fn measure_scenario(
         id: scenario.id(),
         work_items: fixture.files,
         work_bytes: fixture.bytes,
+        input_sha256: fixture.sha256.clone(),
         output_bytes: output.len(),
         output_sha256: sha256_hex(&output),
         runs,
@@ -344,7 +489,7 @@ fn fixture_bytes(index: usize, length: usize) -> Vec<u8> {
 fn require_stable_output(expected: &mut Option<Vec<u8>>, actual: &[u8]) -> Result<(), io::Error> {
     match expected {
         Some(expected) if expected != actual => Err(io::Error::other(
-            "worker counts produced different canonical ASON",
+            "worker counts produced different output bytes",
         )),
         Some(_) => Ok(()),
         None => {
@@ -391,24 +536,25 @@ mod tests {
     use super::{RuntimeConfig, runtime_report_with_config};
 
     #[tokio::test(flavor = "current_thread")]
-    async fn real_search_and_snapshot_outputs_are_stable_across_worker_counts() {
+    async fn real_runtime_outputs_are_stable_across_worker_counts() {
         let report = runtime_report_with_config(RuntimeConfig {
             files: 8,
             bytes_per_file: 4 * 1024,
             samples: 2,
+            store_bytes: 128 * 1024,
+            store_memory_bytes: 16 * 1024,
+            store_fetch_bytes: 4 * 1024,
             worker_counts: vec![2, 1, 2],
         })
         .await
         .expect("runtime report");
 
-        assert_eq!(report.schema, 2);
+        assert_eq!(report.schema, 3);
         assert_eq!(report.fixture.files, 8);
         assert_eq!(report.fixture.bytes, 8 * 4 * 1024);
         assert_eq!(report.samples, 2);
-        assert_eq!(report.scenarios.len(), 2);
+        assert_eq!(report.scenarios.len(), 3);
         for scenario in &report.scenarios {
-            assert_eq!(scenario.work_items, 8);
-            assert_eq!(scenario.work_bytes, report.fixture.bytes);
             assert!(scenario.output_bytes > 0);
             assert_eq!(scenario.runs.len(), 2);
             assert_eq!(scenario.runs[0].workers, 1);
@@ -421,9 +567,20 @@ mod tests {
                 assert_eq!(run.output_sha256, scenario.output_sha256);
             }
         }
+        for scenario in &report.scenarios[..2] {
+            assert_eq!(scenario.work_items, 8);
+            assert_eq!(scenario.work_bytes, report.fixture.bytes);
+            assert_eq!(&scenario.input_sha256, &report.fixture.sha256);
+        }
         assert_ne!(
             report.scenarios[0].output_sha256,
             report.scenarios[1].output_sha256
         );
+        let store = &report.scenarios[2];
+        assert_eq!(store.id, "result-store-spill-fetch");
+        assert_eq!(store.work_items, 1);
+        assert_eq!(store.work_bytes, 128 * 1024);
+        assert_ne!(&store.input_sha256, &report.fixture.sha256);
+        assert_eq!(store.output_bytes, 4 * 1024);
     }
 }

@@ -30,6 +30,7 @@ dependencies = [
  "a3s-ash-ops",
  "a3s-ash-platform",
  "a3s-ash-protocol",
+ "a3s-ash-store",
  "serde",
  "serde_json",
  "sha2",

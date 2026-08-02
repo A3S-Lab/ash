@@ -1,6 +1,6 @@
 # Token-efficiency benchmark contract
 
-Status: deterministic format corpus, two-tokenizer representation evidence, retained-formula regression gate, and real-operation host-local runtime harness implemented; agent-task and published hardware reports remain open
+Status: deterministic format corpus, two-tokenizer representation evidence, retained-formula regression gate, and host-local search, snapshot, and disk spill/fetch runtime harness implemented; agent-task and published hardware reports remain open
 
 Token reduction is the primary performance objective of `ash`. This document defines how it is measured without trading away task correctness or hiding protocol overhead.
 
@@ -17,13 +17,13 @@ cargo run -p a3s-ash-bench --release --locked -- \
   --check benches/reports/v0.1.0/format.json
 ```
 
-The same runner creates a deterministic 256-file, 8 MiB workspace and executes the public literal-search and BLAKE3 snapshot paths at 1, 2, 4, 8, and host-available worker counts:
+The same runner creates a deterministic 256-file, 8 MiB workspace and an independent deterministic 8 MiB retained-value input. It executes the public literal-search and BLAKE3 snapshot paths plus a forced disk spill and bounded range fetch at 1, 2, 4, 8, and host-available worker counts:
 
 ```sh
 cargo run -p a3s-ash-bench --release --locked -- --runtime
 ```
 
-The schema-2 report includes every observation, p50/p95/p99 nanoseconds, item and byte throughput, speedup and parallel efficiency in basis points, worker count, host OS/architecture/available CPU count, fixture digest, and canonical response digest. Search and snapshot use the normal `Engine`, governor, `PortableOperations`, workspace backend, reducer, path dictionary, result store, and ASON encoder. Output is compared byte for byte across warm-up, samples, and worker counts; a difference fails before timing is printed. Host timings are not checked in or gated because shared-runner performance is not portable.
+The schema-3 report includes every observation, p50/p95/p99 nanoseconds, item and byte throughput, speedup and parallel efficiency in basis points, worker count, host OS/architecture/available CPU count, per-scenario input digest, and output digest. Search and snapshot use the normal `Engine`, governor, `PortableOperations`, workspace backend, reducer, path dictionary, result store, and ASON encoder. The store scenario uses the normal capture, disk spool, Rayon digest, atomic retention, range reader, release, and teardown paths. Canonical ASON or fetched bytes are compared byte for byte across warm-up, samples, and worker counts; a difference fails before timing is printed. Host timings are not checked in or gated because shared-runner performance is not portable.
 
 ## 1. Optimization target
 
@@ -216,32 +216,30 @@ cargo test -p a3s-ash-bench direct_math_symbols_beat_wrappers_and_match_the_asci
 
 ## 9. Runtime benchmarks
 
-The implemented host-local slice exercises two real operations over the same deterministic fixture:
+The implemented host-local slice exercises three real runtime paths over deterministic inputs:
 
 - `search-literal` walks the workspace, reads files on bounded workers, scans text, performs stable merge and path interning, and encodes the final ASON response;
-- `snapshot-blake3` walks the same workspace, hashes files in the Rayon pool, builds and retains the canonical manifest, and encodes the final ASON response.
+- `snapshot-blake3` walks the same workspace, hashes files in the Rayon pool, builds and retains the canonical manifest, and encodes the final ASON response;
+- `result-store-spill-fetch` captures 8 MiB in 16 KiB chunks with a 4 MiB memory ceiling, proves disk residency, hashes and atomically retains the value through the compute pool, fetches its final 64 KiB range, releases the alias, and tears down the session spool.
 
-Every sample uses a fresh session so reference aliases and path dictionaries start from the same state. Fixture construction and session creation are outside the timed interval; governor acquisition, operation execution, reduction, retention, and canonical response encoding are inside it. The benchmark has no fixed speedup threshold: it proves determinism everywhere and reports scaling only for the current host.
+Every sample uses a fresh session so reference aliases and path dictionaries start from the same state. Fixture, engine, and session setup are outside the timed interval. Search and snapshot time program admission through canonical response encoding; the store scenario times capture through range fetch, release, and session-spool teardown. The benchmark has no fixed speedup threshold: it proves output determinism everywhere and reports scaling only for the current host.
 
-The remaining runtime corpus expands this implemented slice to:
-
-Runtime measurements isolate `ash` overhead from the executed tool:
+The remaining runtime corpus expands this implemented slice to measurements that isolate `ash` overhead from the executed tool:
 
 - cold process startup;
 - warm framed request dispatch;
 - direct child spawn overhead;
 - stream capture at several output rates;
 - reducer throughput;
-- result-store spill and fetch;
 - path dictionary lookup;
 - graph scheduling at several node counts;
 - directory traversal, literal search, regular-expression search, hashing, and reduction at 1, 2, 4, 8, and host-default compute workers;
 - mixed-load I/O latency while the compute pool is saturated;
 - cancellation-to-process-tree-empty latency.
 
-Each measurement reports p50, p95, p99, sample count, host description, logical and available CPU count, configured I/O and compute workers, peak resident memory, CPU utilization, and raw observations. Scaling reports include throughput, speedup relative to one worker, and parallel efficiency. Results from different hosts are not combined into one scaling curve.
+The current schema reports p50, p95, p99, sample count, host OS/architecture/available CPU count, selected compute workers, work volume, input and output digests, output size, throughput, speedup, parallel efficiency, and every raw observation. Future scenarios must add configured I/O workers, peak resident memory, and CPU utilization where those values are material to the claim. Results from different hosts are not combined into one scaling curve.
 
-Parallel and sequential runs consume the same fixture and must emit byte-identical canonical ASON. A faster run with reordered, missing, or duplicated records is a correctness failure rather than a performance result. Fixtures include many small files, fewer large files, skewed directory trees, binary files, ignored paths, sparse matches, dense matches, and simultaneous process-output pressure.
+Parallel and sequential runs consume the same input digest and must emit byte-identical outputs; search and snapshot outputs are canonical ASON, while store output is the requested byte range. A faster run with reordered, missing, duplicated, or changed evidence is a correctness failure rather than a performance result. Fixtures include many small files, fewer large files, skewed directory trees, binary files, ignored paths, sparse matches, dense matches, and simultaneous process-output pressure.
 
 ## 10. Proposed release gates
 

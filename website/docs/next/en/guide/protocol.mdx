@@ -54,6 +54,10 @@ retain the complete capture, error `601` is returned with no partial reference.
 After reference release or session shutdown, the final active lease removes the
 corresponding temporary file.
 
+Every spool carries a versioned owner marker and a lifetime lock. A later
+process reclaims it only after one hour, only when no active lock remains, and
+only when every entry is recognized; uncertain roots are never modified.
+
 ## Concurrency and order
 
 A persistent RPC session can run independent requests concurrently. Final frames
