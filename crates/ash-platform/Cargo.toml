@@ -13,5 +13,6 @@ homepage.workspace = true
 atomicwrites.workspace = true
 blake3.workspace = true
 process-wrap.workspace = true
+same-file.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

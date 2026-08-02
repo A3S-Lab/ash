@@ -75,6 +75,7 @@ dependencies = [
  "atomicwrites",
  "blake3",
  "process-wrap",
+ "same-file",
  "thiserror",
  "tokio",
 ]

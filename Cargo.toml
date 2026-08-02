@@ -39,6 +39,7 @@ rayon = "1.12.0"
 regex = "1.13.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream", "system-proxy"] }
 semver = "1.0.28"
+same-file = "1.0.6"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.11.0"

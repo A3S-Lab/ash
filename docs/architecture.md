@@ -400,7 +400,7 @@ The current patch vertical slice accepts sorted, non-overlapping byte splices ov
 
 The implemented `fs` operation is a separate durable, file-only transaction boundary. It supports create, copy, move, and remove over regular files; create and destination paths never overwrite, while copy, move, and remove require the caller's full BLAKE3 preimage digest. Requests contain 1 through 256 stable-ID actions, every source and destination is unique, and input hashing and staging are bounded per file and in aggregate. Directory creation, directory moves, overwrite, and recursive deletion are intentionally absent because they require additional capabilities and recovery rules.
 
-Before the first mutation, the platform writes staged content and a versioned, checksummed binary manifest under the reserved workspace `.ash` state directory, flushes it, and atomically publishes the transaction journal. Actions then use reversible same-filesystem links, renames, or compare-and-swap replacements. A durable commit marker separates rollback recovery from committed cleanup. A later action failure rolls prior actions back in reverse order; after interruption, the next transaction infers each applied step from the manifest, exact file size, digest, and journal layout. Ambiguous or externally modified state is preserved and reported as `recovery_required` instead of being guessed. A process-local mutex and an operating-system file lock serialize workspace mutations across cloned sessions and processes. Valid internal state is excluded from listings and snapshots and cannot be addressed through normal workspace operations.
+Before the first mutation, the platform writes staged content and a versioned, checksummed binary manifest under the reserved workspace `.ash` state directory, flushes it, and atomically publishes the transaction journal. Actions then use reversible same-filesystem links, renames, or compare-and-swap replacements. A durable commit marker separates rollback recovery from committed cleanup. A later action failure rolls prior actions back in reverse order; after interruption, the next transaction infers each applied step from the manifest, exact file size, digest, native file identity, and journal layout. The create/copy and move windows in which both hard-link names exist are recoverable only when both names identify the same underlying file; independent equal-content files remain ambiguous. Every completed inverse mutation is itself a recognizable pre-transaction state, so a second crash can re-enter recovery safely. Ambiguous or externally modified state is preserved and reported as `recovery_required` instead of being guessed. A process-local mutex and an operating-system file lock serialize workspace mutations across cloned sessions and processes. Valid internal state is excluded from listings and snapshots and cannot be addressed through normal workspace operations.
 
 ### 9.3 Snapshots
 
@@ -542,7 +542,9 @@ The repository remains independently buildable and releasable at `A3S-Lab/ash`. 
 
 ### 15.2 Engine
 
-- deterministic graph scheduling with a fake clock;
+- deterministic graph scheduling under controlled completion permutations;
+- exhaustive dependency/failure propagation over every four-node forward DAG and success mask;
+- lowest-input-index task-error selection after already-running independent work drains;
 - cancellation at every lifecycle boundary;
 - budget reservation and exhaustion;
 - partial failure and skip propagation;
@@ -561,8 +563,8 @@ The repository remains independently buildable and releasable at `A3S-Lab/ash`. 
 - concurrent stdout/stderr pressure;
 - repeated cancellation-to-tree-empty completion with inherited pipes;
 - atomic replacement and conflict races.
-- durable patch replacement recovery before and after the commit marker;
-- durable create/copy/move/remove recovery before and after the commit marker;
+- actual durable transaction execution at 30 preparation, publication, action, and commit cutpoints;
+- recovery re-entry at 12 inverse-mutation and journal-cleanup cutpoints;
 - corrupt journals, external interference, cancellation, and bounded recovery reads.
 
 ### 15.4 Distribution

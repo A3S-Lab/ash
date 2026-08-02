@@ -244,10 +244,68 @@ impl From<PlatformError> for StepFailure {
     }
 }
 
+#[derive(Clone, Copy)]
 enum AppliedState {
     Applied,
+    Linked,
     NotApplied,
     Indeterminate,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CrashPoint {
+    PreparingCreated,
+    ActionPrepared(usize),
+    ManifestPrepared,
+    JournalPublished,
+    CreateCopyLinked(usize),
+    CreateCopyParentSynced(usize),
+    CreateCopyStageRemoved(usize),
+    CreateCopyStageSynced(usize),
+    MoveLinked(usize),
+    MoveDestinationSynced(usize),
+    MoveSourceRemoved(usize),
+    MoveSourceSynced(usize),
+    RemoveRenamed(usize),
+    RemoveSourceSynced(usize),
+    RemoveJournalSynced(usize),
+    ReplaceSwapped(usize),
+    ReplaceParentSynced(usize),
+    ReplaceStageRemoved(usize),
+    ReplaceStageSynced(usize),
+    CommitTempWritten,
+    CommitMarkerRenamed,
+    CommitSynced,
+    RollbackCreateCopyDestinationRemoved(usize),
+    RollbackMoveSourceLinked(usize),
+    RollbackMoveDestinationRemoved(usize),
+    RollbackRemoveRestored(usize),
+    RollbackReplaceRestored(usize),
+    RollbackActionCompleted(usize),
+    RecoveryJournalRemoved,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ARMED_CRASH_POINT: std::cell::Cell<Option<CrashPoint>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn arm_crash(point: CrashPoint) {
+    ARMED_CRASH_POINT.with(|armed| armed.set(Some(point)));
+}
+
+#[cfg(test)]
+fn crash_at(point: CrashPoint) {
+    ARMED_CRASH_POINT.with(|armed| {
+        if armed.get() == Some(point) {
+            armed.set(None);
+            panic!("simulated process crash at {point:?}");
+        }
+    });
 }
 
 impl Workspace {
@@ -288,6 +346,8 @@ impl Workspace {
         fs::create_dir(preparing.join(STAGE_DIRECTORY))?;
         fs::create_dir(preparing.join(REMOVED_DIRECTORY))?;
         sync_directory(&state)?;
+        #[cfg(test)]
+        crash_at(CrashPoint::PreparingCreated);
 
         let mut totals = TransactionTotals::default();
         let mut prepared = Vec::with_capacity(actions.len());
@@ -295,7 +355,11 @@ impl Workspace {
             let result =
                 self.prepare_action(index, action, &preparing, limits, &mut totals, &mut control);
             match result {
-                Ok(action) => prepared.push(action),
+                Ok(action) => {
+                    prepared.push(action);
+                    #[cfg(test)]
+                    crash_at(CrashPoint::ActionPrepared(index));
+                }
                 Err(StepFailure::Conflict(digest)) => {
                     rows[index] = FileActionOutcome {
                         state: FileActionState::Conflict,
@@ -324,8 +388,12 @@ impl Workspace {
         let manifest = encode_manifest(&prepared)?;
         write_new_sync(&preparing.join(MANIFEST_FILE), &manifest)?;
         sync_directory(&preparing)?;
+        #[cfg(test)]
+        crash_at(CrashPoint::ManifestPrepared);
         fs::rename(&preparing, &transaction)?;
         sync_directory(&state)?;
+        #[cfg(test)]
+        crash_at(CrashPoint::JournalPublished);
 
         let mut failure = None;
         for (index, action) in prepared.iter().enumerate() {
@@ -384,9 +452,19 @@ impl Workspace {
 
         let committing = transaction.join(COMMITTING_FILE);
         let committed = transaction.join(COMMITTED_FILE);
-        if write_new_sync(&committing, COMMITTED_MARKER).is_err()
-            || fs::rename(&committing, &committed).is_err()
-        {
+        let commit_failed = if write_new_sync(&committing, COMMITTED_MARKER).is_err() {
+            true
+        } else {
+            #[cfg(test)]
+            crash_at(CrashPoint::CommitTempWritten);
+            let rename_failed = fs::rename(&committing, &committed).is_err();
+            if !rename_failed {
+                #[cfg(test)]
+                crash_at(CrashPoint::CommitMarkerRenamed);
+            }
+            rename_failed
+        };
+        if commit_failed {
             let recovery_required = self.rollback_locked(&prepared, Some(&mut rows))?;
             if !recovery_required {
                 remove_directory_if_present(&transaction)?;
@@ -413,6 +491,8 @@ impl Workspace {
                 failure: Some(FileTransactionFailure::RecoveryRequired),
             });
         }
+        #[cfg(test)]
+        crash_at(CrashPoint::CommitSynced);
         // A durable commit marker makes cleanup retryable. Cleanup failure does
         // not change the committed outcome; the next transaction finalizes it.
         let _ = remove_directory_if_present(&transaction);
@@ -558,10 +638,18 @@ impl Workspace {
                 }
                 fs::hard_link(&stage, &destination)
                     .map_err(|error| hard_link_error(&destination, limits, control, error))?;
+                #[cfg(test)]
+                crash_at(CrashPoint::CreateCopyLinked(index));
                 sync_parent(&destination).map_err(StepFailure::Platform)?;
+                #[cfg(test)]
+                crash_at(CrashPoint::CreateCopyParentSynced(index));
                 fs::remove_file(&stage).map_err(PlatformError::from)?;
+                #[cfg(test)]
+                crash_at(CrashPoint::CreateCopyStageRemoved(index));
                 sync_directory(&transaction.join(STAGE_DIRECTORY))
                     .map_err(StepFailure::Platform)?;
+                #[cfg(test)]
+                crash_at(CrashPoint::CreateCopyStageSynced(index));
                 Ok(())
             }
             FileActionKind::Move => {
@@ -582,9 +670,18 @@ impl Workspace {
                     .map_err(StepFailure::Platform)?;
                 fs::hard_link(&source, &destination)
                     .map_err(|error| hard_link_error(&destination, limits, control, error))?;
+                #[cfg(test)]
+                crash_at(CrashPoint::MoveLinked(index));
                 sync_parent(&destination).map_err(StepFailure::Platform)?;
+                #[cfg(test)]
+                crash_at(CrashPoint::MoveDestinationSynced(index));
                 fs::remove_file(&source).map_err(PlatformError::from)?;
-                sync_parent(&source).map_err(StepFailure::Platform)
+                #[cfg(test)]
+                crash_at(CrashPoint::MoveSourceRemoved(index));
+                sync_parent(&source).map_err(StepFailure::Platform)?;
+                #[cfg(test)]
+                crash_at(CrashPoint::MoveSourceSynced(index));
+                Ok(())
             }
             FileActionKind::Remove => {
                 let source = self
@@ -596,8 +693,16 @@ impl Workspace {
                 }
                 let removed = indexed_path(&transaction.join(REMOVED_DIRECTORY), index);
                 fs::rename(&source, &removed).map_err(PlatformError::from)?;
+                #[cfg(test)]
+                crash_at(CrashPoint::RemoveRenamed(index));
                 sync_parent(&source).map_err(StepFailure::Platform)?;
-                sync_directory(&transaction.join(REMOVED_DIRECTORY)).map_err(StepFailure::Platform)
+                #[cfg(test)]
+                crash_at(CrashPoint::RemoveSourceSynced(index));
+                sync_directory(&transaction.join(REMOVED_DIRECTORY))
+                    .map_err(StepFailure::Platform)?;
+                #[cfg(test)]
+                crash_at(CrashPoint::RemoveJournalSynced(index));
+                Ok(())
             }
             FileActionKind::Replace => {
                 let expected_digest = action
@@ -636,9 +741,19 @@ impl Workspace {
                     }
                     Err(error) => return Err(StepFailure::Platform(error)),
                 }
+                #[cfg(test)]
+                crash_at(CrashPoint::ReplaceSwapped(index));
                 sync_parent(&destination).map_err(StepFailure::Platform)?;
+                #[cfg(test)]
+                crash_at(CrashPoint::ReplaceParentSynced(index));
                 fs::remove_file(&stage).map_err(PlatformError::from)?;
-                sync_directory(&transaction.join(STAGE_DIRECTORY)).map_err(StepFailure::Platform)
+                #[cfg(test)]
+                crash_at(CrashPoint::ReplaceStageRemoved(index));
+                sync_directory(&transaction.join(STAGE_DIRECTORY))
+                    .map_err(StepFailure::Platform)?;
+                #[cfg(test)]
+                crash_at(CrashPoint::ReplaceStageSynced(index));
+                Ok(())
             }
         }
     }
@@ -810,6 +925,8 @@ impl Workspace {
             return Err(PlatformError::RecoveryRequired);
         }
         remove_directory_if_present(&transaction)?;
+        #[cfg(test)]
+        crash_at(CrashPoint::RecoveryJournalRemoved);
         sync_directory(&state)?;
         Ok(true)
     }
@@ -852,8 +969,10 @@ impl Workspace {
                     recovery_required = true;
                     set_recovery_row(rows.as_deref_mut(), index, action.digest);
                 }
-                Ok(AppliedState::Applied) => {
+                Ok(AppliedState::Applied | AppliedState::Linked) => {
                     if self.rollback_action(index, action, &transaction).is_ok() {
+                        #[cfg(test)]
+                        crash_at(CrashPoint::RollbackActionCompleted(index));
                         if let Some(rows) = rows.as_deref_mut() {
                             rows[index] = FileActionOutcome {
                                 state: FileActionState::RolledBack,
@@ -890,7 +1009,13 @@ impl Workspace {
                     false,
                 )?;
                 match (exists(&stage)?, exists(&destination)?) {
-                    (true, false) => Ok(AppliedState::NotApplied),
+                    (true, false) | (false, false) => Ok(AppliedState::NotApplied),
+                    (true, true)
+                        if file_matches_recovery(&stage, action.size, action.digest)?
+                            && same_regular_file(&stage, &destination)? =>
+                    {
+                        Ok(AppliedState::Linked)
+                    }
                     (false, true)
                         if hash_file_recovery(&destination, action.size)? == action.digest =>
                     {
@@ -910,6 +1035,12 @@ impl Workspace {
                 )?;
                 match (exists(&source)?, exists(&destination)?) {
                     (true, false) => Ok(AppliedState::NotApplied),
+                    (true, true)
+                        if file_matches_recovery(&source, action.size, action.digest)?
+                            && same_regular_file(&source, &destination)? =>
+                    {
+                        Ok(AppliedState::Linked)
+                    }
                     (false, true)
                         if hash_file_recovery(&destination, action.size)? == action.digest =>
                     {
@@ -934,13 +1065,20 @@ impl Workspace {
             FileActionKind::Replace => {
                 let destination = self.checked_mutation_path(&action.path, false)?;
                 let removed = indexed_path(&transaction.join(REMOVED_DIRECTORY), index);
-                if !exists(&destination)? || !exists(&removed)? {
+                if !exists(&destination)? {
                     return Ok(AppliedState::Indeterminate);
                 }
                 let preimage_digest = action
                     .preimage_digest
                     .ok_or(PlatformError::JournalCorrupt)?;
                 let preimage_size = action.preimage_size.ok_or(PlatformError::JournalCorrupt)?;
+                if !exists(&removed)? {
+                    return if file_matches_recovery(&destination, preimage_size, preimage_digest)? {
+                        Ok(AppliedState::NotApplied)
+                    } else {
+                        Ok(AppliedState::Indeterminate)
+                    };
+                }
                 if !file_matches_recovery(&removed, preimage_size, preimage_digest)? {
                     return Ok(AppliedState::Indeterminate);
                 }
@@ -963,6 +1101,7 @@ impl Workspace {
     ) -> Result<(), PlatformError> {
         match action.kind {
             FileActionKind::Create | FileActionKind::Copy => {
+                let stage = indexed_path(&transaction.join(STAGE_DIRECTORY), index);
                 let destination = self.checked_mutation_path(
                     action.destination.as_deref().unwrap_or(&action.path),
                     true,
@@ -970,13 +1109,33 @@ impl Workspace {
                 if hash_file_recovery(&destination, action.size)? != action.digest {
                     return Err(PlatformError::RecoveryRequired);
                 }
+                if stage.exists() && !same_regular_file(&stage, &destination)? {
+                    return Err(PlatformError::RecoveryRequired);
+                }
                 fs::remove_file(&destination)?;
+                #[cfg(test)]
+                crash_at(CrashPoint::RollbackCreateCopyDestinationRemoved(index));
                 sync_parent(&destination)
             }
             FileActionKind::Move => {
                 let source = self.checked_mutation_path(&action.path, false)?;
                 if source.exists() {
-                    return Err(PlatformError::RecoveryRequired);
+                    let destination = self.checked_mutation_path(
+                        action
+                            .destination
+                            .as_deref()
+                            .ok_or(PlatformError::JournalCorrupt)?,
+                        true,
+                    )?;
+                    if !file_matches_recovery(&source, action.size, action.digest)?
+                        || !same_regular_file(&source, &destination)?
+                    {
+                        return Err(PlatformError::RecoveryRequired);
+                    }
+                    fs::remove_file(&destination)?;
+                    #[cfg(test)]
+                    crash_at(CrashPoint::RollbackMoveDestinationRemoved(index));
+                    return sync_parent(&destination);
                 }
                 let destination = self.checked_mutation_path(
                     action
@@ -989,8 +1148,12 @@ impl Workspace {
                     return Err(PlatformError::RecoveryRequired);
                 }
                 fs::hard_link(&destination, &source)?;
+                #[cfg(test)]
+                crash_at(CrashPoint::RollbackMoveSourceLinked(index));
                 sync_parent(&source)?;
                 fs::remove_file(&destination)?;
+                #[cfg(test)]
+                crash_at(CrashPoint::RollbackMoveDestinationRemoved(index));
                 sync_parent(&destination)
             }
             FileActionKind::Remove => {
@@ -1003,6 +1166,8 @@ impl Workspace {
                     return Err(PlatformError::RecoveryRequired);
                 }
                 fs::rename(&removed, &source)?;
+                #[cfg(test)]
+                crash_at(CrashPoint::RollbackRemoveRestored(index));
                 sync_parent(&source)?;
                 sync_directory(&transaction.join(REMOVED_DIRECTORY))
             }
@@ -1037,6 +1202,8 @@ impl Workspace {
                         if new_digest == preimage_digest => {}
                     _ => return Err(PlatformError::RecoveryRequired),
                 }
+                #[cfg(test)]
+                crash_at(CrashPoint::RollbackReplaceRestored(index));
                 sync_parent(&destination)?;
                 remove_file_if_present(&removed)?;
                 remove_file_if_present(&indexed_path(&transaction.join(STAGE_DIRECTORY), index))?;
@@ -1682,6 +1849,16 @@ fn set_recovery_row(rows: Option<&mut [FileActionOutcome]>, index: usize, digest
     }
 }
 
+fn same_regular_file(left: &Path, right: &Path) -> Result<bool, PlatformError> {
+    for path in [left, right] {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+    }
+    same_file::is_same_file(left, right).map_err(PlatformError::from)
+}
+
 #[cfg(unix)]
 fn set_private_directory_permissions(path: &Path) -> Result<(), PlatformError> {
     use std::os::unix::fs::PermissionsExt;
@@ -1713,13 +1890,16 @@ fn sync_parent(path: &Path) -> Result<(), PlatformError> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{
-        COMMITTED_FILE, COMMITTED_MARKER, FileAction, FileActionState, FileTransactionFailure,
-        FileTransactionLimits, MANIFEST_FILE, PreparedAction, REMOVED_DIRECTORY, STAGE_DIRECTORY,
-        TRANSACTION_DIRECTORY, TransactionControl, encode_manifest, indexed_path, write_new_sync,
+        COMMITTED_FILE, COMMITTED_MARKER, CrashPoint, FileAction, FileActionState,
+        FileTransactionFailure, FileTransactionLimits, MANIFEST_FILE, PREPARING_DIRECTORY,
+        PreparedAction, REMOVED_DIRECTORY, STAGE_DIRECTORY, TRANSACTION_DIRECTORY,
+        TransactionControl, arm_crash, encode_manifest, indexed_path, same_regular_file,
+        write_new_sync,
     };
     use crate::{PlatformError, WalkOptions, Workspace};
 
@@ -1745,6 +1925,140 @@ mod tests {
 
     fn limits() -> FileTransactionLimits {
         FileTransactionLimits::new(1024, 4096).expect("limits")
+    }
+
+    #[test]
+    fn native_identity_distinguishes_hard_links_from_equal_content() {
+        let directory = TestDirectory::new();
+        let original = directory.0.join("original");
+        let linked = directory.0.join("linked");
+        let equal = directory.0.join("equal");
+        fs::write(&original, b"same bytes").expect("original");
+        fs::hard_link(&original, &linked).expect("hard link");
+        fs::write(&equal, b"same bytes").expect("equal content");
+
+        assert!(same_regular_file(&original, &linked).expect("linked identity"));
+        assert!(!same_regular_file(&original, &equal).expect("separate identity"));
+    }
+
+    #[test]
+    fn recovery_never_treats_equal_content_as_hard_link_proof() {
+        let create_directory = TestDirectory::new();
+        let create_workspace = Workspace::new(&create_directory.0).expect("create workspace");
+        arm_crash(CrashPoint::CreateCopyLinked(0));
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| create_workspace.file_transaction(
+                vec![FileAction::create("created", b"same".to_vec())],
+                limits(),
+                || TransactionControl::Continue,
+            )))
+            .is_err()
+        );
+        drop(create_workspace);
+        fs::remove_file(create_directory.0.join("created")).expect("unlink published create");
+        fs::write(create_directory.0.join("created"), b"same").expect("external equal create");
+        let create_restart = Workspace::new(&create_directory.0).expect("create restart");
+        assert!(matches!(
+            create_restart.recover_file_transactions(|| TransactionControl::Continue),
+            Err(PlatformError::RecoveryRequired)
+        ));
+        assert_eq!(
+            fs::read(create_directory.0.join("created")).expect("preserved create"),
+            b"same"
+        );
+
+        let move_directory = TestDirectory::new();
+        fs::write(move_directory.0.join("source"), b"same").expect("move source");
+        let move_workspace = Workspace::new(&move_directory.0).expect("move workspace");
+        arm_crash(CrashPoint::MoveLinked(0));
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| move_workspace.file_transaction(
+                vec![FileAction::move_file(
+                    "source",
+                    "destination",
+                    *blake3::hash(b"same").as_bytes(),
+                )],
+                limits(),
+                || TransactionControl::Continue,
+            )))
+            .is_err()
+        );
+        drop(move_workspace);
+        fs::remove_file(move_directory.0.join("destination")).expect("unlink published move");
+        fs::write(move_directory.0.join("destination"), b"same").expect("external equal move");
+        let move_restart = Workspace::new(&move_directory.0).expect("move restart");
+        assert!(matches!(
+            move_restart.recover_file_transactions(|| TransactionControl::Continue),
+            Err(PlatformError::RecoveryRequired)
+        ));
+        assert_eq!(
+            fs::read(move_directory.0.join("source")).expect("preserved source"),
+            b"same"
+        );
+        assert_eq!(
+            fs::read(move_directory.0.join("destination")).expect("preserved destination"),
+            b"same"
+        );
+    }
+
+    #[test]
+    fn real_transaction_recovery_covers_every_forward_durable_cutpoint() {
+        let cutpoints = [
+            CrashPoint::PreparingCreated,
+            CrashPoint::ActionPrepared(0),
+            CrashPoint::ActionPrepared(1),
+            CrashPoint::ActionPrepared(2),
+            CrashPoint::ActionPrepared(3),
+            CrashPoint::ActionPrepared(4),
+            CrashPoint::ManifestPrepared,
+            CrashPoint::JournalPublished,
+            CrashPoint::CreateCopyLinked(0),
+            CrashPoint::CreateCopyParentSynced(0),
+            CrashPoint::CreateCopyStageRemoved(0),
+            CrashPoint::CreateCopyStageSynced(0),
+            CrashPoint::CreateCopyLinked(1),
+            CrashPoint::CreateCopyParentSynced(1),
+            CrashPoint::CreateCopyStageRemoved(1),
+            CrashPoint::CreateCopyStageSynced(1),
+            CrashPoint::MoveLinked(2),
+            CrashPoint::MoveDestinationSynced(2),
+            CrashPoint::MoveSourceRemoved(2),
+            CrashPoint::MoveSourceSynced(2),
+            CrashPoint::RemoveRenamed(3),
+            CrashPoint::RemoveSourceSynced(3),
+            CrashPoint::RemoveJournalSynced(3),
+            CrashPoint::ReplaceSwapped(4),
+            CrashPoint::ReplaceParentSynced(4),
+            CrashPoint::ReplaceStageRemoved(4),
+            CrashPoint::ReplaceStageSynced(4),
+            CrashPoint::CommitTempWritten,
+        ];
+        for point in cutpoints {
+            assert_crash_recovers(point, false);
+        }
+        for point in [CrashPoint::CommitMarkerRenamed, CrashPoint::CommitSynced] {
+            assert_crash_recovers(point, true);
+        }
+    }
+
+    #[test]
+    fn recovery_is_reentrant_at_every_rollback_mutation_boundary() {
+        for point in [
+            CrashPoint::RollbackReplaceRestored(4),
+            CrashPoint::RollbackActionCompleted(4),
+            CrashPoint::RollbackRemoveRestored(3),
+            CrashPoint::RollbackActionCompleted(3),
+            CrashPoint::RollbackMoveSourceLinked(2),
+            CrashPoint::RollbackMoveDestinationRemoved(2),
+            CrashPoint::RollbackActionCompleted(2),
+            CrashPoint::RollbackCreateCopyDestinationRemoved(1),
+            CrashPoint::RollbackActionCompleted(1),
+            CrashPoint::RollbackCreateCopyDestinationRemoved(0),
+            CrashPoint::RollbackActionCompleted(0),
+            CrashPoint::RecoveryJournalRemoved,
+        ] {
+            assert_recovery_crash_reenters(point);
+        }
     }
 
     #[test]
@@ -2132,6 +2446,144 @@ mod tests {
             ),
             Err(PlatformError::ReservedPath)
         ));
+    }
+
+    fn assert_crash_recovers(point: CrashPoint, committed: bool) {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("copy-source"), b"copy").expect("copy source");
+        fs::write(directory.0.join("move-source"), b"move").expect("move source");
+        fs::write(directory.0.join("remove-source"), b"remove").expect("remove source");
+        fs::write(directory.0.join("replace-source"), b"before").expect("replace source");
+        let workspace = Workspace::new(&directory.0).expect("workspace");
+        arm_crash(point);
+        let crashed = catch_unwind(AssertUnwindSafe(|| {
+            workspace.file_transaction(crash_actions(), limits(), || TransactionControl::Continue)
+        }));
+        assert!(crashed.is_err(), "cutpoint was not reached: {point:?}");
+        drop(workspace);
+
+        let restarted = Workspace::new(&directory.0).expect("restart workspace");
+        assert!(
+            restarted
+                .recover_file_transactions(|| TransactionControl::Continue)
+                .expect("recover transaction"),
+            "recovery did no work after {point:?}"
+        );
+        assert_workspace_state(&directory.0, committed, point);
+        assert!(
+            !directory.0.join(".ash").join(PREPARING_DIRECTORY).exists(),
+            "preparing journal remains after {point:?}"
+        );
+        assert!(
+            !directory
+                .0
+                .join(".ash")
+                .join(TRANSACTION_DIRECTORY)
+                .exists(),
+            "published journal remains after {point:?}"
+        );
+    }
+
+    fn assert_recovery_crash_reenters(recovery_point: CrashPoint) {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("copy-source"), b"copy").expect("copy source");
+        fs::write(directory.0.join("move-source"), b"move").expect("move source");
+        fs::write(directory.0.join("remove-source"), b"remove").expect("remove source");
+        fs::write(directory.0.join("replace-source"), b"before").expect("replace source");
+
+        let workspace = Workspace::new(&directory.0).expect("workspace");
+        arm_crash(CrashPoint::CommitTempWritten);
+        let forward_crash = catch_unwind(AssertUnwindSafe(|| {
+            workspace.file_transaction(crash_actions(), limits(), || TransactionControl::Continue)
+        }));
+        assert!(forward_crash.is_err(), "forward crash was not reached");
+        drop(workspace);
+
+        let first_restart = Workspace::new(&directory.0).expect("first restart");
+        arm_crash(recovery_point);
+        let recovery_crash = catch_unwind(AssertUnwindSafe(|| {
+            first_restart.recover_file_transactions(|| TransactionControl::Continue)
+        }));
+        assert!(
+            recovery_crash.is_err(),
+            "recovery cutpoint was not reached: {recovery_point:?}"
+        );
+        drop(first_restart);
+
+        let second_restart = Workspace::new(&directory.0).expect("second restart");
+        let recovered = second_restart
+            .recover_file_transactions(|| TransactionControl::Continue)
+            .expect("re-enter recovery");
+        assert_eq!(
+            recovered,
+            recovery_point != CrashPoint::RecoveryJournalRemoved,
+            "unexpected recovery work after {recovery_point:?}"
+        );
+        assert_workspace_state(&directory.0, false, recovery_point);
+        assert!(
+            !directory
+                .0
+                .join(".ash")
+                .join(TRANSACTION_DIRECTORY)
+                .exists(),
+            "journal remains after re-entering {recovery_point:?}"
+        );
+    }
+
+    fn crash_actions() -> Vec<FileAction> {
+        vec![
+            FileAction::create("created", b"created".to_vec()),
+            FileAction::copy("copy-source", "copied", *blake3::hash(b"copy").as_bytes()),
+            FileAction::move_file("move-source", "moved", *blake3::hash(b"move").as_bytes()),
+            FileAction::remove("remove-source", *blake3::hash(b"remove").as_bytes()),
+            FileAction::replace(
+                "replace-source",
+                *blake3::hash(b"before").as_bytes(),
+                b"after".to_vec(),
+            ),
+        ]
+    }
+
+    fn assert_workspace_state(root: &std::path::Path, committed: bool, point: CrashPoint) {
+        assert_eq!(
+            root.join("created").exists(),
+            committed,
+            "created state after {point:?}"
+        );
+        assert_eq!(
+            root.join("copied").exists(),
+            committed,
+            "copy destination after {point:?}"
+        );
+        assert_eq!(
+            fs::read(root.join("copy-source")).expect("copy source"),
+            b"copy",
+            "copy source after {point:?}"
+        );
+        assert_eq!(
+            root.join("move-source").exists(),
+            !committed,
+            "move source after {point:?}"
+        );
+        assert_eq!(
+            root.join("moved").exists(),
+            committed,
+            "move destination after {point:?}"
+        );
+        assert_eq!(
+            root.join("remove-source").exists(),
+            !committed,
+            "removed source after {point:?}"
+        );
+        assert_eq!(
+            fs::read(root.join("replace-source")).expect("replace source"),
+            if committed {
+                b"after".as_slice()
+            } else {
+                b"before".as_slice()
+            },
+            "replace state after {point:?}"
+        );
     }
 
     fn install_visible_create(
