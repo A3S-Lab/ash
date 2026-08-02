@@ -23,21 +23,25 @@ regression ceiling is 65%.
 ## Multicore determinism
 
 ```bash
+cargo build -p a3s-ash --release --locked
 cargo run -p a3s-ash-bench --release --locked -- --runtime
 ```
 
-The runtime harness creates one deterministic 256-file, 8 MiB workspace and
-executes the public literal-search and BLAKE3 snapshot paths at 1, 2, 4, 8, and
-host-available worker counts. Canonical ASON must remain byte-identical before
-the report can print p50/p95/p99, throughput, speedup, and parallel efficiency.
-Timing is host-local evidence, not a portable hardware claim.
+Schema 6 measures eight real paths: literal search, BLAKE3 snapshot, disk
+spill/fetch, fresh `ash run` startup, empty child spawn, dual-pipe pressure,
+process-tree cancellation, and warm framed RPC dispatch. Matrix paths run at 1,
+2, 4, 8, and host-available worker counts. Each cold observation starts and
+reaps the real same-profile binary. Warm dispatch keeps one production RPC
+session alive and excludes only its handshake. A changed canonical result fails
+the report. Cold startup has no scaling curve, so its speedup and parallel
+efficiency are `null`. Timing remains host-local.
 
 ## Current automation
 
 - Rust unit and integration suites across every workspace crate.
 - `cargo check` and tests on Linux, macOS, and Windows.
 - Real release builds exercised by all three platform installers.
-- Real-operation search and snapshot scaling with exact-output validation.
+- Eight real runtime paths with exact-output validation and bounded process/service cleanup.
 - Fuzz targets for ASON, bounded ASH/1 frames, typed requests, and update metadata.
 - File-transaction crash cutpoints, update activation/recovery, and cancellation race tests.
 - A locked third-party license inventory.

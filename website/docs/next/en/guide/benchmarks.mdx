@@ -28,23 +28,25 @@ the wrapper bytes and 83%/82% of its tokens.
 ## Multicore determinism
 
 ```bash
+cargo build -p a3s-ash --release --locked
 cargo run -p a3s-ash-bench --release --locked -- --runtime
 ```
 
-Schema 4 runs five real paths at 1, 2, 4, 8, and host-available worker counts:
-literal search, BLAKE3 snapshot, disk spill/fetch, dual-pipe pressure, and
-process-tree cancellation. The pressure fixture writes 8 MiB to stdout and
-stderr simultaneously. The cancellation fixture spawns a pipe-inheriting
-descendant. Digests and timing print only after retained bytes match and
-cancellation waits for an empty process group or Job Object, pipe EOF, and
-request unregistration. Timing remains host-local.
+Schema 6 measures eight real paths: literal search, BLAKE3 snapshot, disk
+spill/fetch, fresh `ash run` startup, empty child spawn, dual-pipe pressure,
+process-tree cancellation, and warm framed RPC dispatch. Matrix paths run at 1,
+2, 4, 8, and host-available worker counts. Each cold observation starts and
+reaps the real same-profile binary. Warm dispatch keeps one production RPC
+session alive and excludes only its handshake. A changed canonical result fails
+the report. Cold startup has no scaling curve, so its speedup and parallel
+efficiency are `null`. Timing remains host-local.
 
 ## Current automation
 
 - Rust unit and integration suites across every workspace crate.
 - `cargo check` and tests on Linux, macOS, and Windows.
 - Real release builds exercised by all three platform installers.
-- Five real runtime paths, including dual-pipe disk capture and cancellation to tree empty.
+- Eight real runtime paths, including fresh CLI startup, warm RPC dispatch, direct child spawn, dual-pipe disk capture, and cancellation to tree empty.
 - Fuzz targets for ASON, bounded ASH/1 frames, typed requests, and update metadata.
 - File-transaction crash cutpoints, update activation/recovery, and cancellation race tests.
 - A locked third-party license inventory.

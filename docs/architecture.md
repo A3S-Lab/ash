@@ -4,9 +4,9 @@ Status: architecture baseline plus implementation checkpoint
 
 This document defines the intended architecture of `ash` and is normative for component ownership and runtime boundaries. Statements explicitly labeled as the current source checkpoint describe implemented behavior; the remaining contracts are design targets rather than release claims.
 
-The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution with quota-bound disk-backed lossless retained output and conservative crash-orphan cleanup, bounded read/list/search, durable compare-and-swap patching and file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, real-operation search/snapshot/spill-fetch scaling measurements, scheduled ASON/frame/update-metadata fuzz targets, deterministic six-target packaging, and a fail-closed native release workflow. Release-key and platform-signing credential provisioning, the first published release, sustained fuzz evidence, agent-task benchmarks, and published hardware-labelled runtime measurements remain open.
+The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution with quota-bound disk-backed lossless retained output and conservative crash-orphan cleanup, bounded read/list/search, durable compare-and-swap patching and file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, an eight-path host-local runtime harness, scheduled ASON/frame/update-metadata fuzz targets, deterministic six-target packaging, and a fail-closed native release workflow. Release-key and platform-signing credential provisioning, the first published release, sustained fuzz evidence, agent-task benchmarks, and published hardware-labelled runtime measurements remain open.
 
-The runtime evidence now also drives simultaneous disk-backed stdout/stderr pressure and repeated cancellation of a parent plus pipe-inheriting descendant across the complete worker matrix. It records cancellation only after the owned native process group or Job Object has emptied and the final response is canonicalized; it is not merely a signal-delivery timer.
+The runtime evidence covers search, snapshot, disk spill/fetch, fresh `ash run` startup, empty child spawn, simultaneous disk-backed stdout/stderr pressure, repeated cancellation of a parent plus pipe-inheriting descendant, and warm framed RPC dispatch. Cold startup launches and reaps a real shell process for every observation. Warm dispatch uses the same embeddable gateway as `ash rpc`, excludes its handshake, and keeps one session alive per worker configuration. Cancellation is recorded only after the owned native process group or Job Object has emptied and the final response is canonicalized; it is not merely a signal-delivery timer.
 
 ## 1. Product definition
 
@@ -187,11 +187,12 @@ Owns the `ash` executable:
 
 - persistent `rpc` mode;
 - one-shot operation invocation;
+- an embeddable framed RPC service over caller-owned async streams;
 - installer receipt discovery;
 - self-update, rollback, and uninstall coordination;
 - machine-only bootstrap diagnostics.
 
-The CLI translates arguments into protocol requests and renders protocol results. It does not duplicate operation logic.
+The crate library owns argument routing, build identity, exit mapping, and the production RPC gateway. The binary target is only the Tokio process wrapper. Benchmarks and trusted embedders call the same gateway over caller-owned pipes, sockets, or in-memory transports; there is no benchmark-only dispatcher. The CLI translates arguments into protocol requests and renders protocol results. It does not duplicate operation logic.
 
 ### 4.7 `ash-update`
 
@@ -514,7 +515,7 @@ ash/
 `-- .github/workflows/
 ```
 
-The root is a Cargo workspace rather than an executable package. Public types cross crate boundaries only when ownership requires it. The CLI binary is assembled in `ash-cli` and published as the `ash` executable.
+The root is a Cargo workspace rather than an executable package. Public types cross crate boundaries only when ownership requires it. The CLI library and thin binary target are assembled in `ash-cli`; the binary is published as the `ash` executable.
 
 The repository remains independently buildable and releasable at `A3S-Lab/ash`. The A3S umbrella repository registers the same Git history as the `crates/ash` Git submodule; it does not copy the sources or absorb this workspace into its root package. A3S integration pins a tested ash commit, while standalone users receive the same release artifacts.
 
