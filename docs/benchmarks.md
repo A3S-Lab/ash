@@ -1,6 +1,6 @@
 # Token-efficiency benchmark contract
 
-Status: deterministic format corpus and two-tokenizer regression evidence implemented; agent-task and runtime reports remain open
+Status: deterministic format corpus, two-tokenizer representation evidence, and retained-formula regression gate implemented; agent-task and published runtime reports remain open
 
 Token reduction is the primary performance objective of `ash`. This document defines how it is measured without trading away task correctness or hiding protocol overhead.
 
@@ -204,6 +204,12 @@ Measured values:
 - model request-generation accuracy.
 
 Canonical ASON rules may change before ASH/1 freezes if a shorter representation increases retries or reconstruction errors.
+
+The runner also gates all six retained-result formulas against the earlier sparse-union shape. The formula corpus contains byte slice, line slice, search, release, projection, and materialization requests; its aggregate UTF-8 bytes and token counts must each be strictly lower under both pinned tokenizers. Reproduce that focused gate with:
+
+```sh
+cargo test -p a3s-ash-bench reference_formulas_beat_the_sparse_union
+```
 
 ## 9. Runtime benchmarks
 

@@ -1,0 +1,9 @@
+t:3
+i:45
+s:0
+p[1]{i,v}:
+1,artifacts/out.bin
+d{p,s,z,h}:
+1,0,3,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+z:8
+r:@8

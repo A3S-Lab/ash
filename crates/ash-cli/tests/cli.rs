@@ -10,7 +10,7 @@ use ash_protocol::ason::decode;
 use ash_protocol::handshake::{HandshakePreferences, HandshakeRequest, HandshakeResponse};
 use ash_protocol::request::{
     Arguments, BatchArgs, BatchNode, Budget, CancelArgs, ExecArgs, FsAction, FsActionKind, FsArgs,
-    InputSource, PatchArgs, PatchContent, PatchEdit, ReadArgs, ReadMode, RefArgs, RefMode, Request,
+    InputSource, PatchArgs, PatchContent, PatchEdit, ReadArgs, ReadMode, RefArgs, Request,
     SearchArgs, SnapshotArgs, SnapshotMode,
 };
 use ash_protocol::{Capability, Operation};
@@ -989,15 +989,7 @@ fn rpc_retrieves_and_releases_retained_evidence_across_frames() {
     let inspect = Request::new(
         72,
         Arguments::Ref(
-            RefArgs::new(
-                reference,
-                RefMode::Search,
-                0,
-                1024 * 1024,
-                Some("needle-19".to_owned()),
-                0,
-            )
-            .expect("reference search"),
+            RefArgs::search(reference, 0, 1024 * 1024, "needle-19", 0).expect("reference search"),
         ),
         Budget::new(256, 8, 30_000).expect("budget"),
     )
@@ -1012,7 +1004,7 @@ fn rpc_retrieves_and_releases_retained_evidence_across_frames() {
 
     let release = Request::new(
         73,
-        Arguments::Ref(RefArgs::new(reference, RefMode::Release, 0, 0, None, 0).expect("release")),
+        Arguments::Ref(RefArgs::release(reference).expect("release")),
         Budget::new(64, 1, 30_000).expect("budget"),
     )
     .expect("request")

@@ -17,7 +17,6 @@ const SEARCH_COLUMNS: &[&str] = &["q", "p", "f"];
 const PATCH_COLUMNS: &[&str] = &["p", "h", "i", "o", "n", "v", "f"];
 const FS_COLUMNS: &[&str] = &["i", "k", "p", "q", "h", "v"];
 const SNAPSHOT_COLUMNS: &[&str] = &["p", "d", "m", "r", "f"];
-const REF_COLUMNS: &[&str] = &["r", "m", "o", "n", "q", "f"];
 const CANCEL_COLUMNS: &[&str] = &["i"];
 const BATCH_COLUMNS: &[&str] = &["i", "d", "o", "a"];
 
@@ -298,7 +297,14 @@ impl Arguments {
             Self::Batch(arguments) => arguments.nodes.iter().fold(0, |mask, node| {
                 mask | node.arguments.required_capabilities()
             }),
-            Self::Ref(_) => Capability::RetainedResult.mask(),
+            Self::Ref(arguments) => {
+                Capability::RetainedResult.mask()
+                    | if matches!(arguments.formula(), RefFormula::Materialize { .. }) {
+                        Capability::WorkspaceWrite.mask()
+                    } else {
+                        0
+                    }
+            }
             // Cancellation must remain available even when the target is
             // waiting for a capability-gated program permit.
             Self::Cancel(_) => 0,
@@ -1524,81 +1530,211 @@ impl SnapshotArgs {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RefMode {
-    Bytes,
-    Lines,
-    Search,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RefFormula {
+    Bytes {
+        offset: u64,
+        length: u64,
+    },
+    Lines {
+        offset: u64,
+        length: u64,
+    },
+    Search {
+        offset: u64,
+        length: u64,
+        query: String,
+        flags: u32,
+    },
     Release,
+    Project {
+        table: String,
+        offset: u64,
+        length: u64,
+        columns: Vec<String>,
+    },
+    Materialize {
+        path: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RefArgs {
     reference: u64,
-    mode: RefMode,
-    offset: u64,
-    length: u64,
-    query: Option<String>,
-    flags: u32,
+    formula: RefFormula,
 }
 
 impl RefArgs {
-    pub fn new(
-        reference: u64,
-        mode: RefMode,
-        offset: u64,
-        length: u64,
-        query: Option<String>,
-        flags: u32,
-    ) -> Result<Self, RequestError> {
-        let arguments = Self {
-            reference,
-            mode,
-            offset,
-            length,
-            query,
-            flags,
-        };
+    fn new(reference: u64, formula: RefFormula) -> Result<Self, RequestError> {
+        let arguments = Self { reference, formula };
         arguments.validate()?;
         Ok(arguments)
     }
 
-    fn decode(record: &Record) -> Result<Self, RequestError> {
-        expect_columns(record, REF_COLUMNS)?;
-        let values = record.values();
-        let mode = match unsigned_cell(&values[1], "m")? {
-            0 => RefMode::Bytes,
-            1 => RefMode::Lines,
-            2 => RefMode::Search,
-            3 => RefMode::Release,
-            _ => return Err(RequestError::UnexpectedValue("m")),
-        };
+    pub fn bytes(reference: u64, offset: u64, length: u64) -> Result<Self, RequestError> {
+        Self::new(reference, RefFormula::Bytes { offset, length })
+    }
+
+    pub fn lines(reference: u64, offset: u64, length: u64) -> Result<Self, RequestError> {
+        Self::new(reference, RefFormula::Lines { offset, length })
+    }
+
+    pub fn search(
+        reference: u64,
+        offset: u64,
+        length: u64,
+        query: impl Into<String>,
+        flags: u32,
+    ) -> Result<Self, RequestError> {
         Self::new(
-            reference_cell(&values[0], "r")?,
-            mode,
-            unsigned_cell(&values[2], "o")?,
-            unsigned_cell(&values[3], "n")?,
-            optional_text_cell(&values[4], "q")?,
-            narrow_u32(unsigned_cell(&values[5], "f")?, "f")?,
+            reference,
+            RefFormula::Search {
+                offset,
+                length,
+                query: query.into(),
+                flags,
+            },
         )
     }
 
+    pub fn release(reference: u64) -> Result<Self, RequestError> {
+        Self::new(reference, RefFormula::Release)
+    }
+
+    pub fn project(
+        reference: u64,
+        table: impl Into<String>,
+        offset: u64,
+        length: u64,
+        columns: Vec<String>,
+    ) -> Result<Self, RequestError> {
+        Self::new(
+            reference,
+            RefFormula::Project {
+                table: table.into(),
+                offset,
+                length,
+                columns,
+            },
+        )
+    }
+
+    pub fn materialize(reference: u64, path: impl Into<String>) -> Result<Self, RequestError> {
+        Self::new(reference, RefFormula::Materialize { path: path.into() })
+    }
+
+    fn decode(record: &Record) -> Result<Self, RequestError> {
+        if record.columns().len() != 1 || record.values().len() != 1 {
+            return Err(RequestError::Columns);
+        }
+        let Cell::Vector(values) = &record.values()[0] else {
+            return Err(RequestError::ExpectedVector("a"));
+        };
+        let reference =
+            reference_formula_atom(values.first().ok_or(RequestError::UnexpectedValue("a"))?)?;
+        let formula = match record.columns()[0].as_str() {
+            "b" => {
+                expect_formula_width(values, 3)?;
+                RefFormula::Bytes {
+                    offset: unsigned_atom(&values[1], "o")?,
+                    length: unsigned_atom(&values[2], "n")?,
+                }
+            }
+            "l" => {
+                expect_formula_width(values, 3)?;
+                RefFormula::Lines {
+                    offset: unsigned_atom(&values[1], "o")?,
+                    length: unsigned_atom(&values[2], "n")?,
+                }
+            }
+            "g" => {
+                expect_formula_width(values, 5)?;
+                RefFormula::Search {
+                    offset: unsigned_atom(&values[1], "o")?,
+                    length: unsigned_atom(&values[2], "n")?,
+                    query: text_formula_atom(&values[3], "q")?.to_owned(),
+                    flags: narrow_u32(unsigned_atom(&values[4], "f")?, "f")?,
+                }
+            }
+            "d" => {
+                expect_formula_width(values, 1)?;
+                RefFormula::Release
+            }
+            "p" => {
+                if values.len() < 5 {
+                    return Err(RequestError::UnexpectedValue("a"));
+                }
+                RefFormula::Project {
+                    table: text_formula_atom(&values[1], "t")?.to_owned(),
+                    offset: unsigned_atom(&values[2], "o")?,
+                    length: unsigned_atom(&values[3], "n")?,
+                    columns: values[4..]
+                        .iter()
+                        .map(|value| text_formula_atom(value, "c").map(str::to_owned))
+                        .collect::<Result<_, _>>()?,
+                }
+            }
+            "w" => {
+                expect_formula_width(values, 2)?;
+                RefFormula::Materialize {
+                    path: text_formula_atom(&values[1], "p")?.to_owned(),
+                }
+            }
+            _ => return Err(RequestError::UnexpectedValue("a")),
+        };
+        Self::new(reference, formula)
+    }
+
     fn encode(&self) -> Result<Value, BuildError> {
+        let (operator, mut values) = match &self.formula {
+            RefFormula::Bytes { offset, length } => (
+                "b",
+                vec![
+                    Atom::text(offset.to_string()),
+                    Atom::text(length.to_string()),
+                ],
+            ),
+            RefFormula::Lines { offset, length } => (
+                "l",
+                vec![
+                    Atom::text(offset.to_string()),
+                    Atom::text(length.to_string()),
+                ],
+            ),
+            RefFormula::Search {
+                offset,
+                length,
+                query,
+                flags,
+            } => (
+                "g",
+                vec![
+                    Atom::text(offset.to_string()),
+                    Atom::text(length.to_string()),
+                    Atom::text(query),
+                    Atom::text(flags.to_string()),
+                ],
+            ),
+            RefFormula::Release => ("d", vec![]),
+            RefFormula::Project {
+                table,
+                offset,
+                length,
+                columns,
+            } => {
+                let mut values = Vec::with_capacity(columns.len() + 3);
+                values.push(Atom::text(table));
+                values.push(Atom::text(offset.to_string()));
+                values.push(Atom::text(length.to_string()));
+                values.extend(columns.iter().map(Atom::text));
+                ("p", values)
+            }
+            RefFormula::Materialize { path } => ("w", vec![Atom::text(path)]),
+        };
+        values.insert(0, Atom::reference(self.reference));
         Ok(Value::Record(Record::new(
-            keys(REF_COLUMNS)?,
-            vec![
-                Cell::Atom(Atom::reference(self.reference)),
-                unsigned_value(match self.mode {
-                    RefMode::Bytes => 0,
-                    RefMode::Lines => 1,
-                    RefMode::Search => 2,
-                    RefMode::Release => 3,
-                }),
-                unsigned_value(self.offset),
-                unsigned_value(self.length),
-                self.query.as_deref().map_or_else(null_value, text_value),
-                unsigned_value(u64::from(self.flags)),
-            ],
+            vec![Key::new(operator)?],
+            vec![Cell::Vector(values)],
         )?))
     }
 
@@ -1606,43 +1742,56 @@ impl RefArgs {
         if self.reference == 0 {
             return Err(RequestError::InvalidUnsigned("r"));
         }
-        match self.mode {
-            RefMode::Bytes => {
-                if self.length == 0 || self.length > MAX_REF_BYTES {
+        match &self.formula {
+            RefFormula::Bytes { length, .. } => {
+                if *length == 0 || *length > MAX_REF_BYTES {
                     return Err(RequestError::InvalidLimit("n"));
                 }
-                if self.query.is_some() {
-                    return Err(RequestError::UnexpectedValue("q"));
-                }
-                validate_flags(self.flags, 0)?;
             }
-            RefMode::Lines => {
-                if self.offset == 0 {
+            RefFormula::Lines { offset, length } => {
+                if *offset == 0 {
                     return Err(RequestError::InvalidLimit("o"));
                 }
-                if self.length == 0 || self.length > MAX_REF_LINES {
+                if *length == 0 || *length > MAX_REF_LINES {
                     return Err(RequestError::InvalidLimit("n"));
                 }
-                if self.query.is_some() {
-                    return Err(RequestError::UnexpectedValue("q"));
-                }
-                validate_flags(self.flags, 0)?;
             }
-            RefMode::Search => {
-                if self.length == 0 || self.length > MAX_REF_BYTES {
+            RefFormula::Search {
+                length,
+                query,
+                flags,
+                ..
+            } => {
+                if *length == 0 || *length > MAX_REF_BYTES {
                     return Err(RequestError::InvalidLimit("n"));
                 }
-                let query = self
-                    .query
-                    .as_deref()
-                    .ok_or(RequestError::InvalidText("q"))?;
                 validate_text(query, "q", 1024 * 1024)?;
-                validate_flags(self.flags, REF_SEARCH_FLAGS)?;
+                validate_flags(*flags, REF_SEARCH_FLAGS)?;
             }
-            RefMode::Release => {
-                if self.offset != 0 || self.length != 0 || self.query.is_some() || self.flags != 0 {
-                    return Err(RequestError::UnexpectedValue("m"));
+            RefFormula::Release => {}
+            RefFormula::Project {
+                table,
+                length,
+                columns,
+                ..
+            } => {
+                if *length == 0 || *length > MAX_REF_LINES {
+                    return Err(RequestError::InvalidLimit("n"));
                 }
+                validate_text(table, "t", 128)?;
+                if Key::new(table).is_err() || columns.is_empty() || columns.len() > 128 {
+                    return Err(RequestError::InvalidText("c"));
+                }
+                let mut unique = HashSet::new();
+                for column in columns {
+                    validate_text(column, "c", 128)?;
+                    if Key::new(column).is_err() || !unique.insert(column.as_str()) {
+                        return Err(RequestError::InvalidText("c"));
+                    }
+                }
+            }
+            RefFormula::Materialize { path } => {
+                validate_text(path, "p", 4096)?;
             }
         }
         Ok(())
@@ -1654,28 +1803,30 @@ impl RefArgs {
     }
 
     #[must_use]
-    pub const fn mode(&self) -> RefMode {
-        self.mode
+    pub const fn formula(&self) -> &RefFormula {
+        &self.formula
     }
+}
 
-    #[must_use]
-    pub const fn offset(&self) -> u64 {
-        self.offset
+fn expect_formula_width(values: &[Atom], expected: usize) -> Result<(), RequestError> {
+    if values.len() == expected {
+        Ok(())
+    } else {
+        Err(RequestError::UnexpectedValue("a"))
     }
+}
 
-    #[must_use]
-    pub const fn length(&self) -> u64 {
-        self.length
+fn reference_formula_atom(value: &Atom) -> Result<u64, RequestError> {
+    match value {
+        Atom::Reference(reference) if *reference != 0 => Ok(*reference),
+        Atom::Null | Atom::Reference(_) | Atom::Text(_) => Err(RequestError::InvalidUnsigned("r")),
     }
+}
 
-    #[must_use]
-    pub fn query(&self) -> Option<&str> {
-        self.query.as_deref()
-    }
-
-    #[must_use]
-    pub const fn flags(&self) -> u32 {
-        self.flags
+fn text_formula_atom<'a>(value: &'a Atom, field: &'static str) -> Result<&'a str, RequestError> {
+    match value {
+        Atom::Text(value) => Ok(value),
+        Atom::Null | Atom::Reference(_) => Err(RequestError::InvalidText(field)),
     }
 }
 
@@ -1798,13 +1949,6 @@ fn unsigned_cell(cell: &Cell, field: &'static str) -> Result<u64, RequestError> 
     match cell {
         Cell::Atom(atom) => unsigned_atom(atom, field),
         Cell::Vector(_) => Err(RequestError::ExpectedScalar(field)),
-    }
-}
-
-fn reference_cell(cell: &Cell, field: &'static str) -> Result<u64, RequestError> {
-    match cell {
-        Cell::Atom(Atom::Reference(reference)) if *reference != 0 => Ok(*reference),
-        Cell::Atom(_) | Cell::Vector(_) => Err(RequestError::InvalidUnsigned(field)),
     }
 }
 

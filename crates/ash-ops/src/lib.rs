@@ -116,7 +116,9 @@ impl PortableOperations {
             Arguments::Snapshot(arguments) => {
                 snapshot::execute(&self.workspace, request, arguments, program).await
             }
-            Arguments::Ref(arguments) => reference::execute(request, arguments, program).await,
+            Arguments::Ref(arguments) => {
+                reference::execute(&self.workspace, request, arguments, program).await
+            }
             Arguments::Batch(_) | Arguments::Cancel(_) => Err(OperationError::Unsupported),
         }
     }

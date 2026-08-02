@@ -4,7 +4,7 @@ Status: architecture baseline plus implementation checkpoint
 
 This document defines the intended architecture of `ash` and is normative for component ownership and runtime boundaries. Statements explicitly labeled as the current source checkpoint describe implemented behavior; the remaining contracts are design targets rather than release claims.
 
-The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution, bounded read/list/search, compare-and-swap patching with live rollback, durable file-only filesystem transactions with restart recovery, retained-result inspection, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, scheduled parser/update-metadata fuzz targets, deterministic six-target packaging, and a fail-closed native release workflow. Release-key and platform-signing credential provisioning, the first published release, sustained fuzz evidence, agent-task benchmarks, and published runtime measurements remain open.
+The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution, bounded read/list/search, compare-and-swap patching with live rollback, durable file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, scheduled parser/update-metadata fuzz targets, deterministic six-target packaging, and a fail-closed native release workflow. Release-key and platform-signing credential provisioning, the first published release, sustained fuzz evidence, agent-task benchmarks, and published runtime measurements remain open.
 
 ## 1. Product definition
 
@@ -64,6 +64,12 @@ Reduction may omit data from the immediate response, but it must never silently 
 ### 2.7 Parallelize work, not observable order
 
 Independent graph nodes and splittable operations use all available CPU cores when the workload is large enough to repay scheduling cost. I/O readiness and CPU work run on separate executors so repository scans cannot delay pipe draining, cancellation, or RPC progress. Parallel completion order is never protocol order: records pass through a stable merge before reduction and ASON encoding, and concurrent request finals are sequenced by input order.
+
+### 2.8 Express data work as algebra
+
+Machine operations use small typed formulas instead of prose-shaped options or sparse unions. Selection, projection, slicing, release, and materialization have explicit arity and composition rules. For retained data, the semantic forms are `σ(q,R)`, `π_C(R)`, range slicing, `drop(@r)`, and `μ(path,@r)`; ASH/1 maps them to single-byte ASCII operators because those have more stable tokenizer cost than decorative Unicode on the wire.
+
+The formula is the semantic IR, not a string to evaluate dynamically. Rust represents each operator as an enum variant, schema validation proves its operands before dispatch, and canonical ASON is only the compact serialization. No unused mode fields or nullable operands survive into a request.
 
 ## 3. System context
 
@@ -139,7 +145,7 @@ Owns portable operation semantics:
 - `batch` — bounded dependency graphs over heterogeneous leaf operations;
 - `fs` — create, copy, move, and remove mutations;
 - `snapshot` — workspace state and deltas;
-- `ref` — slice, filter, search, and project stored results;
+- `ref` — algebraic slice, search, projection, release, and safe artifact materialization over stored results;
 - `cancel` — explicit cancellation of a program or node.
 - capability policy, approval challenge retention, permit verification, and replay rejection.
 
@@ -331,6 +337,8 @@ The program budget is allocated across nodes by explicit priority and determinis
 If output is reduced or truncated, the response carries a numeric session reference. Follow-up `ref` operations can fetch a slice, search within it, apply another reducer, or materialize it as an artifact. Binary data is never embedded as Base64 in the default LLM response.
 
 Reference readers hold short-lived leases. Early release is atomic and returns a typed conflict while any operation still owns a lease, preventing a concurrent inspection from emitting an alias that has already been retired.
+
+The current request IR is a closed data-formula enum rather than a mode record with optional fields. Structured projection computes `π_C(T[o:o+n])` over a bounded ASON table and then applies the negotiated record and output budgets. Materialization computes `μ(path,@r)` through the durable file transaction backend: it is workspace-confined, refuses overwrite, keeps the reference leased through commit, and requires both retained-result and workspace-write capabilities.
 
 ## 8. Process execution
 

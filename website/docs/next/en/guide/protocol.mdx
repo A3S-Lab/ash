@@ -30,8 +30,19 @@ fields fail before large allocation.
 | `fs`       | File-only create/copy/move/remove transaction                                               |
 | `snapshot` | Workspace manifest and reference-based delta                                                |
 | `batch`    | Acyclic dependency graph, ready-node concurrency, and failed-descendant skipping            |
-| `ref`      | Slice, search, or release retained evidence                                                 |
+| `ref`      | Data formulas over retained evidence, including projection and safe materialization         |
 | `cancel`   | Cancel queued or active requests and descendants                                            |
+
+## Data formulas
+
+Reference work uses one typed prefix operator instead of a numeric mode with unused nullable fields:
+
+```ason
+a{p}:
+[@7,d,0,64,p,l,t]
+```
+
+This is the compact wire form of `π_{p,l,t}(d[0:64])` over `@7`. Operators `b/l/g/d/p/w` mean byte slice, line slice, search, release, table projection, and workspace materialization. Formula arity is exact. Materialization also requires workspace-write capability and follows the journaled no-overwrite transaction path.
 
 ## Concurrency and order
 

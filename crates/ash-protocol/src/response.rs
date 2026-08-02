@@ -28,6 +28,7 @@ const BATCH_COLUMNS: &[&str] = &["i", "o", "s", "c", "r"];
 const REF_SLICE_COLUMNS: &[&str] = &["o", "n", "p", "h", "t", "b"];
 const REF_SEARCH_COLUMNS: &[&str] = &["o", "l", "c", "t"];
 const REF_RELEASE_COLUMNS: &[&str] = &["r", "z"];
+const REF_MATERIALIZE_COLUMNS: &[&str] = &["p", "s", "z", "h"];
 const CANCEL_COLUMNS: &[&str] = &["i", "z"];
 const ERROR_COLUMNS: &[&str] = &["c", "q", "p", "x", "a"];
 
@@ -243,9 +244,12 @@ impl FinalResponse {
                 }
             }
             match data {
-                ResultData::Reference(ReferenceResult::Slice(_) | ReferenceResult::Search(_))
-                    if reference.is_none() =>
-                {
+                ResultData::Reference(
+                    ReferenceResult::Slice(_)
+                    | ReferenceResult::Search(_)
+                    | ReferenceResult::Projection(_)
+                    | ReferenceResult::Materialized(_),
+                ) if reference.is_none() => {
                     return Err(ResponseError::InvalidData);
                 }
                 ResultData::Reference(ReferenceResult::Released(_)) if reference.is_some() => {
@@ -255,6 +259,14 @@ impl FinalResponse {
                     return Err(ResponseError::InvalidData);
                 }
                 _ => {}
+            }
+            if let ResultData::Reference(ReferenceResult::Materialized(result)) = data {
+                if status == Status::Success && result.state != FsState::Committed {
+                    return Err(ResponseError::InvalidData);
+                }
+                if status == Status::Conflict && result.state != FsState::Conflict {
+                    return Err(ResponseError::InvalidData);
+                }
             }
         }
         validate_reference(reference)?;
@@ -538,6 +550,8 @@ pub enum ReferenceResult {
     Slice(ReferenceSlice),
     Search(Vec<ReferenceMatch>),
     Released(ReleasedReference),
+    Projection(Table),
+    Materialized(MaterializedReference),
 }
 
 impl ReferenceResult {
@@ -546,6 +560,8 @@ impl ReferenceResult {
             Self::Slice(result) => result.encode(),
             Self::Search(matches) => encode_reference_search(matches),
             Self::Released(result) => result.encode(),
+            Self::Projection(table) => Ok(Value::Table(table.clone())),
+            Self::Materialized(result) => result.encode(),
         }
     }
 
@@ -569,6 +585,8 @@ impl ReferenceResult {
                     Ok(())
                 }
             }
+            Self::Projection(_) => Ok(()),
+            Self::Materialized(result) => result.validate(),
         }
     }
 }
@@ -645,6 +663,41 @@ impl ReleasedReference {
                 unsigned_cell(1),
             ],
         )?))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaterializedReference {
+    pub path: u64,
+    pub state: FsState,
+    pub size: u64,
+    pub digest: Option<String>,
+}
+
+impl MaterializedReference {
+    fn encode(&self) -> Result<Value, BuildError> {
+        Ok(Value::Record(Record::new(
+            keys(REF_MATERIALIZE_COLUMNS)?,
+            vec![
+                unsigned_cell(self.path),
+                unsigned_cell(u64::from(self.state as u8)),
+                unsigned_cell(self.size),
+                optional_text(self.digest.as_deref()),
+            ],
+        )?))
+    }
+
+    fn validate(&self) -> Result<(), ResponseError> {
+        let identity_valid = if self.state == FsState::Skipped {
+            self.digest.is_none()
+        } else {
+            self.digest.as_deref().is_some_and(valid_digest)
+        };
+        if self.path == 0 || !identity_valid {
+            Err(ResponseError::InvalidData)
+        } else {
+            Ok(())
+        }
     }
 }
 

@@ -12,7 +12,7 @@
 </p>
 
 > [!IMPORTANT]
-> `ash` is pre-release. Source builds now execute typed `exec`, `read`, `list`, `search`, compare-and-swap `patch`, durable file-only `fs` transactions, workspace `snapshot/delta`, and bounded dependency-graph `batch` requests; they also negotiate least-privilege capabilities, enforce session/action-bound one-time approval permits, inspect retained results, cancel active work, and verify, activate, recover, or roll back signed releases. Cross-platform installers and a fail-closed six-target release workflow are implemented; release credentials are not provisioned and no supported signed binary release is published yet.
+> `ash` is pre-release. Source builds now execute typed `exec`, `read`, `list`, `search`, compare-and-swap `patch`, durable file-only `fs` transactions, workspace `snapshot/delta`, and bounded dependency-graph `batch` requests; they also negotiate least-privilege capabilities, enforce session/action-bound one-time approval permits, evaluate retained-result data formulas, cancel active work, and verify, activate, recover, or roll back signed releases. Cross-platform installers and a fail-closed six-target release workflow are implemented; release credentials are not provisioned and no supported signed binary release is published yet.
 
 `ash` is a greenfield shell designed around coding agents rather than terminal users. It turns shell work into typed programs, executes independent work across bounded I/O and CPU planes, and returns only the evidence worth placing in an LLM context.
 
@@ -38,6 +38,15 @@ r:~
 ```
 
 The schema for these short fields is negotiated once. Full output remains available through a bounded session reference; truncation is explicit instead of silently destructive.
+
+Reference work is a typed prefix formula, not a mode plus unused options. This request computes `π_{p,l,t}(d[0:64])` over retained result `@7`:
+
+```ason
+a{p}:
+[@7,d,0,64,p,l,t]
+```
+
+The same algebra uses `b/l/g/d/p/w` for byte slice, line slice, search, release, table projection, and workspace materialization. Each operator carries only its operands. `w` is capability-gated and uses the journaled, no-overwrite file transaction path.
 
 ## Why ash is different
 
@@ -117,7 +126,7 @@ Run one canonical request from the repository root:
 cargo run -p a3s-ash -- run < spec/fixtures/ason/search-request.ason
 ```
 
-The pinned Rust workspace currently verifies typed ASH/1 schemas, canonical framed handshakes, negotiated capability masks, action/session/policy/expiry-bound approval permits, replay rejection, concurrent `exec/read/list/search/patch/fs/snapshot`, acyclic batch graphs, dependency-failure skipping, stable child-response references, retained-result slicing/search/release, chained workspace deltas, preemptive cancellation, atomic budgets, hierarchical permits, workspace-confined paths, direct argv launch with timeout-safe process-tree cleanup, deterministic multi-core preparation, and multi-file rollback. File-only create, copy, move, and remove transactions add digest guards, no-overwrite semantics, a checksummed on-disk journal, cross-process serialization, reverse rollback, and restart recovery. Signed-release tests cover strict Ed25519 verification, sequence rollback/equivocation, the complete six-target manifest, exact archive shape, extraction ceilings, embedded binary identity, transactional activation, health-gated recovery, and reversible rollback. `ash self status|check|update|rollback|recover` uses canonical ASON, and network update input is HTTPS-only and byte-bounded. `ash rpc` executes independent requests concurrently while emitting final frames in stable input order. Offline installer smoke tests cover installation, integrity rejection, idempotent and forced reinstall, lock ownership, PATH ownership, rollback, and uninstall. This is still a development checkpoint, not a supported installation path.
+The pinned Rust workspace currently verifies typed ASH/1 schemas, canonical framed handshakes, negotiated capability masks, action/session/policy/expiry-bound approval permits, replay rejection, concurrent `exec/read/list/search/patch/fs/snapshot`, acyclic batch graphs, dependency-failure skipping, stable child-response references, retained-result byte/line slicing, search, table projection, safe materialization, and release, chained workspace deltas, preemptive cancellation, atomic budgets, hierarchical permits, workspace-confined paths, direct argv launch with timeout-safe process-tree cleanup, deterministic multi-core preparation, and multi-file rollback. File-only create, copy, move, and remove transactions add digest guards, no-overwrite semantics, a checksummed on-disk journal, cross-process serialization, reverse rollback, and restart recovery. Signed-release tests cover strict Ed25519 verification, sequence rollback/equivocation, the complete six-target manifest, exact archive shape, extraction ceilings, embedded binary identity, transactional activation, health-gated recovery, and reversible rollback. `ash self status|check|update|rollback|recover` uses canonical ASON, and network update input is HTTPS-only and byte-bounded. `ash rpc` executes independent requests concurrently while emitting final frames in stable input order. Offline installer smoke tests cover installation, integrity rejection, idempotent and forced reinstall, lock ownership, PATH ownership, rollback, and uninstall. This is still a development checkpoint, not a supported installation path.
 
 ## Release contract
 
@@ -125,7 +134,7 @@ The first usable release must ship as one native `ash` binary and include:
 
 - persistent stdio RPC and one-shot invocation;
 - direct process execution with cancellation, timeouts, and process-tree cleanup;
-- bounded read, list, search, patch, filesystem mutation, snapshot, and result-reference operations;
+- bounded read, list, search, patch, filesystem mutation, snapshot, and algebraic result-reference operations;
 - deterministic multi-core batch and dependency-graph execution with compact, retrievable node evidence;
 - Linux and macOS `install.sh`, Windows `install.ps1`, verified release artifacts, self-update, and rollback;
 - native builds for x86-64 and ARM64 on Linux, macOS, and Windows.
@@ -144,8 +153,8 @@ It is a local execution boundary for coding agents. Workspace capabilities, reso
 
 ## Delivery order
 
-1. Stabilize the implemented vertical slice and its ASH/1 fixtures across Linux, macOS, and Windows.
-2. Integrate the implemented capability-scoped permit API with trusted harness policy providers and freeze compatibility fixtures.
+1. Stabilize the implemented vertical slice and its formula fixtures across Linux, macOS, and Windows.
+2. Integrate the implemented capability-scoped permit API with trusted harness policy providers and freeze the protocol only when the first supported release is cut.
 3. Harden parser, recovery, and scheduling paths with fuzzing and fault injection.
 4. Provision protected release credentials and execute the implemented six-target signing, notarization, attestation, clean-host upgrade/rollback, and installer gates.
 5. Gate release promotion on correctness, token cost, latency, cancellation, installer, upgrade, and benchmark evidence, and keep every proven integration revision pinned in the A3S submodule.

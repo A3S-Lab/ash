@@ -522,7 +522,7 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::build_report;
+    use super::{build_report, measure};
 
     #[test]
     fn corpus_round_trips_and_passes_the_token_gate() {
@@ -531,5 +531,40 @@ mod tests {
         assert!(report.gates.passed);
         assert_eq!(report.datasets.len(), 4);
         assert!(report.aggregate.ason.bytes < report.aggregate.json_records.bytes);
+    }
+
+    #[test]
+    fn reference_formulas_beat_the_sparse_union_in_both_pinned_tokenizers() {
+        let sparse = [
+            "a{r,m,o,n,q,f}:\n@7,0,0,4096,~,0\n",
+            "a{r,m,o,n,q,f}:\n@7,1,2,32,~,0\n",
+            "a{r,m,o,n,q,f}:\n@7,2,0,1048576,TODO,0\n",
+            "a{r,m,o,n,q,f}:\n@7,3,0,0,~,0\n",
+            "a{r,m,o,n,q,f}:\n@7,4,0,64,\"d:p,l,t\",0\n",
+            "a{r,m,o,n,q,f}:\n@8,5,0,0,artifacts/out.bin,0\n",
+        ]
+        .concat();
+        let formulas = [
+            "a{b}:\n[@7,0,4096]\n",
+            "a{l}:\n[@7,2,32]\n",
+            "a{g}:\n[@7,0,1048576,TODO,0]\n",
+            "a{d}:\n[@7]\n",
+            "a{p}:\n[@7,d,0,64,p,l,t]\n",
+            "a{w}:\n[@8,artifacts/out.bin]\n",
+        ]
+        .concat();
+        let cl100k = tiktoken_rs::cl100k_base().expect("cl100k tokenizer");
+        let o200k = tiktoken_rs::o200k_base().expect("o200k tokenizer");
+        let sparse = measure(&sparse, &cl100k, &o200k);
+        let formulas = measure(&formulas, &cl100k, &o200k);
+        assert!(formulas.bytes < sparse.bytes, "{formulas:?} vs {sparse:?}");
+        assert!(
+            formulas.cl100k_tokens < sparse.cl100k_tokens,
+            "{formulas:?} vs {sparse:?}"
+        );
+        assert!(
+            formulas.o200k_tokens < sparse.o200k_tokens,
+            "{formulas:?} vs {sparse:?}"
+        );
     }
 }

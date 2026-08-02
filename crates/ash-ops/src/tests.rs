@@ -8,10 +8,12 @@ use ash_protocol::ason::decode;
 use ash_protocol::request::{
     Arguments, BatchArgs, BatchNode, Budget, EXEC_CLEAR_ENVIRONMENT, ExecArgs, FsAction,
     FsActionKind, FsArgs, InputSource, LIST_FILES_ONLY, ListArgs, PatchArgs, PatchContent,
-    PatchEdit, REF_CASE_INSENSITIVE, ReadArgs, ReadMode, RefArgs, RefMode, Request,
-    SEARCH_CASE_INSENSITIVE, SNAPSHOT_INCLUDE_HIDDEN, SearchArgs, SnapshotArgs, SnapshotMode,
+    PatchEdit, REF_CASE_INSENSITIVE, ReadArgs, ReadMode, RefArgs, Request, SEARCH_CASE_INSENSITIVE,
+    SNAPSHOT_INCLUDE_HIDDEN, SearchArgs, SnapshotArgs, SnapshotMode,
 };
-use ash_protocol::response::{ErrorCode, RESULT_RETAINED, Status};
+use ash_protocol::response::{
+    ErrorCode, RESULT_REDUCED, RESULT_RETAINED, RESULT_TRUNCATED, Status,
+};
 use ash_protocol::{ApprovalChallenge, Capability};
 
 use super::{AuthorizationPolicy, PermitAuthority, PortableOperations};
@@ -528,7 +530,7 @@ async fn retained_results_support_slice_search_binary_and_release() {
 
     let lines = Request::new(
         20,
-        Arguments::Ref(RefArgs::new(reference, RefMode::Lines, 2, 1, None, 0).expect("lines")),
+        Arguments::Ref(RefArgs::lines(reference, 2, 1).expect("lines")),
         budget(256, 8),
     )
     .expect("request");
@@ -546,15 +548,7 @@ async fn retained_results_support_slice_search_binary_and_release() {
     let search = Request::new(
         21,
         Arguments::Ref(
-            RefArgs::new(
-                reference,
-                RefMode::Search,
-                0,
-                1024,
-                Some("needle".to_owned()),
-                REF_CASE_INSENSITIVE,
-            )
-            .expect("search"),
+            RefArgs::search(reference, 0, 1024, "needle", REF_CASE_INSENSITIVE).expect("search"),
         ),
         budget(256, 8),
     )
@@ -580,9 +574,7 @@ async fn retained_results_support_slice_search_binary_and_release() {
         .expect("retain binary");
     let binary = Request::new(
         22,
-        Arguments::Ref(
-            RefArgs::new(binary_reference, RefMode::Bytes, 0, 3, None, 0).expect("bytes"),
-        ),
+        Arguments::Ref(RefArgs::bytes(binary_reference, 0, 3).expect("bytes")),
         budget(256, 8),
     )
     .expect("request");
@@ -603,9 +595,7 @@ async fn retained_results_support_slice_search_binary_and_release() {
         .expect("retain long text");
     let projected = Request::new(
         24,
-        Arguments::Ref(
-            RefArgs::new(long_reference, RefMode::Bytes, 0, 128 * 1024, None, 0).expect("bytes"),
-        ),
+        Arguments::Ref(RefArgs::bytes(long_reference, 0, 128 * 1024).expect("bytes")),
         budget(128, 1),
     )
     .expect("request");
@@ -621,7 +611,7 @@ async fn retained_results_support_slice_search_binary_and_release() {
 
     let release = Request::new(
         23,
-        Arguments::Ref(RefArgs::new(reference, RefMode::Release, 0, 0, None, 0).expect("release")),
+        Arguments::Ref(RefArgs::release(reference).expect("release")),
         budget(64, 1),
     )
     .expect("request");
@@ -647,6 +637,168 @@ async fn retained_results_support_slice_search_binary_and_release() {
         .encode();
     assert!(encoded.starts_with("t:3\ni:23\ns:4\n"));
     assert!(encoded.contains("e{c,q,p,x,a}:\n700,1,2,~,~\n"));
+}
+
+#[tokio::test]
+async fn retained_ason_projects_relations_and_materializes_binary_without_overwrite() {
+    let directory = TestDirectory::new();
+    fs::create_dir(directory.0.join("artifacts")).expect("artifact directory");
+    let (session, operations) = runtime(&directory);
+    let structured = session
+        .store()
+        .retain(
+            b"k:g\nd[3]{p,l,c,t}:\nsrc/a.rs,1,2,alpha\nsrc/b.rs,2,3,beta\nsrc/c.rs,3,4,gamma\n"
+                .to_vec(),
+        )
+        .expect("retain structured result");
+
+    let project = Request::new(
+        25,
+        Arguments::Ref(
+            RefArgs::project(structured, "d", 1, 2, vec!["p".to_owned(), "t".to_owned()])
+                .expect("projection formula"),
+        ),
+        budget(256, 8),
+    )
+    .expect("project request");
+    let program = session.begin(&project).await.expect("program");
+    let response = operations
+        .execute(&project, &program)
+        .await
+        .expect("projection response");
+    assert_eq!(response.status(), Status::Success);
+    assert_eq!(response.reference(), Some(structured));
+    assert_eq!(response.flags(), RESULT_REDUCED | RESULT_RETAINED);
+    let encoded = response.encode().expect("encode").encode();
+    assert!(
+        encoded.contains("d[2]{p,t}:\nsrc/b.rs,beta\nsrc/c.rs,gamma\n"),
+        "{encoded}"
+    );
+    drop(program);
+
+    let bounded = Request::new(
+        26,
+        Arguments::Ref(
+            RefArgs::project(structured, "d", 0, 3, vec!["p".to_owned(), "t".to_owned()])
+                .expect("bounded projection formula"),
+        ),
+        budget(256, 1),
+    )
+    .expect("bounded project request");
+    let program = session.begin(&bounded).await.expect("program");
+    let response = operations
+        .execute(&bounded, &program)
+        .await
+        .expect("bounded projection response");
+    assert_eq!(
+        response.flags(),
+        RESULT_TRUNCATED | RESULT_REDUCED | RESULT_RETAINED
+    );
+    assert_eq!(response.reference(), Some(structured));
+    let encoded = response.encode().expect("encode").encode();
+    assert!(
+        encoded.contains("d[1]{p,t}:\nsrc/a.rs,alpha\n"),
+        "{encoded}"
+    );
+    drop(program);
+
+    let unknown_column = Request::new(
+        27,
+        Arguments::Ref(
+            RefArgs::project(structured, "d", 0, 1, vec!["missing".to_owned()])
+                .expect("valid formula shape"),
+        ),
+        budget(128, 4),
+    )
+    .expect("unknown column request");
+    let program = session.begin(&unknown_column).await.expect("program");
+    let response = operations
+        .execute(&unknown_column, &program)
+        .await
+        .expect("typed error");
+    assert_eq!(response.status(), Status::InvalidRequest);
+    assert_eq!(
+        response.error().expect("error").code,
+        ErrorCode::InvalidArgument
+    );
+    drop(program);
+
+    let binary = session
+        .store()
+        .retain(vec![0xff, 0x00, 0x10])
+        .expect("retain binary");
+    let denied = Request::new(
+        28,
+        Arguments::Ref(
+            RefArgs::materialize(binary, "artifacts/denied.bin")
+                .expect("denied materialize formula"),
+        ),
+        budget(256, 4),
+    )
+    .expect("denied materialize request");
+    let restricted = PortableOperations::with_authorization(
+        Workspace::new(&directory.0).expect("workspace"),
+        AuthorizationPolicy::allow(Capability::RetainedResult.mask())
+            .expect("retained-only policy"),
+    );
+    let program = session.begin(&denied).await.expect("program");
+    let response = restricted
+        .execute(&denied, &program)
+        .await
+        .expect("denied response");
+    assert_eq!(response.status(), Status::Denied);
+    assert_eq!(
+        response.error().expect("denied error").code,
+        ErrorCode::CapabilityDenied
+    );
+    assert!(!directory.0.join("artifacts/denied.bin").exists());
+    drop(program);
+
+    let materialize = |id| {
+        Request::new(
+            id,
+            Arguments::Ref(
+                RefArgs::materialize(binary, "artifacts/out.bin").expect("materialize formula"),
+            ),
+            budget(256, 4),
+        )
+        .expect("materialize request")
+    };
+    let first = materialize(29);
+    assert_eq!(
+        first.required_capabilities(),
+        Capability::RetainedResult.mask() | Capability::WorkspaceWrite.mask()
+    );
+    let program = session.begin(&first).await.expect("program");
+    let response = operations
+        .execute(&first, &program)
+        .await
+        .expect("materialize response");
+    assert_eq!(response.status(), Status::Success);
+    assert_eq!(response.reference(), Some(binary));
+    assert_eq!(
+        fs::read(directory.0.join("artifacts/out.bin")).expect("artifact"),
+        [0xff, 0x00, 0x10]
+    );
+    let encoded = response.encode().expect("encode").encode();
+    assert!(encoded.contains("d{p,s,z,h}:\n1,0,3,"), "{encoded}");
+    drop(program);
+
+    let second = materialize(30);
+    let program = session.begin(&second).await.expect("program");
+    let response = operations
+        .execute(&second, &program)
+        .await
+        .expect("conflict response");
+    assert_eq!(response.status(), Status::Conflict);
+    assert_eq!(
+        response.error().expect("conflict").code,
+        ErrorCode::ContentConflict
+    );
+    assert_eq!(
+        fs::read(directory.0.join("artifacts/out.bin")).expect("unchanged artifact"),
+        [0xff, 0x00, 0x10]
+    );
 }
 
 #[tokio::test]

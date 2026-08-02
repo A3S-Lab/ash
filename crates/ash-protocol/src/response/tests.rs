@@ -1,17 +1,22 @@
 use super::{
     BatchNodeResult, BatchNodeState, CancelResult, CancellationState, ErrorCode, ErrorRecord,
-    ErrorStage, FileKind, FinalResponse, FsResult, FsState, ListEntry, PatchResult, PatchState,
-    PathMapping, ProcessResult, RESULT_RETAINED, RESULT_TRUNCATED, ReadResult, ReferenceMatch,
-    ReferenceResult, ReferenceSlice, ReleasedReference, ResponseError, ResultData, RetryClass,
-    SearchMatch, SnapshotChange, SnapshotResult, Status, StreamResult, TerminationKind,
+    ErrorStage, FileKind, FinalResponse, FsResult, FsState, ListEntry, MaterializedReference,
+    PatchResult, PatchState, PathMapping, ProcessResult, RESULT_REDUCED, RESULT_RETAINED,
+    RESULT_TRUNCATED, ReadResult, ReferenceMatch, ReferenceResult, ReferenceSlice,
+    ReleasedReference, ResponseError, ResultData, RetryClass, SearchMatch, SnapshotChange,
+    SnapshotResult, Status, StreamResult, TerminationKind,
 };
 use crate::Operation;
-use crate::ason::decode;
+use crate::ason::{Atom, Cell, Key, Table, decode};
 use crate::request::FsActionKind;
 
 const SEARCH_RESULT: &str = include_str!("../../../../spec/fixtures/ason/search-result.ason");
 const BATCH_RESULT: &str = include_str!("../../../../spec/fixtures/ason/batch-result.ason");
 const FS_RESULT: &str = include_str!("../../../../spec/fixtures/ason/fs-result.ason");
+const REF_PROJECT_RESULT: &str =
+    include_str!("../../../../spec/fixtures/ason/ref-project-result.ason");
+const REF_MATERIALIZE_RESULT: &str =
+    include_str!("../../../../spec/fixtures/ason/ref-materialize-result.ason");
 
 #[test]
 fn search_result_matches_the_canonical_specification_fixture() {
@@ -155,6 +160,66 @@ fn every_reference_result_shape_is_typed_and_source_bound() {
         ),
         Err(ResponseError::InvalidData)
     );
+}
+
+#[test]
+fn reference_formula_results_match_canonical_fixtures() {
+    let projection = FinalResponse::success(
+        44,
+        vec![],
+        ResultData::Reference(ReferenceResult::Projection(
+            Table::new(
+                ["p", "t"]
+                    .into_iter()
+                    .map(Key::new)
+                    .collect::<Result<_, _>>()
+                    .expect("columns"),
+                vec![
+                    vec![
+                        Cell::Atom(Atom::text("src/a.rs")),
+                        Cell::Atom(Atom::text("TODO")),
+                    ],
+                    vec![
+                        Cell::Atom(Atom::text("src/b.rs")),
+                        Cell::Atom(Atom::text("FIXME")),
+                    ],
+                ],
+            )
+            .expect("table"),
+        )),
+        RESULT_REDUCED | RESULT_RETAINED,
+        Some(7),
+    )
+    .expect("projection response");
+    assert_eq!(
+        projection.encode().expect("encode").encode(),
+        REF_PROJECT_RESULT
+    );
+
+    let materialized = FinalResponse::success(
+        45,
+        vec![PathMapping {
+            id: 1,
+            value: "artifacts/out.bin".to_owned(),
+        }],
+        ResultData::Reference(ReferenceResult::Materialized(MaterializedReference {
+            path: 1,
+            state: FsState::Committed,
+            size: 3,
+            digest: Some("a".repeat(64)),
+        })),
+        RESULT_RETAINED,
+        Some(8),
+    )
+    .expect("materialized response");
+    assert_eq!(
+        materialized.encode().expect("encode").encode(),
+        REF_MATERIALIZE_RESULT
+    );
+
+    for fixture in [REF_PROJECT_RESULT, REF_MATERIALIZE_RESULT] {
+        assert_eq!(decode(fixture).expect("canonical").encode(), fixture);
+    }
 }
 
 #[test]

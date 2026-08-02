@@ -2,7 +2,7 @@ use super::{
     Arguments, BatchArgs, BatchNode, Budget, CancelArgs, EXEC_CLEAR_ENVIRONMENT, ExecArgs,
     FsAction, FsActionKind, FsArgs, InputSource, LIST_INCLUDE_HIDDEN, ListArgs, PATCH_COLUMNS,
     PatchArgs, PatchContent, PatchEdit, READ_COLUMNS, REF_CASE_INSENSITIVE, REF_REGEX, ReadArgs,
-    ReadMode, RefArgs, RefMode, Request, RequestError, SEARCH_CASE_INSENSITIVE, SEARCH_REGEX,
+    ReadMode, RefArgs, RefFormula, Request, RequestError, SEARCH_CASE_INSENSITIVE, SEARCH_REGEX,
     SNAPSHOT_INCLUDE_HIDDEN, SearchArgs, SnapshotArgs, SnapshotMode,
 };
 use crate::ason::{Atom, Cell, Document, Field, Key, Record, Value, decode};
@@ -14,6 +14,10 @@ const READ_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/read-req
 const LIST_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/list-request.ason");
 const CANCEL_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/cancel-request.ason");
 const REF_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/ref-request.ason");
+const REF_PROJECT_REQUEST: &str =
+    include_str!("../../../../spec/fixtures/ason/ref-project-request.ason");
+const REF_MATERIALIZE_REQUEST: &str =
+    include_str!("../../../../spec/fixtures/ason/ref-materialize-request.ason");
 const PATCH_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/patch-request.ason");
 const FS_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/fs-request.ason");
 const SNAPSHOT_REQUEST: &str = include_str!("../../../../spec/fixtures/ason/snapshot-request.ason");
@@ -48,6 +52,8 @@ fn all_core_request_fixtures_are_canonical_typed_messages() {
         (BATCH_REQUEST, Operation::Batch),
         (SNAPSHOT_REQUEST, Operation::Snapshot),
         (REF_REQUEST, Operation::Ref),
+        (REF_PROJECT_REQUEST, Operation::Ref),
+        (REF_MATERIALIZE_REQUEST, Operation::Ref),
         (CANCEL_REQUEST, Operation::Cancel),
     ];
     for (fixture, operation) in expected {
@@ -90,11 +96,126 @@ fn permits_bind_canonical_actions_and_capabilities() {
         (BATCH_REQUEST, Capability::WorkspaceRead.mask()),
         (SNAPSHOT_REQUEST, Capability::WorkspaceRead.mask()),
         (REF_REQUEST, Capability::RetainedResult.mask()),
+        (REF_PROJECT_REQUEST, Capability::RetainedResult.mask()),
+        (
+            REF_MATERIALIZE_REQUEST,
+            Capability::RetainedResult.mask() | Capability::WorkspaceWrite.mask(),
+        ),
         (CANCEL_REQUEST, 0),
     ];
     for (fixture, capabilities) in expected {
         let request = Request::decode(&decode(fixture).expect("ASON")).expect("request");
         assert_eq!(request.required_capabilities(), capabilities);
+    }
+}
+
+#[test]
+fn reference_data_formulas_are_typed_compact_and_capability_bound() {
+    let project =
+        Request::decode(&decode(REF_PROJECT_REQUEST).expect("ASON")).expect("project request");
+    let Arguments::Ref(arguments) = project.arguments() else {
+        panic!("reference arguments expected");
+    };
+    assert_eq!(
+        arguments.formula(),
+        &RefFormula::Project {
+            table: "d".to_owned(),
+            offset: 0,
+            length: 64,
+            columns: vec!["p".to_owned(), "l".to_owned(), "t".to_owned()],
+        }
+    );
+    assert_eq!(
+        project.required_capabilities(),
+        Capability::RetainedResult.mask()
+    );
+    assert_eq!(
+        project.encode().expect("encode").encode(),
+        REF_PROJECT_REQUEST
+    );
+
+    let materialize = Request::decode(&decode(REF_MATERIALIZE_REQUEST).expect("ASON"))
+        .expect("materialize request");
+    let Arguments::Ref(arguments) = materialize.arguments() else {
+        panic!("reference arguments expected");
+    };
+    assert_eq!(
+        arguments.formula(),
+        &RefFormula::Materialize {
+            path: "artifacts/out.bin".to_owned(),
+        }
+    );
+    assert_eq!(
+        materialize.required_capabilities(),
+        Capability::RetainedResult.mask() | Capability::WorkspaceWrite.mask()
+    );
+    assert_eq!(
+        materialize.encode().expect("encode").encode(),
+        REF_MATERIALIZE_REQUEST
+    );
+
+    for (table, columns) in [
+        ("", vec!["p".to_owned()]),
+        ("2bad", vec!["p".to_owned()]),
+        ("d", vec![]),
+        ("d", vec!["p".to_owned(), "p".to_owned()]),
+        ("d", vec!["2bad".to_owned()]),
+    ] {
+        assert!(RefArgs::project(1, table, 0, 1, columns).is_err());
+    }
+    assert!(RefArgs::materialize(1, "out.bin").is_ok());
+    assert_eq!(
+        RefArgs::materialize(1, ""),
+        Err(RequestError::InvalidText("p"))
+    );
+}
+
+#[test]
+fn every_reference_formula_operator_round_trips_exactly() {
+    let formulas = [
+        (RefArgs::bytes(9, 0, 8).expect("bytes"), "a{b}:\n[@9,0,8]\n"),
+        (RefArgs::lines(9, 2, 3).expect("lines"), "a{l}:\n[@9,2,3]\n"),
+        (
+            RefArgs::search(9, 0, 1024, "TODO", REF_CASE_INSENSITIVE).expect("search"),
+            "a{g}:\n[@9,0,1024,TODO,2]\n",
+        ),
+        (RefArgs::release(9).expect("release"), "a{d}:\n[@9]\n"),
+        (
+            RefArgs::project(9, "d", 4, 16, vec!["p".to_owned(), "t".to_owned()]).expect("project"),
+            "a{p}:\n[@9,d,4,16,p,t]\n",
+        ),
+        (
+            RefArgs::materialize(9, "artifacts/out.bin").expect("materialize"),
+            "a{w}:\n[@9,artifacts/out.bin]\n",
+        ),
+    ];
+    for (index, (formula, fragment)) in formulas.into_iter().enumerate() {
+        let request =
+            Request::new(200 + index as u64, Arguments::Ref(formula), budget()).expect("request");
+        let encoded = request.encode().expect("encode").encode();
+        assert!(encoded.contains(fragment), "{encoded}");
+        assert_eq!(
+            Request::decode(&decode(&encoded).expect("ASON")).expect("formula schema"),
+            request
+        );
+    }
+}
+
+#[test]
+fn reference_formula_arity_and_operator_are_fail_closed() {
+    for arguments in [
+        "a{b}:\n[@7,0]\n",
+        "a{d}:\n[@7,0]\n",
+        "a{p}:\n[@7,d,0,1]\n",
+        "a{w}:\n[@7]\n",
+        "a{x}:\n[@7]\n",
+        "a{b}:\n@7\n",
+    ] {
+        let input = format!("t:1\ni:90\no:h\n{arguments}u{{tok,rec,ms}}:\n64,4,30000\n");
+        assert!(
+            Request::decode(&decode(&input).expect("ASON syntax")).is_err(),
+            "accepted {arguments:?}"
+        );
     }
 }
 
@@ -273,12 +394,11 @@ fn every_core_argument_schema_round_trips() {
         Request::new(
             7,
             Arguments::Ref(
-                RefArgs::new(
+                RefArgs::search(
                     9,
-                    RefMode::Search,
                     0,
                     1_048_576,
-                    Some("error|warning".to_owned()),
+                    "error|warning",
                     REF_REGEX | REF_CASE_INSENSITIVE,
                 )
                 .expect("reference"),
@@ -386,12 +506,12 @@ fn line_reads_are_one_based_and_environment_deltas_are_unique() {
     ));
     assert_eq!(CancelArgs::new(0), Err(RequestError::InvalidUnsigned("i")));
     assert_eq!(
-        RefArgs::new(0, RefMode::Bytes, 0, 1, None, 0),
+        RefArgs::bytes(0, 0, 1),
         Err(RequestError::InvalidUnsigned("r"))
     );
     assert_eq!(
-        RefArgs::new(1, RefMode::Release, 0, 1, None, 0),
-        Err(RequestError::UnexpectedValue("m"))
+        RefArgs::lines(1, 0, 1),
+        Err(RequestError::InvalidLimit("o"))
     );
     assert_eq!(
         SnapshotArgs::new(vec![".".to_owned()], 64, SnapshotMode::Delta, None, 0),
