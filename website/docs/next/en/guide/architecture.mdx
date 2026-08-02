@@ -45,6 +45,11 @@ Owns stdio RPC, child processes, pipes, deadlines, cancellation, update download
 and bounded file I/O. Programs launch through executable + argv by default, never
 through an implicit Bash, PowerShell, or CMD layer.
 
+Cancellation is more than sending a signal. Unix terminates and waits for the
+owned process group; Windows terminates and waits for the Job Object to become
+empty. `exec` then joins stdin, stdout, and stderr tasks before encoding the final
+cancelled response.
+
 Stdout and stderr drain concurrently in 16 KiB chunks. Each stream stays in
 memory through 4 MiB; after that, every original byte moves to a session-private
 temporary file while only a bounded head/tail sample remains for projection.

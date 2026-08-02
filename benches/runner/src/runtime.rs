@@ -1,16 +1,19 @@
 use std::error::Error;
 use std::fs;
 use std::io;
-use std::time::Instant;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use ash_engine::{Engine, Parallelism, SessionConfig};
 use ash_ops::PortableOperations;
 use ash_platform::Workspace;
 use ash_protocol::request::{
-    Arguments, Budget, MAX_REQUEST_RECORDS, MAX_REQUEST_TOKENS, Request, SearchArgs, SnapshotArgs,
-    SnapshotMode,
+    Arguments, Budget, ExecArgs, InputSource, MAX_REQUEST_RECORDS, MAX_REQUEST_TOKENS, Request,
+    SearchArgs, SnapshotArgs, SnapshotMode,
 };
-use ash_protocol::response::Status;
+use ash_protocol::response::{
+    RESULT_RETAINED, RESULT_TRUNCATED, ResultData, Status, TerminationKind,
+};
 use ash_store::{StoreLimits, StoreResidency};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -22,10 +25,99 @@ const DEFAULT_SAMPLES: usize = 5;
 const DEFAULT_STORE_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_STORE_MEMORY_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_STORE_FETCH_BYTES: usize = 64 * 1024;
+const DEFAULT_PROCESS_STREAM_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_PROCESS_FETCH_BYTES: usize = 64 * 1024;
 const STORE_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+const PROCESS_RESPONSE_BYTES: u64 = 64 * 1024;
 const REQUEST_MILLIS: u64 = 120_000;
 const NEEDLE: &str = "ASH_NEEDLE";
+const PROCESS_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const PROCESS_CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
+const PROCESS_HELPER_SOURCE: &str = r#"
+use std::error::Error;
+use std::fs;
+use std::io::{self, BufWriter, Write};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
+
+const CHUNK_BYTES: usize = 16 * 1024;
+const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut arguments = std::env::args_os().skip(1);
+    match arguments.next().as_deref() {
+        Some(mode) if mode == "emit" => {
+            let bytes = arguments
+                .next()
+                .and_then(|value| value.to_str().and_then(|value| value.parse().ok()))
+                .filter(|bytes: &usize| *bytes > 0 && *bytes <= MAX_STREAM_BYTES)
+                .ok_or("invalid emit byte count")?;
+            if arguments.next().is_some() {
+                return Err("unexpected emit argument".into());
+            }
+            let stdout = thread::spawn(move || {
+                let stdout = io::stdout();
+                emit(BufWriter::new(stdout.lock()), bytes, 0)
+            });
+            let stderr = thread::spawn(move || {
+                let stderr = io::stderr();
+                emit(BufWriter::new(stderr.lock()), bytes, 13)
+            });
+            stdout.join().map_err(|_| "stdout thread panicked")??;
+            stderr.join().map_err(|_| "stderr thread panicked")??;
+        }
+        Some(mode) if mode == "tree" => {
+            let ready = arguments.next().ok_or("missing ready path")?;
+            if arguments.next().is_some() {
+                return Err("unexpected tree argument".into());
+            }
+            let descendant = Command::new(std::env::current_exe()?)
+                .arg("hold")
+                .stdin(Stdio::null())
+                .spawn()?;
+            fs::write(ready, descendant.id().to_string())?;
+            loop {
+                thread::sleep(Duration::from_secs(60));
+            }
+        }
+        Some(mode) if mode == "hold" => {
+            if arguments.next().is_some() {
+                return Err("unexpected hold argument".into());
+            }
+            io::stdout().write_all(b"descendant-stdout-ready\n")?;
+            io::stdout().flush()?;
+            io::stderr().write_all(b"descendant-stderr-ready\n")?;
+            io::stderr().flush()?;
+            loop {
+                thread::sleep(Duration::from_secs(60));
+            }
+        }
+        _ => return Err("unknown process helper mode".into()),
+    }
+    Ok(())
+}
+
+fn emit(mut writer: impl Write, total: usize, seed: usize) -> io::Result<()> {
+    let mut chunk = [0_u8; CHUNK_BYTES];
+    let mut offset = 0_usize;
+    while offset < total {
+        let length = (total - offset).min(chunk.len());
+        for (index, byte) in chunk[..length].iter_mut().enumerate() {
+            let position = offset + index;
+            *byte = if position % 127 == 126 {
+                b'\n'
+            } else {
+                b'a' + ((position + seed) % 26) as u8
+            };
+        }
+        writer.write_all(&chunk[..length])?;
+        offset += length;
+    }
+    writer.flush()
+}
+"#;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct RuntimeReport {
@@ -80,6 +172,14 @@ struct RuntimeFixture {
     report: FixtureReport,
 }
 
+struct ProcessFixture {
+    directory: TempDir,
+    operations: PortableOperations,
+    workspace: String,
+    executable: String,
+    helper_source_sha256: String,
+}
+
 struct RuntimeConfig {
     files: usize,
     bytes_per_file: usize,
@@ -87,6 +187,8 @@ struct RuntimeConfig {
     store_bytes: usize,
     store_memory_bytes: usize,
     store_fetch_bytes: usize,
+    process_stream_bytes: usize,
+    process_fetch_bytes: usize,
     worker_counts: Vec<usize>,
 }
 
@@ -110,6 +212,8 @@ impl RuntimeConfig {
             store_bytes: DEFAULT_STORE_BYTES,
             store_memory_bytes: DEFAULT_STORE_MEMORY_BYTES,
             store_fetch_bytes: DEFAULT_STORE_FETCH_BYTES,
+            process_stream_bytes: DEFAULT_PROCESS_STREAM_BYTES,
+            process_fetch_bytes: DEFAULT_PROCESS_FETCH_BYTES,
             worker_counts,
         }
     }
@@ -124,6 +228,10 @@ impl RuntimeConfig {
             || self.store_memory_bytes >= self.store_bytes
             || self.store_fetch_bytes == 0
             || self.store_fetch_bytes > self.store_bytes
+            || self.process_stream_bytes == 0
+            || self.process_stream_bytes > 64 * 1024 * 1024
+            || self.process_fetch_bytes == 0
+            || self.process_fetch_bytes > self.process_stream_bytes
             || self.worker_counts.is_empty()
             || self.worker_counts[0] != 1
             || self.worker_counts.contains(&0)
@@ -184,7 +292,8 @@ async fn runtime_report_with_config(
     let workspace = Workspace::new(fixture.directory.path())?;
     let operations = PortableOperations::new(workspace);
     let workspace_text = fixture.directory.path().to_string_lossy().into_owned();
-    let mut scenarios = Vec::with_capacity(Scenario::ALL.len() + 1);
+    let process_fixture = prepare_process_fixture()?;
+    let mut scenarios = Vec::with_capacity(Scenario::ALL.len() + 3);
     for scenario in Scenario::ALL {
         scenarios.push(
             measure_scenario(
@@ -198,8 +307,10 @@ async fn runtime_report_with_config(
         );
     }
     scenarios.push(measure_store_scenario(&workspace_text, &config).await?);
+    scenarios.push(measure_process_capture_scenario(&process_fixture, &config).await?);
+    scenarios.push(measure_process_cancel_scenario(&process_fixture, &config).await?);
     Ok(RuntimeReport {
-        schema: 3,
+        schema: 4,
         host: HostReport {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
@@ -330,6 +441,376 @@ async fn execute_store_once(
     drop(session);
     let elapsed = started.elapsed().as_nanos().max(1);
     Ok((output, elapsed))
+}
+
+async fn measure_process_capture_scenario(
+    fixture: &ProcessFixture,
+    config: &RuntimeConfig,
+) -> Result<ScenarioReport, Box<dyn Error>> {
+    let request = process_request(
+        2,
+        fixture,
+        vec!["emit".to_owned(), config.process_stream_bytes.to_string()],
+    )?;
+    let work_bytes = u64::try_from(config.process_stream_bytes)?
+        .checked_mul(2)
+        .ok_or_else(|| io::Error::other("process capture workload is too large"))?;
+    let input_sha256 = process_input_sha256(
+        fixture,
+        &format!(
+            "mode=emit\nstream_bytes={}\nfetch_bytes={}\n",
+            config.process_stream_bytes, config.process_fetch_bytes
+        ),
+    );
+    let mut runs = Vec::with_capacity(config.worker_counts.len());
+    let mut expected_output = None;
+    let mut baseline = None;
+
+    for &workers in &config.worker_counts {
+        let parallelism = Parallelism::for_available_cpus(workers);
+        let engine = Engine::new(parallelism)?;
+        let (warm_output, _) = execute_process_capture_once(
+            &engine,
+            fixture,
+            parallelism,
+            &request,
+            20_000,
+            config.process_stream_bytes,
+            config.process_fetch_bytes,
+        )
+        .await?;
+        require_stable_output(&mut expected_output, &warm_output)?;
+
+        let mut observations = Vec::with_capacity(config.samples);
+        for sample in 0..config.samples {
+            let session_id = u64::try_from(sample)?.saturating_add(20_001);
+            let (output, elapsed) = execute_process_capture_once(
+                &engine,
+                fixture,
+                parallelism,
+                &request,
+                session_id,
+                config.process_stream_bytes,
+                config.process_fetch_bytes,
+            )
+            .await?;
+            require_stable_output(&mut expected_output, &output)?;
+            observations.push(elapsed);
+        }
+        let output = expected_output
+            .as_ref()
+            .ok_or_else(|| io::Error::other("process capture benchmark emitted no output"))?;
+        runs.push(runtime_run(
+            workers,
+            observations,
+            &mut baseline,
+            2,
+            u128::from(work_bytes),
+            output,
+        ));
+    }
+
+    let output = expected_output.ok_or_else(|| io::Error::other("missing capture output"))?;
+    Ok(ScenarioReport {
+        id: "exec-capture-pressure",
+        work_items: 2,
+        work_bytes,
+        input_sha256,
+        output_bytes: output.len(),
+        output_sha256: sha256_hex(&output),
+        runs,
+    })
+}
+
+async fn execute_process_capture_once(
+    engine: &Engine,
+    fixture: &ProcessFixture,
+    parallelism: Parallelism,
+    request: &Request,
+    session_id: u64,
+    stream_bytes: usize,
+    fetch_bytes: usize,
+) -> Result<(Vec<u8>, u128), Box<dyn Error>> {
+    let retained_bytes = u64::try_from(stream_bytes)?
+        .checked_mul(2)
+        .ok_or_else(|| io::Error::other("process capture is too large"))?;
+    let mut session_config = SessionConfig::new(
+        session_id,
+        &fixture.workspace,
+        PROCESS_RESPONSE_BYTES,
+        parallelism,
+    );
+    session_config.store_limits = StoreLimits {
+        max_bytes: retained_bytes,
+        max_entries: 2,
+    };
+    let session = engine.open_session(session_config)?;
+    let started = Instant::now();
+    let program = session.begin(request).await?;
+    let response = fixture.operations.execute(request, &program).await?;
+    let _canonical = response.encode()?.encode();
+    let elapsed = started.elapsed().as_nanos().max(1);
+    if response.status() != Status::Success
+        || response.flags() & (RESULT_RETAINED | RESULT_TRUNCATED)
+            != (RESULT_RETAINED | RESULT_TRUNCATED)
+    {
+        return Err(io::Error::other("process capture did not retain reduced evidence").into());
+    }
+    let (stdout_reference, stderr_reference) = match response.data() {
+        Some(ResultData::Exec(result)) if result.termination == TerminationKind::Exited => (
+            result
+                .stdout
+                .reference
+                .ok_or_else(|| io::Error::other("stdout was not retained"))?,
+            result
+                .stderr
+                .reference
+                .ok_or_else(|| io::Error::other("stderr was not retained"))?,
+        ),
+        _ => return Err(io::Error::other("unexpected process capture result").into()),
+    };
+    if stdout_reference == stderr_reference {
+        return Err(io::Error::other("process streams unexpectedly deduplicated").into());
+    }
+    let store = program.store().clone();
+    let mut output = Vec::with_capacity(fetch_bytes.saturating_mul(2));
+    for reference in [stdout_reference, stderr_reference] {
+        let lease = store.get(reference)?;
+        if lease.len() != u64::try_from(stream_bytes)? || lease.residency() != StoreResidency::Disk
+        {
+            return Err(io::Error::other("process stream did not remain disk-backed").into());
+        }
+        let fetch_bytes = u64::try_from(fetch_bytes)?;
+        output.extend_from_slice(
+            &lease
+                .read_range(
+                    lease.len().saturating_sub(fetch_bytes),
+                    fetch_bytes,
+                    fetch_bytes,
+                )
+                .await?,
+        );
+        drop(lease);
+        store.release(reference)?;
+    }
+    let mut expected = process_stream_tail(stream_bytes, fetch_bytes, 0);
+    expected.extend_from_slice(&process_stream_tail(stream_bytes, fetch_bytes, 13));
+    if output != expected {
+        return Err(io::Error::other("retained process stream bytes changed").into());
+    }
+    drop(store);
+    drop(program);
+    drop(session);
+    Ok((output, elapsed))
+}
+
+async fn measure_process_cancel_scenario(
+    fixture: &ProcessFixture,
+    config: &RuntimeConfig,
+) -> Result<ScenarioReport, Box<dyn Error>> {
+    let input_sha256 = process_input_sha256(fixture, "mode=tree\n");
+    let mut runs = Vec::with_capacity(config.worker_counts.len());
+    let mut expected_output = None;
+    let mut baseline = None;
+
+    for &workers in &config.worker_counts {
+        let parallelism = Parallelism::for_available_cpus(workers);
+        let engine = Engine::new(parallelism)?;
+        let (warm_output, _) =
+            execute_process_cancel_once(&engine, fixture, parallelism, 30_000).await?;
+        require_stable_output(&mut expected_output, &warm_output)?;
+
+        let mut observations = Vec::with_capacity(config.samples);
+        for sample in 0..config.samples {
+            let session_id = u64::try_from(sample)?.saturating_add(30_001);
+            let (output, elapsed) =
+                execute_process_cancel_once(&engine, fixture, parallelism, session_id).await?;
+            require_stable_output(&mut expected_output, &output)?;
+            observations.push(elapsed);
+        }
+        let output = expected_output
+            .as_ref()
+            .ok_or_else(|| io::Error::other("process cancellation emitted no output"))?;
+        runs.push(runtime_run(
+            workers,
+            observations,
+            &mut baseline,
+            1,
+            0,
+            output,
+        ));
+    }
+
+    let output = expected_output.ok_or_else(|| io::Error::other("missing cancellation output"))?;
+    Ok(ScenarioReport {
+        id: "exec-cancel-tree-empty",
+        work_items: 1,
+        work_bytes: 0,
+        input_sha256,
+        output_bytes: output.len(),
+        output_sha256: sha256_hex(&output),
+        runs,
+    })
+}
+
+async fn execute_process_cancel_once(
+    engine: &Engine,
+    fixture: &ProcessFixture,
+    parallelism: Parallelism,
+    session_id: u64,
+) -> Result<(Vec<u8>, u128), Box<dyn Error>> {
+    let ready_name = format!(".cancel-ready-{session_id}");
+    let ready_path = fixture.directory.path().join(&ready_name);
+    match fs::remove_file(&ready_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let request = process_request(3, fixture, vec!["tree".to_owned(), ready_name])?;
+    let session = engine.open_session(SessionConfig::new(
+        session_id,
+        &fixture.workspace,
+        PROCESS_RESPONSE_BYTES,
+        parallelism,
+    ))?;
+    let program = session.begin(&request).await?;
+    let operations = fixture.operations.clone();
+    let task_request = request.clone();
+    let mut task = tokio::spawn(async move { operations.execute(&task_request, &program).await });
+    let ready = tokio::time::timeout(PROCESS_READY_TIMEOUT, async {
+        loop {
+            if let Ok(value) = tokio::fs::read_to_string(&ready_path).await
+                && value
+                    .parse::<u32>()
+                    .ok()
+                    .is_some_and(|process_id| process_id > 0)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    if ready.is_err() {
+        let _ = session.cancel(request.id());
+        if tokio::time::timeout(PROCESS_CANCEL_TIMEOUT, &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+        return Err(io::Error::other("process tree did not become ready").into());
+    }
+
+    let started = Instant::now();
+    if !session.cancel(request.id())? {
+        task.abort();
+        let _ = task.await;
+        return Err(io::Error::other("active process request was not cancellable").into());
+    }
+    let response = match tokio::time::timeout(PROCESS_CANCEL_TIMEOUT, &mut task).await {
+        Ok(result) => result??,
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            return Err(io::Error::other("process-tree cancellation exceeded its bound").into());
+        }
+    };
+    let _canonical = response.encode()?.encode();
+    let elapsed = started.elapsed().as_nanos().max(1);
+    let termination = match response.data() {
+        Some(ResultData::Exec(result)) => result.termination,
+        _ => return Err(io::Error::other("unexpected cancellation result").into()),
+    };
+    if response.status() != Status::Cancelled || termination != TerminationKind::Cancelled {
+        return Err(io::Error::other("process tree did not report cancellation").into());
+    }
+    if session.cancel(request.id())? {
+        return Err(io::Error::other("cancelled process remained registered").into());
+    }
+    tokio::fs::remove_file(&ready_path).await?;
+    drop(session);
+    Ok((
+        format!(
+            "status={}\ntermination={}\n",
+            response.status().code(),
+            termination as u8
+        )
+        .into_bytes(),
+        elapsed,
+    ))
+}
+
+fn process_request(
+    request_id: u64,
+    fixture: &ProcessFixture,
+    argv: Vec<String>,
+) -> Result<Request, Box<dyn Error>> {
+    Ok(Request::new(
+        request_id,
+        Arguments::Exec(ExecArgs::new(
+            &fixture.executable,
+            argv,
+            ".",
+            vec![],
+            InputSource::None,
+            0,
+        )?),
+        Budget::new(MAX_REQUEST_TOKENS, MAX_REQUEST_RECORDS, REQUEST_MILLIS)?,
+    )?)
+}
+
+fn process_input_sha256(fixture: &ProcessFixture, scenario: &str) -> String {
+    sha256_hex(
+        format!(
+            "helper_source_sha256={}\n{scenario}",
+            fixture.helper_source_sha256
+        )
+        .as_bytes(),
+    )
+}
+
+fn process_stream_tail(total: usize, length: usize, seed: usize) -> Vec<u8> {
+    let start = total.saturating_sub(length);
+    (start..total)
+        .map(|position| {
+            if position % 127 == 126 {
+                b'\n'
+            } else {
+                b'a' + ((position + seed) % 26) as u8
+            }
+        })
+        .collect()
+}
+
+fn runtime_run(
+    workers: usize,
+    observations: Vec<u128>,
+    baseline: &mut Option<u128>,
+    work_items: u128,
+    work_bytes: u128,
+    output: &[u8],
+) -> RuntimeRun {
+    let mut ordered = observations.clone();
+    ordered.sort_unstable();
+    let p50 = percentile(&ordered, 50);
+    let p95 = percentile(&ordered, 95);
+    let p99 = percentile(&ordered, 99);
+    let baseline = *baseline.get_or_insert(p50);
+    let speedup = ratio_basis_points(baseline, p50);
+    RuntimeRun {
+        workers,
+        observations_ns: observations,
+        p50_ns: p50,
+        p95_ns: p95,
+        p99_ns: p99,
+        items_per_second: throughput(work_items, p50),
+        bytes_per_second: throughput(work_bytes, p50),
+        speedup_basis_points: speedup,
+        parallel_efficiency_basis_points: speedup / workers as u128,
+        output_sha256: sha256_hex(output),
+    }
 }
 
 async fn measure_scenario(
@@ -467,6 +948,46 @@ fn prepare_fixture(files: usize, bytes_per_file: usize) -> Result<RuntimeFixture
     })
 }
 
+fn prepare_process_fixture() -> Result<ProcessFixture, Box<dyn Error>> {
+    let directory = tempfile::Builder::new()
+        .prefix("ash-runtime-process-")
+        .tempdir()?;
+    let bin_directory = directory.path().join("bin");
+    fs::create_dir(&bin_directory)?;
+    let source = directory.path().join("runtime-process-helper.rs");
+    fs::write(&source, PROCESS_HELPER_SOURCE)?;
+    let executable_name = if cfg!(windows) {
+        "runtime-process-helper.exe"
+    } else {
+        "runtime-process-helper"
+    };
+    let executable_path = bin_directory.join(executable_name);
+    let status = Command::new("rustc")
+        .arg("--edition=2024")
+        .arg("-O")
+        .arg(&source)
+        .arg("-o")
+        .arg(&executable_path)
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other("failed to compile runtime process helper").into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&executable_path, fs::Permissions::from_mode(0o700))?;
+    }
+    let workspace = Workspace::new(directory.path())?;
+    Ok(ProcessFixture {
+        workspace: directory.path().to_string_lossy().into_owned(),
+        operations: PortableOperations::new(workspace),
+        executable: format!("bin/{executable_name}"),
+        helper_source_sha256: sha256_hex(PROCESS_HELPER_SOURCE.as_bytes()),
+        directory,
+    })
+}
+
 fn fixture_bytes(index: usize, length: usize) -> Vec<u8> {
     let mut output = format!("{NEEDLE} file={index:06}\n").into_bytes();
     let mut state = (index as u64).wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -544,16 +1065,18 @@ mod tests {
             store_bytes: 128 * 1024,
             store_memory_bytes: 16 * 1024,
             store_fetch_bytes: 4 * 1024,
+            process_stream_bytes: 5 * 1024 * 1024,
+            process_fetch_bytes: 4 * 1024,
             worker_counts: vec![2, 1, 2],
         })
         .await
         .expect("runtime report");
 
-        assert_eq!(report.schema, 3);
+        assert_eq!(report.schema, 4);
         assert_eq!(report.fixture.files, 8);
         assert_eq!(report.fixture.bytes, 8 * 4 * 1024);
         assert_eq!(report.samples, 2);
-        assert_eq!(report.scenarios.len(), 3);
+        assert_eq!(report.scenarios.len(), 5);
         for scenario in &report.scenarios {
             assert!(scenario.output_bytes > 0);
             assert_eq!(scenario.runs.len(), 2);
@@ -582,5 +1105,16 @@ mod tests {
         assert_eq!(store.work_bytes, 128 * 1024);
         assert_ne!(&store.input_sha256, &report.fixture.sha256);
         assert_eq!(store.output_bytes, 4 * 1024);
+
+        let capture = &report.scenarios[3];
+        assert_eq!(capture.id, "exec-capture-pressure");
+        assert_eq!(capture.work_items, 2);
+        assert_eq!(capture.work_bytes, 2 * 5 * 1024 * 1024);
+        assert_eq!(capture.output_bytes, 2 * 4 * 1024);
+
+        let cancellation = &report.scenarios[4];
+        assert_eq!(cancellation.id, "exec-cancel-tree-empty");
+        assert_eq!(cancellation.work_items, 1);
+        assert_eq!(cancellation.work_bytes, 0);
     }
 }

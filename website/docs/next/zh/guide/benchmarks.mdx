@@ -26,17 +26,18 @@ cargo run -p a3s-ash-bench --locked -- \
 cargo run -p a3s-ash-bench --release --locked -- --runtime
 ```
 
-运行时基准创建确定性的 256 文件、8 MiB 工作区和独立的 8 MiB 保留值，用 1、2、4、8
-和主机可用 Worker 执行字面量搜索、BLAKE3 快照与磁盘 spill/fetch。存储场景以 4 MiB
-为内存上限，分块写入后只读取末尾 64 KiB。规范 ASON 或读取字节必须逐字节一致，schema 3
-才会输出输入/输出摘要、p50/p95/p99、吞吐、加速比、并行效率和原始观测。时序仅代表当前主机。
+schema 4 用 1、2、4、8 和主机可用 Worker 执行五条真实路径：字面量搜索、BLAKE3
+快照、磁盘 spill/fetch、双管道压力和进程树取消。压力夹具同时向 stdout 与 stderr 各写
+8 MiB；取消夹具会派生一个继承管道的孙进程。只有保留字节一致，并且取消等待进程组或
+Job Object 清空、管道 EOF 与请求注销后，才会输出摘要、p50/p95/p99 和原始观测。
+时序仅代表当前主机。
 
 ## 当前自动化
 
 - 覆盖所有 workspace crate 的 Rust 单元与集成测试。
 - Linux、macOS、Windows 的 `cargo check` 与测试。
 - 三平台安装器的真实发行构建 Smoke。
-- 真实搜索、快照与磁盘 spill/fetch 扩展曲线，并校验输出完全一致。
+- 五条真实运行时路径，包含双管道磁盘捕获与取消到进程树清空。
 - ASON、受限 ASH/1 帧、类型化请求与更新元数据 fuzz target。
 - 文件事务 crash cutpoint、更新激活/恢复和取消竞态测试。
 - 锁定的第三方许可证清单。

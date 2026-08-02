@@ -338,6 +338,11 @@ impl FinalResponse {
     }
 
     #[must_use]
+    pub const fn data(&self) -> Option<&ResultData> {
+        self.data.as_ref()
+    }
+
+    #[must_use]
     pub const fn error(&self) -> Option<&ErrorRecord> {
         self.error.as_ref()
     }

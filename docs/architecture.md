@@ -6,6 +6,8 @@ This document defines the intended architecture of `ash` and is normative for co
 
 The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution with quota-bound disk-backed lossless retained output and conservative crash-orphan cleanup, bounded read/list/search, durable compare-and-swap patching and file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, real-operation search/snapshot/spill-fetch scaling measurements, scheduled ASON/frame/update-metadata fuzz targets, deterministic six-target packaging, and a fail-closed native release workflow. Release-key and platform-signing credential provisioning, the first published release, sustained fuzz evidence, agent-task benchmarks, and published hardware-labelled runtime measurements remain open.
 
+The runtime evidence now also drives simultaneous disk-backed stdout/stderr pressure and repeated cancellation of a parent plus pipe-inheriting descendant across the complete worker matrix. It records cancellation only after the owned native process group or Job Object has emptied and the final response is canonicalized; it is not merely a signal-delivery timer.
+
 ## 1. Product definition
 
 `ash` is an **AI Native Shell**.
@@ -370,6 +372,8 @@ An explicit non-portable shell operation may be added later, but it must declare
 - No production path waits indefinitely for a child, pipe, or cleanup task.
 - Concurrent child processes are bounded separately from compute partitions, preventing graph width from starving pipe readers or the host.
 
+`ProcessHandle::terminate` is a completion boundary, not a fire-and-forget kill. Unix sends `SIGKILL` to the owned process group and waits through its reap path; Windows terminates the owned Job Object and waits for the job-empty completion event. `exec` then completes stdin and both pipe tasks before constructing its final response. A cancellation response therefore cannot be published while an owned descendant still holds an inherited stdout or stderr pipe.
+
 ## 9. Filesystem semantics
 
 Protocol paths use UTF-8 with `/` separators and are resolved relative to a workspace capability. The platform backend converts them to native paths.
@@ -543,6 +547,7 @@ The repository remains independently buildable and releasable at `A3S-Lab/ash`. 
 - paths containing spaces, Unicode, reserved names, symlinks, and reparse points;
 - parent and grandchild process termination;
 - concurrent stdout/stderr pressure;
+- repeated cancellation-to-tree-empty completion with inherited pipes;
 - atomic replacement and conflict races.
 - durable patch replacement recovery before and after the commit marker;
 - durable create/copy/move/remove recovery before and after the commit marker;

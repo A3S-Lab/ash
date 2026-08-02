@@ -43,6 +43,9 @@ RPC / timeout      diff / reduce     snapshots
 负责标准输入/输出 RPC、子进程、管道、超时、取消、更新下载和有界文件 I/O。外部程序
 默认通过 executable + argv 直接启动，不隐式进入 Bash、PowerShell 或 CMD。
 
+取消不是只发一个信号。Unix 会终止并等待所属进程组，Windows 会终止并等待 Job Object
+清空；随后 `exec` 还会等待 stdin、stdout 和 stderr 任务结束，才编码最终取消响应。
+
 stdout 与 stderr 始终以 16 KiB 块并发排空。单路在 4 MiB 内保留于内存；超过后，完整
 字节流转入会话私有临时文件，内存只留下有界的首尾样本用于即时投影。完整前缀与后续
 块会在写盘前计入会话额度，需要引用的两路输出一起提交，因此失败不会发布半截 Alias。

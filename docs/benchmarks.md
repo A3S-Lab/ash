@@ -1,6 +1,6 @@
 # Token-efficiency benchmark contract
 
-Status: deterministic format corpus, two-tokenizer representation evidence, retained-formula regression gate, and host-local search, snapshot, and disk spill/fetch runtime harness implemented; agent-task and published hardware reports remain open
+Status: deterministic format corpus, two-tokenizer representation evidence, retained-formula regression gate, and a five-scenario host-local runtime harness covering search, snapshot, disk spill/fetch, dual-stream process capture, and process-tree cancellation; agent-task and published hardware reports remain open
 
 Token reduction is the primary performance objective of `ash`. This document defines how it is measured without trading away task correctness or hiding protocol overhead.
 
@@ -17,13 +17,13 @@ cargo run -p a3s-ash-bench --release --locked -- \
   --check benches/reports/v0.1.0/format.json
 ```
 
-The same runner creates a deterministic 256-file, 8 MiB workspace and an independent deterministic 8 MiB retained-value input. It executes the public literal-search and BLAKE3 snapshot paths plus a forced disk spill and bounded range fetch at 1, 2, 4, 8, and host-available worker counts:
+The same runner creates deterministic workspace, retained-value, and native-process fixtures. It executes public literal-search and BLAKE3 snapshot paths, forced disk spill/fetch, simultaneous stdout/stderr pressure, and process-tree cancellation at 1, 2, 4, 8, and host-available worker counts:
 
 ```sh
 cargo run -p a3s-ash-bench --release --locked -- --runtime
 ```
 
-The schema-3 report includes every observation, p50/p95/p99 nanoseconds, item and byte throughput, speedup and parallel efficiency in basis points, worker count, host OS/architecture/available CPU count, per-scenario input digest, and output digest. Search and snapshot use the normal `Engine`, governor, `PortableOperations`, workspace backend, reducer, path dictionary, result store, and ASON encoder. The store scenario uses the normal capture, disk spool, Rayon digest, atomic retention, range reader, release, and teardown paths. Canonical ASON or fetched bytes are compared byte for byte across warm-up, samples, and worker counts; a difference fails before timing is printed. Host timings are not checked in or gated because shared-runner performance is not portable.
+The schema-4 report includes every observation, p50/p95/p99 nanoseconds, item and byte throughput, speedup and parallel efficiency in basis points, worker count, host OS/architecture/available CPU count, per-scenario input digest, and output digest. Every scenario uses the normal `Engine`, governor, and session lifecycle. Search and snapshot continue through `PortableOperations`, the workspace backend, reduction, retention, and ASON encoding. Store spill/fetch uses capture, Rayon digest, atomic retention, range read, release, and teardown. Process scenarios use direct argv spawn, native process-group or Job Object ownership, concurrent pipe capture, cancellation, process-tree wait, retained references, and canonical response encoding. Stable evidence bytes are compared across warm-up, samples, and worker counts; a difference fails before timing is printed. Host timings are not checked in or gated because shared-runner performance is not portable.
 
 ## 1. Optimization target
 
@@ -216,30 +216,31 @@ cargo test -p a3s-ash-bench direct_math_symbols_beat_wrappers_and_match_the_asci
 
 ## 9. Runtime benchmarks
 
-The implemented host-local slice exercises three real runtime paths over deterministic inputs:
+The implemented host-local slice exercises five real runtime paths over deterministic inputs:
 
 - `search-literal` walks the workspace, reads files on bounded workers, scans text, performs stable merge and path interning, and encodes the final ASON response;
 - `snapshot-blake3` walks the same workspace, hashes files in the Rayon pool, builds and retains the canonical manifest, and encodes the final ASON response;
-- `result-store-spill-fetch` captures 8 MiB in 16 KiB chunks with a 4 MiB memory ceiling, proves disk residency, hashes and atomically retains the value through the compute pool, fetches its final 64 KiB range, releases the alias, and tears down the session spool.
+- `result-store-spill-fetch` captures 8 MiB in 16 KiB chunks with a 4 MiB memory ceiling, proves disk residency, hashes and atomically retains the value through the compute pool, fetches its final 64 KiB range, releases the alias, and tears down the session spool;
+- `exec-capture-pressure` runs a fixture process whose two native threads emit 8 MiB to stdout and stderr simultaneously, proves both complete streams crossed the 4 MiB disk boundary, verifies their deterministic final 64 KiB ranges, and measures admission through canonical response encoding;
+- `exec-cancel-tree-empty` runs a parent that spawns a pipe-inheriting descendant, waits for the descendant PID marker, then measures from `Session::cancel` until the native process group or Job Object is empty, inherited pipes reach EOF, the request unregisters, and the canonical cancelled response is encoded.
 
-Every sample uses a fresh session so reference aliases and path dictionaries start from the same state. Fixture, engine, and session setup are outside the timed interval. Search and snapshot time program admission through canonical response encoding; the store scenario times capture through range fetch, release, and session-spool teardown. The benchmark has no fixed speedup threshold: it proves output determinism everywhere and reports scaling only for the current host.
+Every sample uses a fresh session so aliases, dictionaries, budgets, cancellation registrations, and spools start from the same state. Fixture compilation, engine construction, and session creation are outside the timed interval. Search, snapshot, and process capture time program admission through canonical response encoding. Store timing includes capture through range fetch, release, and spool teardown. Cancellation timing begins only after the descendant exists and ends after tree wait plus canonical response encoding. The benchmark has no fixed speedup or cancellation threshold: it proves stable evidence and bounded completion, then reports current-host measurements.
 
 The remaining runtime corpus expands this implemented slice to measurements that isolate `ash` overhead from the executed tool:
 
 - cold process startup;
 - warm framed request dispatch;
 - direct child spawn overhead;
-- stream capture at several output rates;
+- stream capture at additional output rates and chunk distributions;
 - reducer throughput;
 - path dictionary lookup;
 - graph scheduling at several node counts;
 - directory traversal, literal search, regular-expression search, hashing, and reduction at 1, 2, 4, 8, and host-default compute workers;
-- mixed-load I/O latency while the compute pool is saturated;
-- cancellation-to-process-tree-empty latency.
+- mixed-load I/O latency while the compute pool is saturated.
 
 The current schema reports p50, p95, p99, sample count, host OS/architecture/available CPU count, selected compute workers, work volume, input and output digests, output size, throughput, speedup, parallel efficiency, and every raw observation. Future scenarios must add configured I/O workers, peak resident memory, and CPU utilization where those values are material to the claim. Results from different hosts are not combined into one scaling curve.
 
-Parallel and sequential runs consume the same input digest and must emit byte-identical outputs; search and snapshot outputs are canonical ASON, while store output is the requested byte range. A faster run with reordered, missing, duplicated, or changed evidence is a correctness failure rather than a performance result. Fixtures include many small files, fewer large files, skewed directory trees, binary files, ignored paths, sparse matches, dense matches, and simultaneous process-output pressure.
+Parallel and sequential runs consume the same input digest and must emit byte-identical evidence. Search and snapshot outputs are canonical ASON; store and process-capture outputs are verified ranges; cancellation output binds the typed final status and termination kind after tree cleanup. A faster run with reordered, missing, duplicated, or changed evidence is a correctness failure rather than a performance result. Future fixtures still need fewer large files, skewed directory trees, binary files, ignored paths, sparse and dense matches, varied output rates, and mixed compute/process pressure.
 
 ## 10. Proposed release gates
 

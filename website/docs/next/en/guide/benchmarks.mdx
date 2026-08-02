@@ -31,20 +31,20 @@ the wrapper bytes and 83%/82% of its tokens.
 cargo run -p a3s-ash-bench --release --locked -- --runtime
 ```
 
-The runtime harness creates one deterministic 256-file, 8 MiB workspace plus an
-independent 8 MiB retained value. At 1, 2, 4, 8, and host-available worker
-counts it runs literal search, BLAKE3 snapshot, and disk spill/fetch. The store
-scenario crosses a 4 MiB memory ceiling and reads only the final 64 KiB. Schema
-3 prints input/output digests, p50/p95/p99, throughput, speedup, efficiency, and
-raw observations only after canonical ASON or fetched bytes remain identical.
-Timing is host-local.
+Schema 4 runs five real paths at 1, 2, 4, 8, and host-available worker counts:
+literal search, BLAKE3 snapshot, disk spill/fetch, dual-pipe pressure, and
+process-tree cancellation. The pressure fixture writes 8 MiB to stdout and
+stderr simultaneously. The cancellation fixture spawns a pipe-inheriting
+descendant. Digests and timing print only after retained bytes match and
+cancellation waits for an empty process group or Job Object, pipe EOF, and
+request unregistration. Timing remains host-local.
 
 ## Current automation
 
 - Rust unit and integration suites across every workspace crate.
 - `cargo check` and tests on Linux, macOS, and Windows.
 - Real release builds exercised by all three platform installers.
-- Real search, snapshot, and disk spill/fetch scaling with exact-output validation.
+- Five real runtime paths, including dual-pipe disk capture and cancellation to tree empty.
 - Fuzz targets for ASON, bounded ASH/1 frames, typed requests, and update metadata.
 - File-transaction crash cutpoints, update activation/recovery, and cancellation race tests.
 - A locked third-party license inventory.
