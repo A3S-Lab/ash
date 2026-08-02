@@ -4,7 +4,7 @@ Status: architecture baseline plus implementation checkpoint
 
 This document defines the intended architecture of `ash` and is normative for component ownership and runtime boundaries. Statements explicitly labeled as the current source checkpoint describe implemented behavior; the remaining contracts are design targets rather than release claims.
 
-The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution with quota-bound lossless retained output, bounded read/list/search, durable compare-and-swap patching and file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, real-operation search/snapshot scaling measurements, scheduled ASON/frame/update-metadata fuzz targets, deterministic six-target packaging, and a fail-closed native release workflow. Release-key and platform-signing credential provisioning, the first published release, sustained fuzz evidence, agent-task benchmarks, and published hardware-labelled runtime measurements remain open.
+The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution with quota-bound disk-backed lossless retained output, bounded read/list/search, durable compare-and-swap patching and file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, real-operation search/snapshot scaling measurements, scheduled ASON/frame/update-metadata fuzz targets, deterministic six-target packaging, and a fail-closed native release workflow. Release-key and platform-signing credential provisioning, the first published release, sustained fuzz evidence, agent-task benchmarks, and published hardware-labelled runtime measurements remain open.
 
 ## 1. Product definition
 
@@ -304,7 +304,9 @@ Output handling is part of the runtime contract, not cosmetic formatting.
 
 ### 7.1 Capture
 
-Process stdout and stderr are captured independently as bytes and both pipes are drained concurrently through bounded chunks. Each stream may use a fixed 4 MiB uncharged head; when it crosses that boundary, its complete capture is charged incrementally against the session result-store quota. Streams that require references are committed together only after both pipes close, so a quota or entry failure publishes neither a partial alias nor a misleading truncation result. BLAKE3 identity and retention run on the Rayon compute plane rather than blocking a Tokio I/O worker. If the quota cannot cover every captured byte, execution returns the typed storage-budget error instead of discarding a tail.
+Process stdout and stderr are captured independently as bytes and both pipes are drained concurrently through 16 KiB chunks. A stream remains in memory up to 4 MiB, then transitions to a session-private temporary file while retaining only a fixed head/tail ring for immediate projection. At that transition the complete prefix is charged, and every later chunk is charged before it is written, against the session result-store quota. Streams that require references are committed together only after both pipes close, so a quota, I/O, digest, or entry failure publishes neither a partial alias nor a misleading truncation result.
+
+The spool never becomes the LLM-facing value. Rayon computes the full BLAKE3 identity through a bounded 4 MiB scratch buffer, content-addressed entries deduplicate before alias allocation, and byte-range formulas seek directly into disk-backed values. Consumers that require a complete value apply their own independent ceiling: 8 MiB for structured ASON, 64 MiB for process stdin, and 128 MiB for file materialization or patch content. A lease prevents early unlink while a consumer is active; explicit release or session drop removes the temporary file once the final lease ends. Unix spool directories and files use modes `0700` and `0600`; other platforms inherit their native per-user temporary-directory protections. If quota cannot cover every captured byte, execution returns typed storage-budget error `601` instead of discarding a tail.
 
 ### 7.2 Classification
 
@@ -605,7 +607,7 @@ The benchmark contract in [benchmarks.md](./benchmarks.md) measures correctness,
 | Internal model | Typed program DAG |
 | LLM output | ASON canonical format |
 | Session transport | Length-prefixed ASON |
-| Retained output | Session-local content-addressed store |
+| Retained output | Session-local content-addressed memory/disk store with bounded range reads |
 | Platform set | Linux, macOS, Windows; x86-64 and ARM64 |
 | Installation | `install.sh` and `install.ps1`, no admin by default |
 | Global daemon | None required |

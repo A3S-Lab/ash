@@ -40,6 +40,7 @@ Reports are especially useful for:
 - workspace escape through paths, symbolic links, or Windows reparse points;
 - capability or approval-permit bypass;
 - process-tree ownership, cancellation, and cleanup;
+- retained-result spool permissions, quota enforcement, lease lifetime, and cleanup;
 - unsafe file mutation or rollback behavior;
 - secret exposure through output reduction or retained results; and
 - installer, updater, signature, provenance, or rollback failures.

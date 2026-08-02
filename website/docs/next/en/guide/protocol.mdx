@@ -46,10 +46,13 @@ This is the compact wire form of `π_{p,l,t}(d[0:64])` over `@7`. Operators `/ #
 
 ## Lossless process evidence
 
-`exec` drains stdout and stderr concurrently. A reduced projection retains every
-original byte, including output beyond 4 MiB, and publishes stdout/stderr aliases
-atomically. If the session cannot retain the complete capture, error `601` is
-returned with no partial reference.
+`exec` drains stdout and stderr concurrently. Each stream keeps at most 4 MiB in
+memory, then spills every original byte into a session-private temporary file and
+retains only a bounded head/tail projection sample. Stdout/stderr aliases publish
+atomically, and `/` reads only the requested disk range. If the session cannot
+retain the complete capture, error `601` is returned with no partial reference.
+After reference release or session shutdown, the final active lease removes the
+corresponding temporary file.
 
 ## Concurrency and order
 

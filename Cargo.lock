@@ -106,7 +106,10 @@ name = "a3s-ash-store"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "rayon",
+ "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -238,6 +241,7 @@ dependencies = [
  "cfg-if",
  "constant_time_eq",
  "cpufeatures",
+ "rayon-core",
 ]
 
 [[package]]

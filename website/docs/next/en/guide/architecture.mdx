@@ -20,8 +20,8 @@ Protocol admission → capability mask → request schema
 Session runtime → hierarchical governor → cancellation tree
         ├───────────────┬────────────────┐
         ▼               ▼                ▼
-Tokio I/O plane    Rayon CPU plane   durable store
-process / pipe     search / hash     refs / paths
+Tokio I/O plane    Rayon CPU plane   session store
+process / pipe     search / hash     refs / spool
 RPC / timeout      diff / reduce     snapshots
         └───────────────┴────────────────┘
                         ▼
@@ -45,10 +45,18 @@ Owns stdio RPC, child processes, pipes, deadlines, cancellation, update download
 and bounded file I/O. Programs launch through executable + argv by default, never
 through an implicit Bash, PowerShell, or CMD layer.
 
-Stdout and stderr drain concurrently. Crossing the 4 MiB per-stream head charges
-the complete capture against the session store while it is still in flight;
-streams that need references commit together, and quota failure publishes no
-partial alias. Retention hashing moves to Rayon before the final ASON response.
+Stdout and stderr drain concurrently in 16 KiB chunks. Each stream stays in
+memory through 4 MiB; after that, every original byte moves to a session-private
+temporary file while only a bounded head/tail sample remains for projection.
+The prefix and each later chunk are charged before disk write. Streams that need
+references commit together, so failure publishes no partial alias. Rayon hashes
+the complete spool through a fixed 4 MiB buffer instead of occupying a Tokio I/O
+worker.
+
+Disk references support byte-range reads. Consumers that need a complete value
+still enforce independent 8, 64, or 128 MiB ceilings. A lease prevents early
+unlink; after release or session shutdown, the final lease cleans up its spool
+files.
 
 ### Rayon CPU
 

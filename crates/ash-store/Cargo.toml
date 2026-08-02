@@ -11,4 +11,7 @@ homepage.workspace = true
 
 [dependencies]
 blake3.workspace = true
+rayon.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
+tokio.workspace = true

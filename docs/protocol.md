@@ -1,6 +1,6 @@
 # ASH/1 protocol and ASON
 
-Status: canonical ASON, framing, capability negotiation, action-bound approval permits, typed exec/read/list/search/patch/fs/batch/snapshot/cancel schemas, direct retained-result formula operators, durable file transactions, bounded DAG execution, retained-result inspection, and runtime paths are implemented
+Status: canonical ASON, framing, capability negotiation, action-bound approval permits, typed exec/read/list/search/patch/fs/batch/snapshot/cancel schemas, direct retained-result formula operators, disk-backed process spooling, durable file transactions, bounded DAG execution, retained-result inspection, and runtime paths are implemented
 
 ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
 
@@ -340,7 +340,7 @@ A process result contains:
 - truncation and redaction flags;
 - observed workspace delta when requested.
 
-The current `exec` path drains stdout and stderr concurrently. Once either stream exceeds its 4 MiB uncharged capture head, the complete stream is charged incrementally against the session retained-byte ceiling. Streams needing references are BLAKE3-identified on the compute plane and committed atomically in stdout/stderr order. A successful truncated projection therefore points to every original byte, including bytes beyond the head; insufficient quota returns storage-budget error `601` with no partial reference.
+The current `exec` path drains stdout and stderr concurrently. Each stream keeps at most 4 MiB in memory; after crossing that boundary its complete bytes move to a session-private disk spool while only a bounded head/tail sample remains resident for projection. The full prefix and every later chunk are charged incrementally against the session retained-byte ceiling before disk write. Streams needing references are BLAKE3-identified on the Rayon compute plane and committed atomically in stdout/stderr order. A successful truncated projection therefore points to every original byte, including bytes beyond the memory ceiling. Byte slicing reads only the requested spool range; full-value consumers enforce their own 8, 64, or 128 MiB work limits. Insufficient quota returns storage-budget error `601` with no partial reference, and reference release or session shutdown removes its spool files after active leases end.
 
 Core result data uses these schemas; reference projection intentionally substitutes its validated requested column vector for `C...`:
 

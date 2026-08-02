@@ -19,8 +19,8 @@ Protocol admission → capability mask → request schema
 Session runtime → hierarchical governor → cancellation tree
         ├───────────────┬────────────────┐
         ▼               ▼                ▼
-Tokio I/O plane    Rayon CPU plane   durable store
-process / pipe     search / hash     refs / paths
+Tokio I/O plane    Rayon CPU plane   session store
+process / pipe     search / hash     refs / spool
 RPC / timeout      diff / reduce     snapshots
         └───────────────┴────────────────┘
                         ▼
@@ -43,9 +43,14 @@ RPC / timeout      diff / reduce     snapshots
 负责标准输入/输出 RPC、子进程、管道、超时、取消、更新下载和有界文件 I/O。外部程序
 默认通过 executable + argv 直接启动，不隐式进入 Bash、PowerShell 或 CMD。
 
-stdout 与 stderr 始终并发排空。单路超过 4 MiB 后，完整捕获会在执行中计入会话存储
-额度；需要引用的两路输出一起提交，额度失败时不会发布半截 Alias。最终 ASON 返回前，
-保留内容的哈希计算转移到 Rayon 平面。
+stdout 与 stderr 始终以 16 KiB 块并发排空。单路在 4 MiB 内保留于内存；超过后，完整
+字节流转入会话私有临时文件，内存只留下有界的首尾样本用于即时投影。完整前缀与后续
+块会在写盘前计入会话额度，需要引用的两路输出一起提交，因此失败不会发布半截 Alias。
+完整内容的 BLAKE3 哈希由 Rayon 通过 4 MiB 固定缓冲计算，不占用 Tokio I/O Worker。
+
+磁盘引用支持按字节范围读取；必须读取完整值的消费者仍受 8、64 或 128 MiB 独立上限
+约束。租约阻止使用中的文件被提前删除；释放引用或结束会话后，最后一个租约结束时会
+清理临时文件。
 
 ### Rayon CPU
 

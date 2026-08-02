@@ -12,6 +12,7 @@ use ash_protocol::response::{
     ReferenceMatch, ReferenceResult, ReferenceSlice, ReleasedReference, ResultData, RetryClass,
     Status,
 };
+use ash_store::ResultLease;
 use regex::{Regex, RegexBuilder};
 
 use crate::OperationError;
@@ -23,6 +24,7 @@ const MAX_REFERENCE_MATCHES: usize = 1_000_000;
 const MAX_PROJECTED_LINE_BYTES: usize = 4 * 1024;
 const MAX_MATCH_PROJECTION_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STRUCTURED_REFERENCE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REFERENCE_SLICE_BYTES: u64 = 128 * 1024 * 1024;
 
 pub async fn execute(
     workspace: &Workspace,
@@ -35,32 +37,35 @@ pub async fn execute(
         return release(request, arguments.reference(), program);
     }
 
-    let bytes = program.store().get(arguments.reference())?;
+    let lease = program.store().get(arguments.reference())?;
     if let RefFormula::Materialize { path } = arguments.formula() {
         return materialize(
             workspace,
             request,
             arguments.reference(),
             path,
-            bytes,
+            lease,
             program,
         )
         .await;
     }
-    let _lease = std::sync::Arc::clone(&bytes);
     let _compute = program.acquire(PermitKind::Compute).await?;
     let cancellation = program.cancellation().clone();
     let result = match arguments.formula() {
         RefFormula::Bytes { offset, length } => {
             let (offset, length) = (*offset, *length);
+            let bytes = lease
+                .read_range(offset, length, MAX_REFERENCE_SLICE_BYTES)
+                .await?;
             program
                 .compute_pool()
-                .run(move || select_bytes(&bytes, offset, length))
+                .run(move || raw_slice(offset, &bytes))
                 .await?
                 .map(RawResult::Slice)?
         }
         RefFormula::Lines { offset, length } => {
             let (offset, length) = (*offset, *length);
+            let bytes = lease.read_all(program.store().limits().max_bytes).await?;
             program
                 .compute_pool()
                 .run(move || select_lines(&bytes, offset, length, &cancellation))
@@ -74,6 +79,7 @@ pub async fn execute(
             flags,
         } => {
             let (offset, length, query, flags) = (*offset, *length, query.to_owned(), *flags);
+            let bytes = lease.read_all(program.store().limits().max_bytes).await?;
             program
                 .compute_pool()
                 .run(move || search_bytes(&bytes, offset, length, &query, flags, &cancellation))
@@ -88,6 +94,9 @@ pub async fn execute(
         } => {
             let (table, offset, length, columns) =
                 (table.to_owned(), *offset, *length, columns.clone());
+            let bytes = lease
+                .read_all(MAX_STRUCTURED_REFERENCE_BYTES as u64)
+                .await?;
             program
                 .compute_pool()
                 .run(move || project_ason(&bytes, offset, length, &table, &columns, &cancellation))
@@ -98,6 +107,7 @@ pub async fn execute(
             return Err(OperationError::WorkLimit);
         }
     };
+    drop(lease);
     check_cancelled(program)?;
     match result {
         RawResult::Slice(slice) => slice_response(request, arguments.reference(), slice, program),
@@ -201,15 +211,6 @@ fn make_projection_response(
         flags,
         Some(reference),
     )?)
-}
-
-fn select_bytes(bytes: &[u8], offset: u64, length: u64) -> Result<RawSlice, OperationError> {
-    let start = usize::try_from(offset)
-        .unwrap_or(usize::MAX)
-        .min(bytes.len());
-    let requested = usize::try_from(length).unwrap_or(usize::MAX);
-    let end = start.saturating_add(requested).min(bytes.len());
-    raw_slice(start as u64, &bytes[start..end])
 }
 
 fn select_lines(
@@ -551,12 +552,13 @@ async fn materialize(
     request: &Request,
     reference: u64,
     path: &str,
-    bytes: std::sync::Arc<[u8]>,
+    lease: ResultLease,
     program: &Program,
 ) -> Result<FinalResponse, OperationError> {
-    if bytes.len() as u64 > MAX_FILE_TRANSACTION_FILE_BYTES {
+    if lease.len() > MAX_FILE_TRANSACTION_FILE_BYTES {
         return Err(OperationError::WorkLimit);
     }
+    let bytes = lease.read_all(MAX_FILE_TRANSACTION_FILE_BYTES).await?;
     let path = path.to_owned();
     let size = bytes.len() as u64;
     let action = FileAction::create(path.clone(), bytes.to_vec());
@@ -588,6 +590,7 @@ async fn materialize(
         })
         .await??;
     drop(bytes);
+    drop(lease);
     let result = outcome
         .actions
         .first()

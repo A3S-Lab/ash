@@ -170,7 +170,8 @@ impl OperationError {
             Self::Store(
                 StoreError::ContentTooLarge
                 | StoreError::ByteQuota { .. }
-                | StoreError::EntryQuota { .. },
+                | StoreError::EntryQuota { .. }
+                | StoreError::ReadLimit { .. },
             ) => (
                 Status::BudgetExceeded,
                 ErrorCode::StorageBudget,
@@ -186,6 +187,12 @@ impl OperationError {
             Self::Store(StoreError::InUse(_)) => (
                 Status::Conflict,
                 ErrorCode::ReferenceBusy,
+                RetryClass::RetrySame,
+                ErrorStage::Retain,
+            ),
+            Self::Store(StoreError::Io) => (
+                Status::Failed,
+                ErrorCode::Filesystem,
                 RetryClass::RetrySame,
                 ErrorStage::Retain,
             ),

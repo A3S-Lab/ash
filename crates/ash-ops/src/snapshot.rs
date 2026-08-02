@@ -24,12 +24,18 @@ pub async fn execute(
     program: &Program,
 ) -> Result<FinalResponse, OperationError> {
     check_cancelled(program)?;
-    let baseline = arguments
-        .baseline()
-        .map(|reference| program.store().get(reference))
-        .transpose()?
-        .map(|bytes| decode_manifest(&bytes))
-        .transpose()?;
+    let baseline = if let Some(reference) = arguments.baseline() {
+        let retained = program.store().get(reference)?;
+        if retained.len() > MAX_SNAPSHOT_MANIFEST_BYTES as u64 {
+            return Err(OperationError::InvalidSnapshot);
+        }
+        let bytes = retained
+            .read_all(MAX_SNAPSHOT_MANIFEST_BYTES as u64)
+            .await?;
+        Some(decode_manifest(&bytes)?)
+    } else {
+        None
+    };
     let scope = Scope {
         paths: arguments.paths().to_vec(),
         depth: arguments.depth(),

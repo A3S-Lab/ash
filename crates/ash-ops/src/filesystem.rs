@@ -20,7 +20,7 @@ pub async fn execute(
     program: &Program,
 ) -> Result<FinalResponse, OperationError> {
     check_control(program)?;
-    let actions = resolve_actions(arguments, program)?;
+    let actions = resolve_actions(arguments, program).await?;
     workspace.validate_file_actions(&actions)?;
     let limits = FileTransactionLimits::new(
         MAX_FILE_TRANSACTION_FILE_BYTES,
@@ -58,24 +58,26 @@ pub async fn execute(
     )
 }
 
-fn resolve_actions(
+async fn resolve_actions(
     arguments: &FsArgs,
     program: &Program,
 ) -> Result<Vec<FileAction>, OperationError> {
     let mut total_content = 0_u64;
-    arguments
-        .actions()
-        .iter()
-        .map(|action| match action.kind() {
+    let mut resolved = Vec::with_capacity(arguments.actions().len());
+    for action in arguments.actions() {
+        let file_action = match action.kind() {
             FsActionKind::Create => {
                 let bytes = match action.content().ok_or(OperationError::InvalidArgument)? {
                     PatchContent::Inline(value) => value.as_bytes().to_vec(),
                     PatchContent::Reference(reference) => {
                         let retained = program.store().get(*reference)?;
-                        if retained.len() as u64 > MAX_FILE_TRANSACTION_FILE_BYTES {
+                        if retained.len() > MAX_FILE_TRANSACTION_FILE_BYTES {
                             return Err(OperationError::WorkLimit);
                         }
-                        retained.to_vec()
+                        retained
+                            .read_all(MAX_FILE_TRANSACTION_FILE_BYTES)
+                            .await?
+                            .to_vec()
                     }
                 };
                 total_content = total_content
@@ -86,25 +88,27 @@ fn resolve_actions(
                 {
                     return Err(OperationError::WorkLimit);
                 }
-                Ok(FileAction::create(action.path(), bytes))
+                FileAction::create(action.path(), bytes)
             }
-            FsActionKind::Copy => Ok(FileAction::copy(
+            FsActionKind::Copy => FileAction::copy(
                 action.path(),
                 action
                     .destination()
                     .ok_or(OperationError::InvalidArgument)?,
                 expected_digest(action)?,
-            )),
-            FsActionKind::Move => Ok(FileAction::move_file(
+            ),
+            FsActionKind::Move => FileAction::move_file(
                 action.path(),
                 action
                     .destination()
                     .ok_or(OperationError::InvalidArgument)?,
                 expected_digest(action)?,
-            )),
-            FsActionKind::Remove => Ok(FileAction::remove(action.path(), expected_digest(action)?)),
-        })
-        .collect()
+            ),
+            FsActionKind::Remove => FileAction::remove(action.path(), expected_digest(action)?),
+        };
+        resolved.push(file_action);
+    }
+    Ok(resolved)
 }
 
 fn expected_digest(action: &FsAction) -> Result<[u8; 32], OperationError> {

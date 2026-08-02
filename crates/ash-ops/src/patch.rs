@@ -28,7 +28,7 @@ pub async fn execute(
         return Err(OperationError::OutputBudget);
     }
 
-    let edits = resolve_edits(arguments, program)?;
+    let edits = resolve_edits(arguments, program).await?;
     let _filesystem = program.acquire(PermitKind::Filesystem).await?;
     let _compute = program.acquire(PermitKind::Compute).await?;
     let sizes = mutation_sizes(workspace, arguments.paths(), program).await?;
@@ -188,19 +188,29 @@ impl Failure {
     }
 }
 
-fn resolve_edits(
+async fn resolve_edits(
     arguments: &PatchArgs,
     program: &Program,
 ) -> Result<Vec<Vec<ResolvedEdit>>, OperationError> {
     let mut by_file = vec![Vec::new(); arguments.paths().len()];
     let mut replacement_bytes = 0_u64;
     for edit in arguments.edits() {
-        let replacement: Arc<[u8]> = match edit.replacement() {
-            PatchContent::Inline(value) => Arc::from(value.as_bytes()),
-            PatchContent::Reference(reference) => program.store().get(*reference)?,
+        let (replacement, size): (Arc<[u8]>, u64) = match edit.replacement() {
+            PatchContent::Inline(value) => (
+                Arc::from(value.as_bytes()),
+                u64::try_from(value.len()).map_err(|_| OperationError::WorkLimit)?,
+            ),
+            PatchContent::Reference(reference) => {
+                let retained = program.store().get(*reference)?;
+                let size = retained.len();
+                if size > MAX_PATCH_FILE_BYTES {
+                    return Err(OperationError::WorkLimit);
+                }
+                (retained.read_all(MAX_PATCH_FILE_BYTES).await?, size)
+            }
         };
         replacement_bytes = replacement_bytes
-            .checked_add(replacement.len() as u64)
+            .checked_add(size)
             .ok_or(OperationError::WorkLimit)?;
         if replacement_bytes > MAX_PATCH_TOTAL_BYTES {
             return Err(OperationError::WorkLimit);

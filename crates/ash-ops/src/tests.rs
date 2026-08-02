@@ -15,7 +15,7 @@ use ash_protocol::response::{
     ErrorCode, RESULT_PARTIAL, RESULT_REDUCED, RESULT_RETAINED, RESULT_TRUNCATED, Status,
 };
 use ash_protocol::{ApprovalChallenge, Capability};
-use ash_store::StoreLimits;
+use ash_store::{StoreLimits, StoreResidency};
 
 use super::{AuthorizationPolicy, PermitAuthority, PortableOperations};
 
@@ -134,7 +134,10 @@ async fn capability_policy_requires_one_time_action_bound_approval() {
     let evidence = program
         .store()
         .get(error.evidence.expect("challenge reference"))
-        .expect("challenge evidence");
+        .expect("challenge evidence")
+        .read_all(8 * 1024 * 1024)
+        .await
+        .expect("read challenge evidence");
     let challenge = ApprovalChallenge::decode(
         &decode(std::str::from_utf8(&evidence).expect("challenge UTF-8")).expect("challenge ASON"),
     )
@@ -328,7 +331,13 @@ async fn batch_runs_ready_nodes_concurrently_and_skips_only_failed_descendants()
     );
     assert!(encoded.ends_with("z:24\nr:~\n"), "{encoded}");
 
-    let failed = program.store().get(4).expect("failed child response");
+    let failed = program
+        .store()
+        .get(4)
+        .expect("failed child response")
+        .read_all(8 * 1024 * 1024)
+        .await
+        .expect("read child response");
     let failed = std::str::from_utf8(&failed).expect("ASON response");
     assert!(failed.starts_with("t:3\ni:4\ns:5\n"), "{failed}");
     assert_eq!(program.store().usage().expect("usage").entries, 5);
@@ -460,8 +469,20 @@ async fn exec_retained_reference_preserves_bytes_beyond_the_projection_window() 
         RESULT_RETAINED | RESULT_TRUNCATED
     );
     assert_eq!(response.flags() & RESULT_PARTIAL, 0);
+    assert!(
+        response
+            .encode()
+            .expect("encode")
+            .encode()
+            .contains("ASH_CAPTURE_TAIL")
+    );
     let retained = program.store().get(1).expect("complete stdout reference");
     assert_eq!(retained.len(), 4 * 1024 * 1024 + 16);
+    assert_eq!(retained.residency(), StoreResidency::Disk);
+    let retained = retained
+        .read_all(8 * 1024 * 1024)
+        .await
+        .expect("read complete stdout");
     assert!(retained.ends_with(b"ASH_CAPTURE_TAIL"));
 }
 
@@ -609,7 +630,13 @@ async fn low_projection_budget_retains_complete_search_evidence() {
         .expect("response");
     let reference = response.reference().expect("retained reference");
     assert_eq!(response.flags() & 0b1011, 0b1011);
-    let evidence = program.store().get(reference).expect("evidence");
+    let evidence = program
+        .store()
+        .get(reference)
+        .expect("evidence")
+        .read_all(8 * 1024 * 1024)
+        .await
+        .expect("read evidence");
     let evidence = std::str::from_utf8(&evidence).expect("ASON evidence");
     assert!(evidence.contains("d[20]{p,l,c,t}:"));
     assert!(evidence.contains("needle-19"));
@@ -1181,7 +1208,13 @@ async fn batch_can_chain_fs_output_into_a_read_node() {
     let encoded = response.encode().expect("encode").encode();
     assert!(encoded.starts_with("t:3\ni:77\ns:0\n"), "{encoded}");
     assert!(encoded.contains("d[2]{i,o,s,c,r}:"), "{encoded}");
-    let child = program.store().get(2).expect("read child");
+    let child = program
+        .store()
+        .get(2)
+        .expect("read child")
+        .read_all(8 * 1024 * 1024)
+        .await
+        .expect("read child bytes");
     let child = std::str::from_utf8(&child).expect("ASON");
     assert!(child.contains("created\\n"), "{child}");
 }

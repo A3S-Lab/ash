@@ -11,13 +11,14 @@ use ash_protocol::response::{
     RESULT_REDUCED, RESULT_RETAINED, RESULT_TRUNCATED, ResultData, RetryClass, Status,
     StreamResult, TerminationKind,
 };
-use ash_store::{ResultStore, StoreError, StoreReservation};
+use ash_store::{
+    CapturedContent, CapturedView, DEFAULT_CAPTURE_MEMORY_BYTES, ResultStore, StoreError,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::OperationError;
 use crate::projection::{charge, presentation_limit};
 
-const MAX_UNCHARGED_CAPTURE_BYTES_PER_STREAM: usize = 4 * 1024 * 1024;
 const MAX_STDIN_BYTES: usize = 64 * 1024 * 1024;
 
 pub async fn execute(
@@ -27,7 +28,7 @@ pub async fn execute(
     program: &Program,
 ) -> Result<FinalResponse, OperationError> {
     check_cancelled(program)?;
-    let stdin = stdin_bytes(arguments.stdin(), program)?;
+    let stdin = stdin_bytes(arguments.stdin(), program).await?;
     let environment = environment(arguments.environment())?;
     let _process_permit = program.acquire(PermitKind::Process).await?;
     let started = Instant::now();
@@ -83,25 +84,41 @@ enum Stop {
 }
 
 struct Capture {
-    bytes: Vec<u8>,
-    reservation: StoreReservation,
+    content: Option<CapturedContent>,
     quota_error: Option<StoreError>,
+    text: StreamText,
 }
 
 impl Capture {
-    fn into_retained(self, retained: bool) -> Option<(StoreReservation, Vec<u8>)> {
-        retained.then_some((self.reservation, self.bytes))
+    fn content(&self) -> Result<&CapturedContent, StoreError> {
+        self.content.as_ref().ok_or(StoreError::Invariant)
+    }
+
+    fn project(&self, limit: usize) -> Result<Projection, StoreError> {
+        let content = self.content()?;
+        Ok(match content.view() {
+            CapturedView::Complete(bytes) => project(bytes, limit),
+            CapturedView::Sampled {
+                head,
+                head_next,
+                tail,
+            } => project_sampled(head, head_next, tail, limit, &self.text),
+        })
+    }
+
+    fn into_retained(self, retained: bool) -> Option<CapturedContent> {
+        if retained { self.content } else { None }
     }
 }
 
 async fn capture(
     mut reader: impl AsyncRead + Unpin,
     store: Arc<ResultStore>,
-) -> Result<Capture, std::io::Error> {
-    let mut bytes = Vec::new();
+) -> Result<Capture, OperationError> {
+    let mut content = store.capture(DEFAULT_CAPTURE_MEMORY_BYTES);
     let mut buffer = [0_u8; 16 * 1024];
-    let mut reservation = store.capture_reservation();
     let mut quota_error = None;
+    let mut text = StreamText::default();
     loop {
         let read = reader.read(&mut buffer).await?;
         if read == 0 {
@@ -110,29 +127,21 @@ async fn capture(
         if quota_error.is_some() {
             continue;
         }
-        let charged = if reservation.bytes() == 0
-            && bytes.len().saturating_add(read) > MAX_UNCHARGED_CAPTURE_BYTES_PER_STREAM
-        {
-            bytes.len().saturating_add(read)
-        } else if reservation.bytes() > 0 {
-            read
-        } else {
-            0
-        };
-        if let Err(error) = reservation.reserve(charged) {
+        if let Err(error) = content.append(&buffer[..read]).await {
             quota_error = Some(error);
             continue;
         }
-        if bytes.try_reserve(read).is_err() {
-            quota_error = Some(StoreError::ContentTooLarge);
-            continue;
-        }
-        bytes.extend_from_slice(&buffer[..read]);
+        text.observe(&buffer[..read]);
     }
+    let content = if quota_error.is_none() {
+        Some(content.finish().await?)
+    } else {
+        None
+    };
     Ok(Capture {
-        bytes,
-        reservation,
+        content,
         quota_error,
+        text,
     })
 }
 
@@ -154,14 +163,14 @@ async fn build_response(
     } else {
         (limit / 2, limit / 8)
     };
-    let stdout_projection = project(&stdout.bytes, stdout_budget);
-    let stderr_projection = project(&stderr.bytes, stderr_budget);
+    let stdout_projection = stdout.project(stdout_budget)?;
+    let stderr_projection = stderr.project(stderr_budget)?;
     let stdout_retained = stdout_projection.reduced
         || stdout_projection.normalized
-        || stdout_projection.text.is_none() && !stdout.bytes.is_empty();
+        || stdout_projection.text.is_none() && !stdout.content()?.is_empty();
     let stderr_retained = stderr_projection.reduced
         || stderr_projection.normalized
-        || stderr_projection.text.is_none() && !stderr.bytes.is_empty();
+        || stderr_projection.text.is_none() && !stderr.content()?.is_empty();
     let result_flags = flags(
         &stdout_projection,
         &stderr_projection,
@@ -195,7 +204,7 @@ async fn build_response(
         let store = Arc::clone(program.store());
         program
             .compute_pool()
-            .run(move || store.retain_reserved_many(captures))
+            .run(move || store.retain_captures(captures))
             .await??
     };
     let mut aliases = aliases.into_iter();
@@ -345,6 +354,151 @@ fn project(bytes: &[u8], limit: usize) -> Projection {
     }
 }
 
+fn project_sampled(
+    head: &[u8],
+    head_next: Option<u8>,
+    tail: &[u8],
+    limit: usize,
+    text: &StreamText,
+) -> Projection {
+    if !text.is_text() {
+        return Projection {
+            text: None,
+            reduced: true,
+            normalized: false,
+        };
+    }
+    if limit < 8 {
+        return Projection {
+            text: None,
+            reduced: true,
+            normalized: text.normalized,
+        };
+    }
+    let head = complete_utf8_head(head);
+    let tail = complete_utf8_tail(tail);
+    let normalized_head = normalize_head(head, head_next, text.normalized);
+    let normalized_tail = normalize(tail, text.normalized);
+    let separator = "\n...\n";
+    let content_limit = limit.saturating_sub(separator.len());
+    let head_end = floor_boundary(&normalized_head, content_limit / 2);
+    let tail_bytes = content_limit.saturating_sub(head_end);
+    let tail_start = ceil_boundary(
+        &normalized_tail,
+        normalized_tail.len().saturating_sub(tail_bytes),
+    );
+    Projection {
+        text: Some(format!(
+            "{}{}{}",
+            &normalized_head[..head_end],
+            separator,
+            &normalized_tail[tail_start..]
+        )),
+        reduced: true,
+        normalized: text.normalized,
+    }
+}
+
+fn complete_utf8_head(bytes: &[u8]) -> &str {
+    let mut end = bytes.len();
+    while end > 0 {
+        if let Ok(text) = std::str::from_utf8(&bytes[..end]) {
+            return text;
+        }
+        end -= 1;
+    }
+    ""
+}
+
+fn complete_utf8_tail(bytes: &[u8]) -> &str {
+    for start in 0..bytes.len().min(4) {
+        if let Ok(text) = std::str::from_utf8(&bytes[start..]) {
+            return text;
+        }
+    }
+    ""
+}
+
+fn normalize(text: &str, normalized: bool) -> String {
+    if normalized {
+        text.replace("\r\n", "\n")
+    } else {
+        text.to_owned()
+    }
+}
+
+fn normalize_head(text: &str, next: Option<u8>, normalized: bool) -> String {
+    let mut text = normalize(text, normalized);
+    if normalized && text.ends_with('\r') && next == Some(b'\n') {
+        text.pop();
+        text.push('\n');
+    }
+    text
+}
+
+struct StreamText {
+    valid: bool,
+    pending: Vec<u8>,
+    normalized: bool,
+    previous_cr: bool,
+}
+
+impl Default for StreamText {
+    fn default() -> Self {
+        Self {
+            valid: true,
+            pending: Vec::with_capacity(3),
+            normalized: false,
+            previous_cr: false,
+        }
+    }
+}
+
+impl StreamText {
+    fn observe(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        if self.previous_cr && bytes[0] == b'\n' || bytes.windows(2).any(|pair| pair == b"\r\n") {
+            self.normalized = true;
+        }
+        self.previous_cr = bytes.last() == Some(&b'\r');
+        if !self.valid {
+            return;
+        }
+        if self.pending.is_empty() {
+            self.validate(bytes);
+        } else {
+            let mut combined = std::mem::take(&mut self.pending);
+            combined.extend_from_slice(bytes);
+            self.validate(&combined);
+        }
+    }
+
+    fn validate(&mut self, bytes: &[u8]) {
+        match std::str::from_utf8(bytes) {
+            Ok(_) => self.pending.clear(),
+            Err(error) if error.error_len().is_none() => {
+                self.pending.clear();
+                self.pending
+                    .extend_from_slice(&bytes[error.valid_up_to()..]);
+                if self.pending.len() > 3 {
+                    self.valid = false;
+                    self.pending.clear();
+                }
+            }
+            Err(_) => {
+                self.valid = false;
+                self.pending.clear();
+            }
+        }
+    }
+
+    fn is_text(&self) -> bool {
+        self.valid && self.pending.is_empty()
+    }
+}
+
 fn floor_boundary(text: &str, mut index: usize) -> usize {
     index = index.min(text.len());
     while index > 0 && !text.is_char_boundary(index) {
@@ -380,14 +534,17 @@ fn flags(stdout_projection: &Projection, stderr_projection: &Projection, retaine
         | (if retained { RESULT_RETAINED } else { 0 })
 }
 
-fn stdin_bytes(
+async fn stdin_bytes(
     source: &InputSource,
     program: &Program,
 ) -> Result<Option<Arc<[u8]>>, OperationError> {
     let bytes = match source {
         InputSource::None => return Ok(None),
         InputSource::Inline(value) => Arc::<[u8]>::from(value.as_bytes()),
-        InputSource::Reference(reference) => program.store().get(*reference)?,
+        InputSource::Reference(reference) => {
+            let lease = program.store().get(*reference)?;
+            lease.read_all(MAX_STDIN_BYTES as u64).await?
+        }
     };
     if bytes.len() > MAX_STDIN_BYTES {
         return Err(OperationError::WorkLimit);
@@ -424,7 +581,7 @@ fn check_cancelled(program: &Program) -> Result<(), OperationError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ceil_boundary, floor_boundary, project};
+    use super::{StreamText, ceil_boundary, floor_boundary, project, project_sampled};
 
     #[test]
     fn projection_keeps_utf8_boundaries_and_both_ends() {
@@ -435,5 +592,32 @@ mod tests {
         assert!(std::str::from_utf8(text.as_bytes()).is_ok());
         assert!(floor_boundary("中", 1) == 0);
         assert!(ceil_boundary("中", 1) == "中".len());
+    }
+
+    #[test]
+    fn sampled_projection_tracks_split_utf8_invalid_middle_and_crlf_boundaries() {
+        let mut utf8 = StreamText::default();
+        utf8.observe(b"h\xe2");
+        utf8.observe(b"\x82\xac!");
+        let projected = project_sampled(b"h\xe2", Some(0x82), b"\x82\xac!", 64, &utf8);
+        assert_eq!(projected.text.as_deref(), Some("h\n...\n!"));
+        assert!(projected.reduced);
+
+        let mut invalid = StreamText::default();
+        invalid.observe(b"head");
+        invalid.observe(&[0xff]);
+        invalid.observe(b"tail");
+        assert!(
+            project_sampled(b"head", None, b"tail", 64, &invalid)
+                .text
+                .is_none()
+        );
+
+        let mut crlf = StreamText::default();
+        crlf.observe(b"head\r");
+        crlf.observe(b"\ntail");
+        let projected = project_sampled(b"head\r", Some(b'\n'), b"tail", 64, &crlf);
+        assert!(projected.normalized);
+        assert!(!projected.text.expect("text projection").contains('\r'));
     }
 }
