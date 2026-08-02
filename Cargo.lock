@@ -32,6 +32,7 @@ dependencies = [
  "a3s-ash-platform",
  "a3s-ash-protocol",
  "a3s-ash-store",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

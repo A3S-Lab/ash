@@ -173,6 +173,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         print!("{}", std::str::from_utf8(&encoded)?);
         return Ok(());
     }
+    if matches!(arguments.as_slice(), [command, ..] if command == "--capture-openai-agent-trace") {
+        tasks::capture_openai_agent_trace(&arguments[1..]).await?;
+        return Ok(());
+    }
     if matches!(arguments.as_slice(), [command] if command == "--tasks") {
         let mut encoded = serde_json::to_vec_pretty(&tasks::build_report().await?)?;
         encoded.push(b'\n');
@@ -186,13 +190,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tasks::validate_agent_trace(Path::new(path))?;
         return Ok(());
     }
-    if matches!(arguments.as_slice(), [command, _, allow] if command == "--agent-trace" && allow == "--allow-native-agent-exec")
+    if matches!(arguments.as_slice(), [command, _, audit, _] if command == "--validate-agent-trace" && audit == "--audit")
     {
-        let [_, path, _] = arguments.as_slice() else {
+        let [_, trace, _, audit] = arguments.as_slice() else {
+            unreachable!("agent trace audit arguments were matched above");
+        };
+        tasks::validate_agent_trace_audit(Path::new(trace), Path::new(audit))?;
+        return Ok(());
+    }
+    if matches!(arguments.as_slice(), [command, _, audit, _, allow] if command == "--agent-trace" && audit == "--audit" && allow == "--allow-native-agent-exec")
+    {
+        let [_, path, _, audit, _] = arguments.as_slice() else {
             unreachable!("agent trace replay arguments were matched above");
         };
-        let mut encoded =
-            serde_json::to_vec_pretty(&tasks::build_agent_report(Path::new(path)).await?)?;
+        let mut encoded = serde_json::to_vec_pretty(
+            &tasks::build_agent_report(Path::new(path), Path::new(audit)).await?,
+        )?;
         encoded.push(b'\n');
         print!("{}", std::str::from_utf8(&encoded)?);
         return Ok(());
@@ -224,7 +237,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         _ => {
             return Err(
-                "usage: a3s-ash-bench [--runtime [path-to-ash]|--tasks|--validate-agent-trace <path>|--agent-trace <path> --allow-native-agent-exec|--write-task-lock <path>|--check-task-lock <path>|--write <path>|--check <path>]".into(),
+                "usage: a3s-ash-bench [--runtime [path-to-ash]|--tasks|--capture-openai-agent-trace <trace> --audit <jsonl> --experiment-id <id> --model <model> --context-tokens <n> --max-output-tokens <n> --reasoning-effort <effort> [--repetitions <n>] [--seed <n>]|--validate-agent-trace <path> [--audit <jsonl>]|--agent-trace <path> --audit <jsonl> --allow-native-agent-exec|--write-task-lock <path>|--check-task-lock <path>|--write <path>|--check <path>]".into(),
             );
         }
     }

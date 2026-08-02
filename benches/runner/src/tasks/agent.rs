@@ -26,9 +26,14 @@ use super::{
 };
 use crate::{Measurement, measure};
 
+mod openai;
+
+pub(crate) use openai::capture_openai_agent_trace;
+
 const TRACE_SCHEMA: u8 = 1;
 const REPORT_SCHEMA: u8 = 1;
 const MAX_TRACE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_AUDIT_FIELD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_REPETITIONS: u16 = 32;
 const MAX_ATTEMPTS: usize = 64;
 const MAX_MODEL_ELAPSED_MILLIS: u64 = 3_600_000;
@@ -52,6 +57,7 @@ struct AgentTrace {
     architecture: String,
     repetitions: u16,
     primers: PrimerSet,
+    audit_sha256: String,
     runs: Vec<AgentRunTrace>,
 }
 
@@ -73,6 +79,7 @@ struct ModelMetadata {
     max_output_tokens: u64,
     temperature: String,
     top_p: String,
+    reasoning_effort: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -81,6 +88,8 @@ struct PrimerSet {
     shared: String,
     ash: String,
     native_shell: String,
+    ash_tools: String,
+    native_shell_tools: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -103,10 +112,13 @@ struct AgentRunTrace {
 #[serde(deny_unknown_fields)]
 struct AgentTaskTrace {
     id: String,
+    prompt: String,
     attempts: Vec<AgentAttemptTrace>,
     final_stdout: String,
     final_stderr: String,
     finish_elapsed_millis: u64,
+    finish_request_sha256: String,
+    finish_response_sha256: String,
     usage: ProviderUsage,
 }
 
@@ -125,6 +137,8 @@ struct AgentAttemptTrace {
     model_output: String,
     tool_result_sha256: String,
     model_elapsed_millis: u64,
+    provider_request_sha256: String,
+    provider_response_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -135,6 +149,23 @@ struct ProviderUsage {
     visible_output_tokens: u64,
     hidden_reasoning_tokens: Option<u64>,
     raw_usage_sha256: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AgentAuditRecord {
+    schema: u8,
+    provider: String,
+    arm: AgentArm,
+    repetition: u16,
+    seed: u64,
+    task_id: String,
+    turn: usize,
+    phase: String,
+    request_sha256: String,
+    response_sha256: String,
+    request_json: String,
+    response_json: String,
 }
 
 impl ProviderUsage {
@@ -152,7 +183,9 @@ pub(crate) struct AgentCorpusReport {
     agent_results: bool,
     provenance: &'static str,
     provider_attestation_verified: bool,
+    audit_verified: bool,
     trace_sha256: String,
+    audit_sha256: String,
     experiment_id: String,
     captured_at_utc: String,
     corpus: &'static str,
@@ -178,6 +211,8 @@ struct PrimerReport {
     shared: TextEvidence,
     ash: TextEvidence,
     native_shell: TextEvidence,
+    ash_tools: TextEvidence,
+    native_shell_tools: TextEvidence,
 }
 
 #[derive(Debug, Serialize)]
@@ -229,6 +264,8 @@ struct AgentTaskReport {
     replay_elapsed_ns: u128,
     final_stdout_sha256: String,
     final_stderr_sha256: String,
+    finish_request_sha256: String,
+    finish_response_sha256: String,
     semantic_output_match: bool,
     expected_files_match: bool,
     final_tree_match: bool,
@@ -245,6 +282,8 @@ struct AgentAttemptReport {
     tool_result: Measurement,
     model_output_sha256: String,
     tool_result_sha256: String,
+    provider_request_sha256: String,
+    provider_response_sha256: String,
     raw_stdout_sha256: Option<String>,
     raw_stderr_sha256: Option<String>,
     model_elapsed_millis: u64,
@@ -331,9 +370,129 @@ pub(crate) fn validate_agent_trace(path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-pub(crate) async fn build_agent_report(path: &Path) -> Result<AgentCorpusReport, Box<dyn Error>> {
+pub(crate) fn validate_agent_trace_audit(
+    trace_path: &Path,
+    audit_path: &Path,
+) -> Result<(), Box<dyn Error>> {
     let manifest = load_manifest()?;
     let lock = load_lock(&manifest)?;
+    let (trace, _) = read_trace(trace_path, &manifest, &lock)?;
+    let metadata = fs::metadata(audit_path)?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_TRACE_BYTES {
+        return Err(io::Error::other("agent audit size is invalid").into());
+    }
+    let bytes = fs::read(audit_path)?;
+    if sha256_hex(&bytes) != trace.audit_sha256 || bytes.last() != Some(&b'\n') {
+        return Err(io::Error::other("agent audit digest or framing differs").into());
+    }
+    let mut records = Vec::new();
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let payload = line
+            .strip_suffix(b"\n")
+            .ok_or_else(|| io::Error::other("agent audit line is not LF framed"))?;
+        if payload.is_empty() || payload.contains(&b'\r') {
+            return Err(io::Error::other("agent audit line is not canonical").into());
+        }
+        let record: AgentAuditRecord = serde_json::from_slice(payload)?;
+        if serde_json::to_vec(&record)? != payload {
+            return Err(io::Error::other("agent audit JSON is not canonical").into());
+        }
+        validate_audit_record(&record, &trace.model.provider)?;
+        records.push(record);
+    }
+    let mut index = 0_usize;
+    for run in &trace.runs {
+        for task in &run.tasks {
+            for (turn, attempt) in task.attempts.iter().enumerate() {
+                let record = records
+                    .get(index)
+                    .ok_or_else(|| io::Error::other("agent audit record is missing"))?;
+                if !audit_record_matches(
+                    record,
+                    run,
+                    task,
+                    turn,
+                    "action",
+                    &attempt.provider_request_sha256,
+                    &attempt.provider_response_sha256,
+                ) {
+                    return Err(
+                        io::Error::other("agent audit does not match the trace matrix").into(),
+                    );
+                }
+                index += 1;
+            }
+            let record = records
+                .get(index)
+                .ok_or_else(|| io::Error::other("agent audit finish record is missing"))?;
+            if !audit_record_matches(
+                record,
+                run,
+                task,
+                task.attempts.len(),
+                "finish",
+                &task.finish_request_sha256,
+                &task.finish_response_sha256,
+            ) {
+                return Err(io::Error::other("agent audit finish does not match trace").into());
+            }
+            index += 1;
+        }
+    }
+    if index != records.len() {
+        return Err(io::Error::other("agent audit has surplus records").into());
+    }
+    Ok(())
+}
+
+fn validate_audit_record(record: &AgentAuditRecord, provider: &str) -> Result<(), Box<dyn Error>> {
+    if record.schema != 1
+        || record.provider != provider
+        || !valid_name(&record.task_id)
+        || !matches!(record.phase.as_str(), "action" | "finish")
+        || !valid_sha256(&record.request_sha256)
+        || !valid_sha256(&record.response_sha256)
+        || record.request_json.is_empty()
+        || record.response_json.is_empty()
+        || record.request_json.len() > MAX_AUDIT_FIELD_BYTES
+        || record.response_json.len() > MAX_AUDIT_FIELD_BYTES
+        || sha256_hex(record.request_json.as_bytes()) != record.request_sha256
+        || sha256_hex(record.response_json.as_bytes()) != record.response_sha256
+    {
+        return Err(io::Error::other("agent audit record is invalid").into());
+    }
+    let _: serde_json::Value = serde_json::from_str(&record.request_json)?;
+    let _: serde_json::Value = serde_json::from_str(&record.response_json)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_record_matches(
+    record: &AgentAuditRecord,
+    run: &AgentRunTrace,
+    task: &AgentTaskTrace,
+    turn: usize,
+    phase: &str,
+    request_sha256: &str,
+    response_sha256: &str,
+) -> bool {
+    record.arm == run.arm
+        && record.repetition == run.repetition
+        && record.seed == run.seed
+        && record.task_id == task.id
+        && record.turn == turn
+        && record.phase == phase
+        && record.request_sha256 == request_sha256
+        && record.response_sha256 == response_sha256
+}
+
+pub(crate) async fn build_agent_report(
+    path: &Path,
+    audit_path: &Path,
+) -> Result<AgentCorpusReport, Box<dyn Error>> {
+    let manifest = load_manifest()?;
+    let lock = load_lock(&manifest)?;
+    validate_agent_trace_audit(path, audit_path)?;
     let (trace, trace_bytes) = read_trace(path, &manifest, &lock)?;
     let cl100k = tiktoken_rs::cl100k_base()?;
     let o200k = tiktoken_rs::o200k_base()?;
@@ -341,6 +500,8 @@ pub(crate) async fn build_agent_report(path: &Path) -> Result<AgentCorpusReport,
         shared: text_evidence(&trace.primers.shared, &cl100k, &o200k),
         ash: text_evidence(&trace.primers.ash, &cl100k, &o200k),
         native_shell: text_evidence(&trace.primers.native_shell, &cl100k, &o200k),
+        ash_tools: text_evidence(&trace.primers.ash_tools, &cl100k, &o200k),
+        native_shell_tools: text_evidence(&trace.primers.native_shell_tools, &cl100k, &o200k),
     };
     let tasks_by_id = manifest
         .tasks
@@ -351,12 +512,20 @@ pub(crate) async fn build_agent_report(path: &Path) -> Result<AgentCorpusReport,
     let mut runs = Vec::with_capacity(trace.runs.len());
     for run in &trace.runs {
         let replay_started = Instant::now();
-        let arm_primer = match run.arm {
-            AgentArm::Ash => &trace.primers.ash,
-            AgentArm::NativeShell => &trace.primers.native_shell,
+        let (arm_primer, arm_tools) = match run.arm {
+            AgentArm::Ash => (&trace.primers.ash, &trace.primers.ash_tools),
+            AgentArm::NativeShell => (
+                &trace.primers.native_shell,
+                &trace.primers.native_shell_tools,
+            ),
         };
         let mut normalized_input = sum_text_measurements(
-            [trace.primers.shared.as_str(), arm_primer.as_str()].into_iter(),
+            [
+                trace.primers.shared.as_str(),
+                arm_primer.as_str(),
+                arm_tools.as_str(),
+            ]
+            .into_iter(),
             &cl100k,
             &o200k,
         );
@@ -426,7 +595,9 @@ pub(crate) async fn build_agent_report(path: &Path) -> Result<AgentCorpusReport,
         agent_results: true,
         provenance: "external-self-attested-trace",
         provider_attestation_verified: false,
+        audit_verified: true,
         trace_sha256: sha256_hex(&trace_bytes),
+        audit_sha256: trace.audit_sha256,
         experiment_id: trace.experiment_id,
         captured_at_utc: trace.captured_at_utc,
         corpus: "benches/tasks/v1/manifest.json",
@@ -438,7 +609,7 @@ pub(crate) async fn build_agent_report(path: &Path) -> Result<AgentCorpusReport,
         model: trace.model,
         repetitions: trace.repetitions,
         provider_accounting: "provider-input+visible-model-output; cached input remains included; hidden reasoning excluded",
-        normalized_accounting: "shared-primer+arm-primer+objectives+tool-results+model-requests+final-output",
+        normalized_accounting: "shared-primer+arm-primer+tool-schema+task-prompts+tool-results+model-requests+final-output",
         hidden_reasoning_tokens_included: false,
         tokenizers: [
             "tiktoken-rs/0.12.0:cl100k_base",
@@ -506,6 +677,7 @@ fn validate_trace(
     validate_metadata(&trace.model.revision)?;
     validate_metadata(&trace.model.temperature)?;
     validate_metadata(&trace.model.top_p)?;
+    validate_metadata(&trace.model.reasoning_effort)?;
     if trace.model.context_tokens == 0
         || trace.model.context_tokens > MAX_PROVIDER_TOKENS
         || trace.model.max_output_tokens == 0
@@ -516,6 +688,11 @@ fn validate_trace(
     validate_visible_text(&trace.primers.shared, false)?;
     validate_visible_text(&trace.primers.ash, false)?;
     validate_visible_text(&trace.primers.native_shell, false)?;
+    validate_visible_text(&trace.primers.ash_tools, false)?;
+    validate_visible_text(&trace.primers.native_shell_tools, false)?;
+    if !valid_sha256(&trace.audit_sha256) {
+        return Err(io::Error::other("agent audit digest is invalid"));
+    }
 
     let declared_tasks = manifest
         .tasks
@@ -584,7 +761,8 @@ fn validate_task_trace(
     definition: &TaskDefinition,
     arm: AgentArm,
 ) -> Result<(), io::Error> {
-    if task.attempts.is_empty()
+    if task.prompt != agent_task_prompt(definition)
+        || task.attempts.is_empty()
         || task.attempts.len() > MAX_ATTEMPTS
         || task.finish_elapsed_millis > MAX_MODEL_ELAPSED_MILLIS
     {
@@ -594,6 +772,10 @@ fn validate_task_trace(
     }
     validate_visible_text(&task.final_stdout, true)?;
     validate_visible_text(&task.final_stderr, true)?;
+    validate_visible_text(&task.prompt, false)?;
+    if !valid_sha256(&task.finish_request_sha256) || !valid_sha256(&task.finish_response_sha256) {
+        return Err(io::Error::other("agent finish exchange digest is invalid"));
+    }
     if task
         .final_stdout
         .len()
@@ -608,6 +790,8 @@ fn validate_task_trace(
     for attempt in &task.attempts {
         validate_visible_text(&attempt.model_output, false)?;
         if !valid_sha256(&attempt.tool_result_sha256)
+            || !valid_sha256(&attempt.provider_request_sha256)
+            || !valid_sha256(&attempt.provider_response_sha256)
             || attempt.model_elapsed_millis > MAX_MODEL_ELAPSED_MILLIS
             || (arm == AgentArm::NativeShell && attempt.kind != AttemptKind::Request)
         {
@@ -615,6 +799,17 @@ fn validate_task_trace(
         }
     }
     Ok(())
+}
+
+fn agent_task_prompt(task: &TaskDefinition) -> String {
+    format!(
+        "id:{}\nobjective:{}\ncapabilities:[{}]\nlimits{{ms,out}}:{},{}\n",
+        task.id,
+        task.objective,
+        task.capabilities.join(","),
+        task.limits.millis,
+        task.limits.output_bytes,
+    )
 }
 
 fn validate_usage(usage: &ProviderUsage) -> Result<(), io::Error> {
@@ -776,9 +971,9 @@ async fn replay_ash_attempts(
     Box<dyn Error>,
 > {
     let mut reports = Vec::with_capacity(trace.attempts.len());
-    let mut normalized_input = measure(&task.objective, cl100k, o200k);
+    let mut normalized_input = measure(&trace.prompt, cl100k, o200k);
     let mut normalized_output = Measurement::default();
-    let mut visible_bytes = task.objective.len();
+    let mut visible_bytes = trace.prompt.len();
     let mut executed_operations = 0_usize;
     let mut failed_attempts = 0_usize;
     let mut retries = 0_usize;
@@ -888,6 +1083,8 @@ async fn replay_ash_attempts(
             tool_result: tool_measurement,
             model_output_sha256: sha256_hex(attempt.model_output.as_bytes()),
             tool_result_sha256: attempt.tool_result_sha256.clone(),
+            provider_request_sha256: attempt.provider_request_sha256.clone(),
+            provider_response_sha256: attempt.provider_response_sha256.clone(),
             raw_stdout_sha256: None,
             raw_stderr_sha256: None,
             model_elapsed_millis: attempt.model_elapsed_millis,
@@ -924,9 +1121,9 @@ async fn replay_native_task(
     }
     let started = Instant::now();
     let mut reports = Vec::with_capacity(trace.attempts.len());
-    let mut normalized_input = measure(&task.objective, cl100k, o200k);
+    let mut normalized_input = measure(&trace.prompt, cl100k, o200k);
     let mut normalized_output = Measurement::default();
-    let mut visible_bytes = task.objective.len();
+    let mut visible_bytes = trace.prompt.len();
     let mut failed_attempts = 0_usize;
     let mut retries = 0_usize;
     let mut retry_pending = false;
@@ -994,6 +1191,8 @@ async fn replay_native_task(
             tool_result: tool_measurement,
             model_output_sha256: sha256_hex(attempt.model_output.as_bytes()),
             tool_result_sha256: attempt.tool_result_sha256.clone(),
+            provider_request_sha256: attempt.provider_request_sha256.clone(),
+            provider_response_sha256: attempt.provider_response_sha256.clone(),
             raw_stdout_sha256: Some(sha256_hex(&process.stdout)),
             raw_stderr_sha256: Some(sha256_hex(&process.stderr)),
             model_elapsed_millis: attempt.model_elapsed_millis,
@@ -1085,6 +1284,8 @@ fn finish_task_report(
             replay_elapsed_ns,
             final_stdout_sha256: sha256_hex(trace.final_stdout.as_bytes()),
             final_stderr_sha256: sha256_hex(trace.final_stderr.as_bytes()),
+            finish_request_sha256: trace.finish_request_sha256.clone(),
+            finish_response_sha256: trace.finish_response_sha256.clone(),
             semantic_output_match,
             expected_files_match,
             final_tree_match,
@@ -1479,11 +1680,12 @@ fn ratio_percent_u64(value: u64, baseline: u64) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentArm, AgentAttemptTrace, AgentRunTrace, AgentTaskTrace, AgentTrace, AttemptKind,
-        DriverMetadata, INVALID_REQUEST_RESULT, ModelMetadata, NativeProcessOutput, PrimerSet,
-        ProviderUsage, build_agent_report, native_tool_result, normalize_agent_stream,
-        parse_agent_request, ratio_percent_u64, replay_ash_task, replay_native_task,
-        run_native_agent_command, valid_timestamp, validate_trace,
+        AgentArm, AgentAttemptTrace, AgentAuditRecord, AgentRunTrace, AgentTaskTrace, AgentTrace,
+        AttemptKind, DriverMetadata, INVALID_REQUEST_RESULT, ModelMetadata, NativeProcessOutput,
+        PrimerSet, ProviderUsage, agent_task_prompt, build_agent_report, native_tool_result,
+        normalize_agent_stream, parse_agent_request, ratio_percent_u64, replay_ash_task,
+        replay_native_task, run_native_agent_command, valid_timestamp, validate_agent_trace_audit,
+        validate_trace,
     };
     use crate::tasks::{
         LOCK_BYTES, MANIFEST_BYTES, TaskDefinition, copy_workspace, execute_ash_task, fixture_path,
@@ -1577,15 +1779,20 @@ mod tests {
                 .iter()
                 .map(|task| AgentTaskTrace {
                     id: task.id.clone(),
+                    prompt: agent_task_prompt(task),
                     attempts: vec![AgentAttemptTrace {
                         kind: AttemptKind::Request,
                         model_output: "request\n".to_owned(),
                         tool_result_sha256: "0".repeat(64),
                         model_elapsed_millis: 1,
+                        provider_request_sha256: "0".repeat(64),
+                        provider_response_sha256: "0".repeat(64),
                     }],
                     final_stdout: String::new(),
                     final_stderr: String::new(),
                     finish_elapsed_millis: 1,
+                    finish_request_sha256: "0".repeat(64),
+                    finish_response_sha256: "0".repeat(64),
                     usage: usage(),
                 })
                 .collect::<Vec<_>>()
@@ -1610,6 +1817,7 @@ mod tests {
                 max_output_tokens: 256,
                 temperature: "0".to_owned(),
                 top_p: "1".to_owned(),
+                reasoning_effort: "none".to_owned(),
             },
             platform: std::env::consts::OS.to_owned(),
             architecture: std::env::consts::ARCH.to_owned(),
@@ -1618,7 +1826,10 @@ mod tests {
                 shared: "shared\n".to_owned(),
                 ash: "ash\n".to_owned(),
                 native_shell: "native\n".to_owned(),
+                ash_tools: "tools\n".to_owned(),
+                native_shell_tools: "tools\n".to_owned(),
             },
+            audit_sha256: "0".repeat(64),
             runs: vec![
                 AgentRunTrace {
                     arm: AgentArm::Ash,
@@ -1651,27 +1862,35 @@ mod tests {
         let native_result = capture_native_result(task).await;
         let ash_trace = AgentTaskTrace {
             id: task.id.clone(),
+            prompt: agent_task_prompt(task),
             attempts: vec![
                 AgentAttemptTrace {
                     kind: AttemptKind::InvalidRequest,
                     model_output: "not ason\n".to_owned(),
                     tool_result_sha256: sha256_hex(INVALID_REQUEST_RESULT.as_bytes()),
                     model_elapsed_millis: 1,
+                    provider_request_sha256: "0".repeat(64),
+                    provider_response_sha256: "0".repeat(64),
                 },
                 AgentAttemptTrace {
                     kind: AttemptKind::Request,
                     model_output: ash.steps[0].request.clone(),
                     tool_result_sha256: sha256_hex(ash.steps[0].response.as_bytes()),
                     model_elapsed_millis: 1,
+                    provider_request_sha256: "0".repeat(64),
+                    provider_response_sha256: "0".repeat(64),
                 },
             ],
             final_stdout: task.expected.stdout.clone(),
             final_stderr: task.expected.stderr.clone(),
             finish_elapsed_millis: 1,
+            finish_request_sha256: "0".repeat(64),
+            finish_response_sha256: "0".repeat(64),
             usage: usage(),
         };
         let native_trace = AgentTaskTrace {
             id: task.id.clone(),
+            prompt: agent_task_prompt(task),
             attempts: vec![AgentAttemptTrace {
                 kind: AttemptKind::Request,
                 model_output: task
@@ -1682,10 +1901,14 @@ mod tests {
                     .clone(),
                 tool_result_sha256: sha256_hex(native_result.as_bytes()),
                 model_elapsed_millis: 1,
+                provider_request_sha256: "0".repeat(64),
+                provider_response_sha256: "0".repeat(64),
             }],
             final_stdout: task.expected.stdout.clone(),
             final_stderr: task.expected.stderr.clone(),
             finish_elapsed_millis: 1,
+            finish_request_sha256: "0".repeat(64),
+            finish_response_sha256: "0".repeat(64),
             usage: usage(),
         };
         let cl100k = tiktoken_rs::cl100k_base().expect("cl100k");
@@ -1714,6 +1937,7 @@ mod tests {
             let ash = execute_ash_task(task).await.expect("ASH fixture trace");
             ash_tasks.push(AgentTaskTrace {
                 id: task.id.clone(),
+                prompt: agent_task_prompt(task),
                 attempts: ash
                     .steps
                     .into_iter()
@@ -1722,16 +1946,21 @@ mod tests {
                         model_output: step.request,
                         tool_result_sha256: sha256_hex(step.response.as_bytes()),
                         model_elapsed_millis: 1,
+                        provider_request_sha256: "0".repeat(64),
+                        provider_response_sha256: "0".repeat(64),
                     })
                     .collect(),
                 final_stdout: task.expected.stdout.clone(),
                 final_stderr: task.expected.stderr.clone(),
                 finish_elapsed_millis: 1,
+                finish_request_sha256: "0".repeat(64),
+                finish_response_sha256: "0".repeat(64),
                 usage: usage(),
             });
             let result = capture_native_result(task).await;
             native_tasks.push(AgentTaskTrace {
                 id: task.id.clone(),
+                prompt: agent_task_prompt(task),
                 attempts: vec![AgentAttemptTrace {
                     kind: AttemptKind::Request,
                     model_output: task
@@ -1742,14 +1971,18 @@ mod tests {
                         .clone(),
                     tool_result_sha256: sha256_hex(result.as_bytes()),
                     model_elapsed_millis: 1,
+                    provider_request_sha256: "0".repeat(64),
+                    provider_response_sha256: "0".repeat(64),
                 }],
                 final_stdout: task.expected.stdout.clone(),
                 final_stderr: task.expected.stderr.clone(),
                 finish_elapsed_millis: 1,
+                finish_request_sha256: "0".repeat(64),
+                finish_response_sha256: "0".repeat(64),
                 usage: usage(),
             });
         }
-        let trace = AgentTrace {
+        let mut trace = AgentTrace {
             schema: 1,
             evidence_kind: "model-selected-trace".to_owned(),
             experiment_id: "synthetic-test-only".to_owned(),
@@ -1769,6 +2002,7 @@ mod tests {
                 max_output_tokens: 1024,
                 temperature: "0".to_owned(),
                 top_p: "1".to_owned(),
+                reasoning_effort: "none".to_owned(),
             },
             platform: std::env::consts::OS.to_owned(),
             architecture: std::env::consts::ARCH.to_owned(),
@@ -1777,7 +2011,10 @@ mod tests {
                 shared: "test-only shared primer\n".to_owned(),
                 ash: "test-only ASH primer\n".to_owned(),
                 native_shell: "test-only native primer\n".to_owned(),
+                ash_tools: "test-only ASH tools\n".to_owned(),
+                native_shell_tools: "test-only native tools\n".to_owned(),
             },
+            audit_sha256: "0".repeat(64),
             runs: vec![
                 AgentRunTrace {
                     arm: AgentArm::Ash,
@@ -1795,13 +2032,66 @@ mod tests {
         };
         let directory = tempfile::TempDir::new().expect("trace directory");
         let path = directory.path().join("trace.json");
+        let audit_path = directory.path().join("audit.jsonl");
+        let exchange_json = "{}".to_owned();
+        let exchange_sha256 = sha256_hex(exchange_json.as_bytes());
+        let mut audit = Vec::new();
+        for run in &mut trace.runs {
+            for task in &mut run.tasks {
+                for (turn, attempt) in task.attempts.iter_mut().enumerate() {
+                    attempt.provider_request_sha256 = exchange_sha256.clone();
+                    attempt.provider_response_sha256 = exchange_sha256.clone();
+                    audit.push(AgentAuditRecord {
+                        schema: 1,
+                        provider: trace.model.provider.clone(),
+                        arm: run.arm,
+                        repetition: run.repetition,
+                        seed: run.seed,
+                        task_id: task.id.clone(),
+                        turn,
+                        phase: "action".to_owned(),
+                        request_sha256: exchange_sha256.clone(),
+                        response_sha256: exchange_sha256.clone(),
+                        request_json: exchange_json.clone(),
+                        response_json: exchange_json.clone(),
+                    });
+                }
+                task.finish_request_sha256 = exchange_sha256.clone();
+                task.finish_response_sha256 = exchange_sha256.clone();
+                audit.push(AgentAuditRecord {
+                    schema: 1,
+                    provider: trace.model.provider.clone(),
+                    arm: run.arm,
+                    repetition: run.repetition,
+                    seed: run.seed,
+                    task_id: task.id.clone(),
+                    turn: task.attempts.len(),
+                    phase: "finish".to_owned(),
+                    request_sha256: exchange_sha256.clone(),
+                    response_sha256: exchange_sha256.clone(),
+                    request_json: exchange_json.clone(),
+                    response_json: exchange_json.clone(),
+                });
+            }
+        }
+        let mut audit_bytes = Vec::new();
+        for record in &audit {
+            serde_json::to_writer(&mut audit_bytes, record).expect("audit record");
+            audit_bytes.push(b'\n');
+        }
+        trace.audit_sha256 = sha256_hex(&audit_bytes);
         std::fs::write(
             &path,
             serde_json::to_vec_pretty(&trace).expect("trace JSON"),
         )
         .expect("trace file");
-        let report = build_agent_report(&path).await.expect("paired report");
+        std::fs::write(&audit_path, audit_bytes).expect("audit file");
+        validate_agent_trace_audit(&path, &audit_path).expect("trace audit validation");
+        let report = build_agent_report(&path, &audit_path)
+            .await
+            .expect("paired report");
         assert!(report.agent_results);
+        assert!(report.audit_verified);
         assert!(report.gates.passed);
         assert_eq!(report.runs.len(), 2);
     }

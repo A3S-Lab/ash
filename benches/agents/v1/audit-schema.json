@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:a3s:ash:agent-audit-record:v1",
+  "title": "ASH Coding Agent provider audit JSONL record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "provider",
+    "arm",
+    "repetition",
+    "seed",
+    "task_id",
+    "turn",
+    "phase",
+    "request_sha256",
+    "response_sha256",
+    "request_json",
+    "response_json"
+  ],
+  "properties": {
+    "schema": { "const": 1 },
+    "provider": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\r\\n\\u0000]+$"
+    },
+    "arm": { "enum": ["ash", "native-shell"] },
+    "repetition": { "type": "integer", "minimum": 0, "maximum": 31 },
+    "seed": { "type": "integer", "minimum": 0 },
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "turn": { "type": "integer", "minimum": 0, "maximum": 64 },
+    "phase": { "enum": ["action", "finish"] },
+    "request_sha256": { "$ref": "#/$defs/sha256" },
+    "response_sha256": { "$ref": "#/$defs/sha256" },
+    "request_json": { "type": "string", "minLength": 1, "maxLength": 4194304 },
+    "response_json": { "type": "string", "minLength": 1, "maxLength": 4194304 }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
