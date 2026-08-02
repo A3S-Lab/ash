@@ -4,10 +4,19 @@
 
 <p align="center"><strong>AI Native Shell</strong> · typed parallel execution · compact model context</p>
 
+<p align="center">
+  <a href="https://a3s-lab.github.io/ash/">中文网站</a> ·
+  <a href="https://a3s-lab.github.io/ash/en/">English docs</a> ·
+  <a href="https://a3s-lab.github.io/ash/guide/install.html">Install</a> ·
+  <a href="https://a3s-lab.github.io/ash/guide/protocol.html">ASH/1</a>
+</p>
+
 > [!IMPORTANT]
 > `ash` is pre-release. Source builds now execute typed `exec`, `read`, `list`, `search`, compare-and-swap `patch`, durable file-only `fs` transactions, workspace `snapshot/delta`, and bounded dependency-graph `batch` requests; they also negotiate least-privilege capabilities, enforce session/action-bound one-time approval permits, inspect retained results, cancel active work, and verify, activate, recover, or roll back signed releases. Cross-platform installers and a fail-closed six-target release workflow are implemented; release credentials are not provisioned and no supported signed binary release is published yet.
 
 `ash` is a greenfield shell designed around coding agents rather than terminal users. It turns shell work into typed programs, executes independent work across bounded I/O and CPU planes, and returns only the evidence worth placing in an LLM context.
+
+The [project website](https://a3s-lab.github.io/ash/) opens in Chinese by default, switches between Chinese and English plus `next` and frozen documentation versions, and uses a reduced-motion-aware terminal animation to walk through the implemented ASH/1 execution path.
 
 ## Proof starts at the result
 
@@ -56,12 +65,39 @@ The externally visible path remains deterministic:
 
 Read the complete contracts:
 
+- [Website and versioned documentation](https://a3s-lab.github.io/ash/)
 - [System architecture](./docs/architecture.md)
 - [ASH/1 protocol and ASON specification](./docs/protocol.md)
 - [Cross-platform distribution and one-click installation](./docs/distribution.md)
 - [Release operator contract](./docs/releasing.md)
 - [Token-efficiency benchmark contract](./docs/benchmarks.md)
 - [Rust and dual-plane runtime decision](./docs/decisions/0001-rust-and-dual-plane-runtime.md)
+
+## Cross-platform installation
+
+> [!WARNING]
+> No supported signed binary release exists yet. The Linux, macOS, and Windows release installers below are implemented and tested, but intentionally fail closed until the first signed release is published. The Cargo command builds the current source and is available now for development validation; it is not a signed release.
+
+Linux and macOS (`x86-64` and `ARM64`):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/A3S-Lab/ash/main/install.sh | sh
+```
+
+Windows PowerShell (`x86-64` and `ARM64`):
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+irm https://raw.githubusercontent.com/A3S-Lab/ash/main/install.ps1 | iex
+```
+
+Build the current source with Cargo:
+
+```sh
+cargo install --git https://github.com/A3S-Lab/ash --locked a3s-ash
+```
+
+Platform detection, pinned versions, custom prefixes, offline archives, checksum verification, transactional activation, and uninstall are covered by the [installation guide](https://a3s-lab.github.io/ash/guide/install.html).
 
 ## Verify the current baseline
 
@@ -71,6 +107,8 @@ cd ash
 cargo test --workspace --all-targets
 cargo run -p a3s-ash-bench --release --locked -- \
   --check benches/reports/v0.1.0/format.json
+npm --prefix website ci
+npm --prefix website run check
 ```
 
 Run one canonical request from the repository root:
@@ -92,7 +130,7 @@ The first usable release must ship as one native `ash` binary and include:
 - Linux and macOS `install.sh`, Windows `install.ps1`, verified release artifacts, self-update, and rollback;
 - native builds for x86-64 and ARM64 on Linux, macOS, and Windows.
 
-Installation commands will be published only when signed binaries and clean-host end-to-end release tests exist. The implemented entrypoints and remaining trust boundary are documented in the [distribution design](./docs/distribution.md).
+The release installer entrypoints are public so their contract can be tested, but they fail closed until signed binaries and clean-host end-to-end release evidence exist. The implemented entrypoints and remaining trust boundary are documented in the [distribution design](./docs/distribution.md).
 
 ## Repository ownership
 

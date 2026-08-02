@@ -1,0 +1,38 @@
+---
+title: 基准与质量门禁
+description: ash 的 Token 证据、多核确定性、测试、模糊测试和发布验收边界。
+---
+
+# 基准与质量门禁
+
+ash 优先优化 Coding Agent 完成任务的总 Token、延迟和可恢复性。任何数字都必须来自
+可复现语料、锁定工具版本和提交内报告。
+
+## 格式基线
+
+```bash
+cargo run -p a3s-ash-bench --locked -- \
+  --check benches/reports/v0.1.0/format.json
+```
+
+报告固定语料 SHA-256、tokenizer、原始字节、Token 数、相对比例和门槛。当前 ASON
+在两种 tokenizer 上都使用紧凑行式 JSON 约 62% 的 Token，回归上限为 65%。
+
+## 多核确定性
+
+`ComputePool` 验证多个 Worker 配置得到相同输出摘要；DAG 测试证明就绪节点可以重叠，
+失败只跳过后代，最终节点顺序稳定。该测试证明确定性与并发结构，不冒充硬件吞吐结论。
+
+## 当前自动化
+
+- 135 项 Rust 单元与集成测试。
+- Linux、macOS、Windows 的 `cargo check` 与测试。
+- 三平台安装器的真实发行构建 Smoke。
+- ASON parser 与更新元数据 fuzz target。
+- 文件事务 crash cutpoint、更新激活/恢复和取消竞态测试。
+- 237 条锁定第三方许可证清单。
+
+## 仍需发布的证据
+
+首个受支持版本还需要真实 Agent 任务基准、持续 Fuzz 时长记录、硬件标注的延迟/吞吐
+报告，以及使用正式凭据完成的六目标安装、升级和回滚结果。

@@ -1,0 +1,11 @@
+{
+  "current": "next",
+  "archives": [
+    {
+      "version": "v0.1.0",
+      "sourceCommit": "d8756614ad6a54128336f50a6a52fcb6f92d1305",
+      "status": "source-checkpoint",
+      "supportedBinaryRelease": false
+    }
+  ]
+}

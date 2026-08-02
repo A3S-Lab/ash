@@ -1,0 +1,80 @@
+---
+title: 跨平台安装
+description: 使用 Linux、macOS 和 Windows 一键安装脚本，或从 Rust 源码构建 ash。
+---
+
+# 跨平台安装
+
+ash 提供同一安装契约下的 Unix Shell 与 Windows PowerShell 入口。安装器支持最新稳定
+版、固定版本、离线归档、自定义目录、强制替换和卸载。
+
+:::danger 预发布信任边界
+目前没有受支持的签名二进制 Release。以下发行安装命令已经过 CI 验证，但在首个签名
+Release 发布前会安全失败。需要验证这个检查点时，请使用本页钉住提交的 Cargo 方式。
+:::
+
+## Linux
+
+支持 x86-64 与 ARM64：
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://raw.githubusercontent.com/A3S-Lab/ash/d8756614ad6a54128336f50a6a52fcb6f92d1305/install.sh | sh
+```
+
+## macOS
+
+支持 Intel 与 Apple Silicon，使用同一个 Unix 安装入口：
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://raw.githubusercontent.com/A3S-Lab/ash/d8756614ad6a54128336f50a6a52fcb6f92d1305/install.sh | sh
+```
+
+## Windows
+
+在 PowerShell 5.1 或更新版本中运行：
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+irm https://raw.githubusercontent.com/A3S-Lab/ash/d8756614ad6a54128336f50a6a52fcb6f92d1305/install.ps1 | iex
+```
+
+## 从源码安装
+
+此方式需要稳定版 Rust 工具链，并使用仓库锁文件：
+
+```bash
+cargo install --git https://github.com/A3S-Lab/ash --rev d8756614ad6a54128336f50a6a52fcb6f92d1305 --locked a3s-ash
+```
+
+源码安装适合开发验证，不等同于签名发行安装，也不会获得发行包的来源证明。
+
+## 目标矩阵
+
+| 平台    | 架构          | 目标三元组                   | 归档      |
+| ------- | ------------- | ---------------------------- | --------- |
+| Linux   | x86-64        | `x86_64-unknown-linux-musl`  | `.tar.gz` |
+| Linux   | ARM64         | `aarch64-unknown-linux-musl` | `.tar.gz` |
+| macOS   | Intel         | `x86_64-apple-darwin`        | `.tar.gz` |
+| macOS   | Apple Silicon | `aarch64-apple-darwin`       | `.tar.gz` |
+| Windows | x86-64        | `x86_64-pc-windows-msvc`     | `.zip`    |
+| Windows | ARM64         | `aarch64-pc-windows-msvc`    | `.zip`    |
+
+## 常用选项
+
+| 行为         | Unix                          | Windows                     |
+| ------------ | ----------------------------- | --------------------------- |
+| 固定版本     | `--version 0.1.0`             | `-Version 0.1.0`            |
+| 安装前缀     | `--prefix PATH`               | `-Prefix PATH`              |
+| 启动器目录   | `--bin-dir PATH`              | `-BinDir PATH`              |
+| 不修改 PATH  | `--no-path`                   | `-NoPath`                   |
+| 替换现有版本 | `--force`                     | `-Force`                    |
+| 离线归档     | `--archive FILE --sha256 HEX` | `-Archive FILE -Sha256 HEX` |
+| 卸载         | `--uninstall`                 | `-Uninstall`                |
+
+默认安装前缀在 Linux/macOS 为 `~/.local/share/ash`，启动器位于
+`~/.local/bin/ash`；Windows 默认为 `%LOCALAPPDATA%\Programs\ash`。
+
+安装成功与失败都输出 ASON。安装器会检查目标、版本、包形状、SHA-256 和嵌入二进制
+身份；激活失败会恢复原安装。

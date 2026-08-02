@@ -1,0 +1,45 @@
+---
+title: CLI reference
+description: Machine-first ash commands, input/output boundaries, self-update, and health interfaces.
+---
+
+# CLI reference
+
+The ash CLI is a machine interface. Successful output and error diagnostics use
+stable ASON, with no human help page, color, progress bar, or interactive REPL.
+
+| Command                                        | Input                                | Output                                                         |
+| ---------------------------------------------- | ------------------------------------ | -------------------------------------------------------------- |
+| `ash --version`                                | None                                 | Stable version string                                          |
+| `ash --build-info`                             | None                                 | Version, target, protocol, ASON, commit, and trust fingerprint |
+| `ash ason`                                     | Bare ASON on stdin                   | Unique canonical ASON                                          |
+| `ash run`                                      | One typed request on stdin           | One final response                                             |
+| `ash rpc`                                      | Length-framed stdin/stdout           | Handshake and ordered response frames                          |
+| `ash self status [--prefix PATH]`              | Installation prefix                  | Current/previous version and install state                     |
+| `ash self check --candidate FILE`              | Candidate binary                     | Health, version, and target                                    |
+| `ash self update [--prefix PATH] [--from DIR]` | Signed metadata or offline directory | Activation result                                              |
+| `ash self rollback [--prefix PATH]`            | Installation state                   | Rollback or scheduled result                                   |
+| `ash self recover [--prefix PATH]`             | Installation journal                 | Recovery result                                                |
+
+`ash self replace` is an internal Windows helper used by activation, not a normal
+Harness interface.
+
+## Error contract
+
+Example:
+
+```ason
+s:1
+e{c}:
+4
+```
+
+Exit codes map stably to error classes. Callers should branch on ASON diagnostics
+and exit status, never localized text. Missing arguments and unknown commands
+return a usage-class machine error instead of printing help.
+
+## Working directory
+
+File operations are confined to the startup workspace. Paths must use canonical
+logical form and cannot escape through lexical traversal, symbolic links, or
+Windows reparse points. `exec` never switches to an implicit host shell.

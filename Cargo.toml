@@ -19,7 +19,7 @@ rust-version = "1.97"
 authors = ["A3S Lab"]
 license = "MIT"
 repository = "https://github.com/A3S-Lab/ash"
-homepage = "https://github.com/A3S-Lab/ash"
+homepage = "https://a3s-lab.github.io/ash/"
 
 [workspace.dependencies]
 ash-engine = { package = "a3s-ash-engine", path = "crates/ash-engine" }

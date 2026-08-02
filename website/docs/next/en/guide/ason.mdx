@@ -1,0 +1,59 @@
+---
+title: ASON
+description: The native LLM-first format: canonical syntax, columnar records, dictionaries, and retrievable references.
+---
+
+# ASON
+
+ASON is the LLM-first structured format designed and implemented natively by
+ash. It reduces repeated structure in model context while preserving strict
+schemas, canonical encoding, framed boundaries, and recoverable evidence.
+
+## Example
+
+```ason
+s:0
+a:search
+d{p}:
+0:"src/runtime.rs"
+r{p,l,c}:
+0,42,governor
+0,88,stable_merge
+z{shown,total}:
+2,17
+q:ref-7
+```
+
+- `s:0` is a scalar field.
+- `d{p}` is a path dictionary column.
+- `r{p,l,c}` contains homogeneous search rows with one column header.
+- `z{shown,total}` carries projection metadata.
+- `q` is a complete-evidence reference available for slice or search.
+
+## Canonical rules
+
+1. Message schemas fix field and column order.
+2. Safe text uses bare atoms; UTF-8 strings use the shortest required escapes.
+3. Duplicate fields, duplicate columns, unknown required structures, and noncanonical numbers fail.
+4. The parser enforces document, collection, string, and depth limits before full model construction.
+5. Decode followed by encode must yield one unique byte sequence.
+
+## Token evidence
+
+The fixed format corpus produces the same ratio under pinned `cl100k_base` and
+`o200k_base` tokenizers:
+
+| Format           | cl100k |  o200k | Relative to compact row JSON |
+| ---------------- | -----: | -----: | ---------------------------: |
+| Canonical ASON   |  6,313 |  6,312 |                          62% |
+| Compact row JSON | 10,192 | 10,198 |                         100% |
+
+This is a format-corpus regression datum, not a full agent-task quality or runtime
+performance claim. See [benchmark evidence](/guide/benchmarks) to reproduce it.
+
+## Why not ordinary JSON
+
+JSON repeats keys for every homogeneous record and tends to inline long paths and
+large values. ASON moves structural repetition into schemas and column headers,
+then leaves large values in bounded storage while returning references and useful
+projections. It is not a compatibility layer for another format.

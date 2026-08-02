@@ -1,0 +1,84 @@
+---
+title: Cross-platform installation
+description: Use one-click scripts for Linux, macOS, and Windows, or build ash from Rust source.
+---
+
+# Cross-platform installation
+
+ash ships Unix Shell and Windows PowerShell entry points under one installation
+contract. The installers support latest stable, pinned version, offline archive,
+custom directories, forced replacement, and uninstall.
+
+:::danger Pre-release trust boundary
+There is no supported signed binary release yet. The release commands below pass
+CI, but fail closed until the first signed Release is published. Use the Cargo
+path when you need to validate current source now.
+:::
+
+## Linux
+
+Supports x86-64 and ARM64:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://raw.githubusercontent.com/A3S-Lab/ash/main/install.sh | sh
+```
+
+## macOS
+
+Supports Intel and Apple Silicon through the same Unix entry point:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://raw.githubusercontent.com/A3S-Lab/ash/main/install.sh | sh
+```
+
+## Windows
+
+Run in PowerShell 5.1 or newer:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+irm https://raw.githubusercontent.com/A3S-Lab/ash/main/install.ps1 | iex
+```
+
+## Build from source
+
+This path needs a stable Rust toolchain and uses the repository lockfile:
+
+```bash
+cargo install --git https://github.com/A3S-Lab/ash --locked a3s-ash
+```
+
+A source install is for development validation. It is not a signed release and
+does not carry release-package provenance.
+
+## Target matrix
+
+| Platform | Architecture  | Target triple                | Archive   |
+| -------- | ------------- | ---------------------------- | --------- |
+| Linux    | x86-64        | `x86_64-unknown-linux-musl`  | `.tar.gz` |
+| Linux    | ARM64         | `aarch64-unknown-linux-musl` | `.tar.gz` |
+| macOS    | Intel         | `x86_64-apple-darwin`        | `.tar.gz` |
+| macOS    | Apple Silicon | `aarch64-apple-darwin`       | `.tar.gz` |
+| Windows  | x86-64        | `x86_64-pc-windows-msvc`     | `.zip`    |
+| Windows  | ARM64         | `aarch64-pc-windows-msvc`    | `.zip`    |
+
+## Common options
+
+| Behavior           | Unix                          | Windows                     |
+| ------------------ | ----------------------------- | --------------------------- |
+| Pin version        | `--version 0.1.0`             | `-Version 0.1.0`            |
+| Install prefix     | `--prefix PATH`               | `-Prefix PATH`              |
+| Launcher directory | `--bin-dir PATH`              | `-BinDir PATH`              |
+| Do not change PATH | `--no-path`                   | `-NoPath`                   |
+| Replace current    | `--force`                     | `-Force`                    |
+| Offline archive    | `--archive FILE --sha256 HEX` | `-Archive FILE -Sha256 HEX` |
+| Uninstall          | `--uninstall`                 | `-Uninstall`                |
+
+Linux and macOS default to `~/.local/share/ash` with the launcher at
+`~/.local/bin/ash`. Windows defaults to `%LOCALAPPDATA%\Programs\ash`.
+
+Both success and failure use ASON. The installer verifies target, version,
+archive shape, SHA-256, and embedded binary identity, and restores the previous
+installation if activation fails.

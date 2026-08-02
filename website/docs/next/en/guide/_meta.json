@@ -1,0 +1,18 @@
+[
+  "index",
+  "install",
+  {
+    "type": "section-header",
+    "label": "Core contract"
+  },
+  "architecture",
+  "protocol",
+  "ason",
+  "cli",
+  {
+    "type": "section-header",
+    "label": "Evidence and governance"
+  },
+  "benchmarks",
+  "security"
+]

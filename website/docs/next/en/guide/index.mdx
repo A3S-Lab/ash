@@ -1,0 +1,52 @@
+---
+title: Get started with ash
+description: Understand the boundary and integrate the AI Native Shell through typed requests.
+---
+
+# Get started with ash
+
+`ash` is an **AI Native Shell** for Coding Agents. It accepts typed ASH/1
+requests, runs work across bounded Tokio I/O and Rayon CPU planes, and returns
+canonical ASON instead of terminal text formatted for people.
+
+:::warning Current status
+The `next` docs track `main`. The source, installers, and six-target release
+workflow are implemented and pass Linux, macOS, and Windows CI, but release
+credentials are not provisioned and no supported signed binary is published.
+:::
+
+## Choose an integration
+
+| Scenario                 | Entry point                  | Contract                                                                    |
+| ------------------------ | ---------------------------- | --------------------------------------------------------------------------- |
+| Long-lived Agent Harness | `ash rpc`                    | Frames, handshake, concurrent requests, cancellation, and result references |
+| One typed call           | `ash run`                    | Reads one bare ASON request from standard input                             |
+| ASON canonicalization    | `ash ason`                   | Validates and emits the unique canonical representation                     |
+| Install and upgrade      | `install.sh` / `install.ps1` | Target detection, verification, transactional activation, and uninstall     |
+| Development validation   | Cargo source build           | Builds the `a3s-ash` package with the current lockfile                      |
+
+## Minimal one-shot request
+
+Send a canonical ASON request to `ash run`:
+
+```ason
+i:req-1
+o:read
+b{r,o}:1024,256
+a{p,s,m}:"README.md",0,512
+```
+
+```bash
+ash run < request.ason
+```
+
+The response is canonical ASON as well. Errors contain stable diagnostic codes
+and typed fields—not help text, color, progress bars, or human suggestions.
+
+## Recommended path
+
+1. [Installation](/guide/install) for platforms, targets, and the current release boundary.
+2. [Architecture](/guide/architecture) for the dual execution planes and governor.
+3. [ASH/1](/guide/protocol) for handshake, framing, requests, and responses.
+4. [ASON](/guide/ason) for canonical encoding, columns, and references.
+5. [Security](/guide/security) for capabilities, permits, transactions, and signed updates.

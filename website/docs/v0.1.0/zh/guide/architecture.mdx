@@ -1,0 +1,62 @@
+---
+title: 系统架构
+description: ash 的 ASH/1、执行引擎、Tokio/Rayon 双平面、平台层和 ASON 输出架构。
+---
+
+# 系统架构
+
+ash 是一个独立 Rust workspace 和发行单元。A3S 主仓库只通过 `crates/ash` Git
+子模块固定经过验证的提交，不把它并入根 Cargo 包。
+
+## 数据流
+
+```text
+Coding Agent / Harness
+        │ framed ASH/1 or one-shot ASON
+        ▼
+Protocol admission → capability mask → request schema
+        ▼
+Session runtime → hierarchical governor → cancellation tree
+        ├───────────────┬────────────────┐
+        ▼               ▼                ▼
+Tokio I/O plane    Rayon CPU plane   durable store
+process / pipe     search / hash     refs / paths
+RPC / timeout      diff / reduce     snapshots
+        └───────────────┴────────────────┘
+                        ▼
+              stable merge + projection
+                        ▼
+                  canonical ASON
+```
+
+## 为什么使用 Rust
+
+- 单个原生二进制覆盖六个操作系统/架构目标。
+- 所有权与类型系统适合表达请求生命周期、取消、事务和一次性 Permit。
+- Tokio 处理大量 I/O 等待，Rayon 将可拆分 CPU 工作映射到固定多核池。
+- `Send + Sync` 公共边界让长驻 Harness 可以安全共享只读状态与调度器。
+
+## 双执行平面
+
+### Tokio I/O
+
+负责标准输入/输出 RPC、子进程、管道、超时、取消、更新下载和有界文件 I/O。外部程序
+默认通过 executable + argv 直接启动，不隐式进入 Bash、PowerShell 或 CMD。
+
+### Rayon CPU
+
+负责搜索准备、哈希、Diff、归约和其他可拆分计算。固定工作窃取池使用主机可用核心，
+但不会为每个请求创建新线程池。
+
+### 分层 Governor
+
+主机、会话、请求和动作共享预算。宽批图不能把每个节点的内部并行再次相乘；预算覆盖
+并发度、截止时间、读取字节、输出记录与保留证据。
+
+## 确定性边界
+
+Worker 可以按任意顺序完成，但响应先按协议定义的稳定键归并，再投影、截断和编码。
+相同输入、能力和文件状态必须产生逐字节一致的规范 ASON。
+
+完整组件所有权与失败边界见
+[仓库架构设计](https://github.com/A3S-Lab/ash/blob/d8756614ad6a54128336f50a6a52fcb6f92d1305/docs/architecture.md)。

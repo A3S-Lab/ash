@@ -1,0 +1,32 @@
+[
+  {
+    "text": "Docs",
+    "link": "/guide/",
+    "activeMatch": "^/guide/"
+  },
+  {
+    "text": "Install",
+    "link": "/guide/install"
+  },
+  {
+    "text": "ASON",
+    "link": "/guide/ason"
+  },
+  {
+    "text": "Resources",
+    "items": [
+      {
+        "text": "GitHub",
+        "link": "https://github.com/A3S-Lab/ash"
+      },
+      {
+        "text": "Architecture",
+        "link": "https://github.com/A3S-Lab/ash/blob/main/docs/architecture.md"
+      },
+      {
+        "text": "ASH/1 specification",
+        "link": "https://github.com/A3S-Lab/ash/blob/main/docs/protocol.md"
+      }
+    ]
+  }
+]

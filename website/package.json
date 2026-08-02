@@ -1,0 +1,34 @@
+{
+  "name": "ash-website",
+  "version": "0.0.0",
+  "description": "Official multilingual website and documentation for ash, the AI Native Shell.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "scripts": {
+    "build": "rspress build",
+    "check": "npm run format:check && npm run lint && npm run build && npm run check:site",
+    "check:site": "node scripts/check-built-site.mjs",
+    "dev": "rspress dev",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "rslint && tsc --noEmit && node scripts/check-language-parity.mjs && node scripts/check-source-contract.mjs",
+    "preview": "rspress preview"
+  },
+  "dependencies": {
+    "@rspress/core": "2.0.19",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@rslint/core": "0.5.3",
+    "@shikijs/types": "4.4.1",
+    "@types/node": "22.8.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "prettier": "3.8.3",
+    "typescript": "6.0.3"
+  }
+}

@@ -1,0 +1,18 @@
+[
+  "index",
+  "install",
+  {
+    "type": "section-header",
+    "label": "核心契约"
+  },
+  "architecture",
+  "protocol",
+  "ason",
+  "cli",
+  {
+    "type": "section-header",
+    "label": "证据与治理"
+  },
+  "benchmarks",
+  "security"
+]

@@ -1,0 +1,51 @@
+---
+title: 开始使用 ash
+description: 理解 ash 的边界，并从类型化请求开始集成 AI Native Shell。
+---
+
+# 开始使用 ash
+
+`ash` 是为 Coding Agent 设计的 **AI Native Shell**。它接收类型化 ASH/1
+请求，在有界的 Tokio I/O 与 Rayon CPU 执行平面中运行工作，最后返回规范
+ASON，而不是面向人类排版的终端文本。
+
+:::warning 当前状态
+`next` 文档对应 `main` 开发线。源码、安装器和六目标发布流水线已经实现并通过
+Linux、macOS、Windows CI，但发布凭据尚未配置，也没有受支持的签名二进制。
+:::
+
+## 选择接入方式
+
+| 场景               | 入口                         | 特性                                   |
+| ------------------ | ---------------------------- | -------------------------------------- |
+| 长驻 Agent Harness | `ash rpc`                    | 帧协议、握手、并发请求、取消与结果引用 |
+| 单次类型化调用     | `ash run`                    | 从标准输入读取一个裸 ASON 请求         |
+| ASON 规范化        | `ash ason`                   | 校验并输出唯一规范表示                 |
+| 安装与升级         | `install.sh` / `install.ps1` | 目标检测、校验、事务激活和卸载         |
+| 开发验证           | Cargo 源码构建               | 使用当前锁文件构建 `a3s-ash` 包        |
+
+## 最小单次请求
+
+将规范 ASON 请求送入 `ash run`：
+
+```ason
+i:req-1
+o:read
+b{r,o}:1024,256
+a{p,s,m}:"README.md",0,512
+```
+
+```bash
+ash run < request.ason
+```
+
+响应同样是规范 ASON。错误只包含稳定诊断码和结构化字段，不输出帮助文本、颜色、
+进度条或面向人的建议。
+
+## 推荐阅读顺序
+
+1. [安装](/guide/install)——平台、目标与当前发行边界。
+2. [架构](/guide/architecture)——双执行平面和分层 Governor。
+3. [ASH/1](/guide/protocol)——握手、帧、请求与响应。
+4. [ASON](/guide/ason)——规范编码、列与引用。
+5. [安全](/guide/security)——能力、Permit、事务和签名更新。

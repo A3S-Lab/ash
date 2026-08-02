@@ -1,0 +1,47 @@
+---
+title: ASH/1 协议
+description: ASH/1 的规范帧、握手、能力协商、类型化操作与并发响应规则。
+---
+
+# ASH/1 协议
+
+ASH/1 是 Coding Agent Harness 与 ash 之间的本地机器协议。它不是 POSIX Shell
+语言，也不解析 Bash、Zsh、PowerShell 或 CMD 语法。
+
+## 两种传输
+
+- `ash rpc`：长驻会话。每个 ASON 文档前有 4 字节大端长度，先握手，再并发处理请求。
+- `ash run`：从标准输入读取一个裸规范 ASON 文档，执行后退出。
+
+`rpc` 的第一个帧必须是握手请求。服务端选择兼容协议版本、限制与能力交集，返回唯一
+规范握手响应；非规范 ASON、超长帧和未知必需字段在分配大缓冲区前拒绝。
+
+## 核心操作
+
+| 操作       | 作用                                                          |
+| ---------- | ------------------------------------------------------------- |
+| `exec`     | executable + argv 直接启动、环境差量、stdin、超时与进程树取消 |
+| `read`     | 有界字节或行范围读取与投影                                    |
+| `list`     | 稳定顺序目录遍历和元数据                                      |
+| `search`   | 有界文本搜索、匹配上下文与完整结果引用                        |
+| `patch`    | 带 preimage 摘要的 compare-and-swap 多文件补丁                |
+| `fs`       | create/copy/move/remove 文件事务                              |
+| `snapshot` | 工作区清单与基于引用的 delta                                  |
+| `batch`    | 有向无环依赖图、就绪节点并发和失败后代跳过                    |
+| `ref`      | slice/search/release 已保留证据                               |
+| `cancel`   | 取消排队或运行中的请求及其后代                                |
+
+## 并发与顺序
+
+长驻 RPC 可以同时运行相互独立的请求。最终帧仍按输入序列稳定输出，因此模型端不需要
+为调度竞争增加排序 Token。取消控制帧可以越过最终响应排序，及时终止目标工作。
+
+## 能力与 Permit
+
+握手只协商双方都支持的能力位。策略需要批准时，ash 返回结构化 Challenge；可信
+Harness 签发的一次性 Permit 绑定会话、请求、规范动作、策略指纹和过期时间。重放、
+跨会话复用或动作修改都会失败。
+
+完整字段与规范 Fixture 位于
+[docs/protocol.md](https://github.com/A3S-Lab/ash/blob/main/docs/protocol.md) 和
+[`spec/fixtures/ason`](https://github.com/A3S-Lab/ash/tree/main/spec/fixtures/ason)。

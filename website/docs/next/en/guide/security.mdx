@@ -1,0 +1,54 @@
+---
+title: Security and trust boundaries
+description: Capability negotiation, one-time permits, path confinement, file transactions, and signed updates.
+---
+
+# Security and trust boundaries
+
+ash is a local execution boundary. It does not claim portable network or syscall
+sandboxing for arbitrary child processes. A trusted Harness owns policy and
+approval; ash enforces the protocol, resource, path, transaction, and update
+constraints that it can apply consistently.
+
+## Capability negotiation
+
+Session handshake intersects requested and implemented capabilities. Each request
+operation must be in the negotiated mask. Unknown operation bits and capabilities
+outside the active protocol minor are never silently admitted.
+
+## One-time permits
+
+An action requiring approval produces a challenge. Its domain-separated permit
+binds:
+
+- session and request identifiers;
+- operation, canonical arguments, and capability;
+- policy fingerprint and expiry;
+- one-time nonce.
+
+Successful consumption records the nonce immediately. Replay fails, as does any
+change to arguments, session, policy, or validity window.
+
+## Workspace and file transactions
+
+- Logical paths are canonicalized and confined to the workspace.
+- Patches use preimage SHA-256 for compare-and-swap.
+- Create, copy, move, and remove compose into bounded file transactions.
+- A checksummed journal persists inside a cross-process lock.
+- Conflict and crash run reverse rollback; startup recovery rejects unprovable external changes.
+
+## Process lifecycle
+
+Commands launch through argv. Deadline, explicit cancellation, session close, and
+handle drop terminate the owned process tree. This does not imply universal
+sandboxing of the program's network, registry, or syscalls.
+
+## Update trust
+
+The updater requires a canonical Ed25519-signed manifest, monotonic sequence,
+matching target, package SHA-256, exact archive shape, and embedded binary
+identity. Activation must pass health checks or restore the previous version.
+Downgrade requires an explicit signed rollback declaration.
+
+Report vulnerabilities privately according to repository
+[`SECURITY.md`](https://github.com/A3S-Lab/ash/blob/main/SECURITY.md).

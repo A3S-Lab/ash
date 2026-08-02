@@ -1,0 +1,52 @@
+---
+title: ASH/1 protocol
+description: Canonical frames, handshake, capability negotiation, typed operations, and concurrent response ordering.
+---
+
+# ASH/1 protocol
+
+ASH/1 is the local machine protocol between a Coding Agent Harness and ash. It
+is not a POSIX shell language and does not parse Bash, Zsh, PowerShell, or CMD.
+
+## Two transports
+
+- `ash rpc`: long-lived session. Every ASON document has a four-byte big-endian length; handshake comes first, then concurrent requests.
+- `ash run`: reads one bare canonical ASON document from standard input, executes it, and exits.
+
+The first `rpc` frame must be a handshake request. The server chooses a compatible
+protocol version, limits, and capability intersection, then returns one canonical
+handshake response. Noncanonical ASON, oversized frames, and unknown required
+fields fail before large allocation.
+
+## Core operations
+
+| Operation  | Contract                                                                                    |
+| ---------- | ------------------------------------------------------------------------------------------- |
+| `exec`     | Direct executable + argv, environment delta, stdin, deadline, and process-tree cancellation |
+| `read`     | Bounded byte or line ranges and projection                                                  |
+| `list`     | Stable directory traversal and metadata                                                     |
+| `search`   | Bounded text search, match context, and complete-result reference                           |
+| `patch`    | Compare-and-swap multi-file patch with preimage digests                                     |
+| `fs`       | File-only create/copy/move/remove transaction                                               |
+| `snapshot` | Workspace manifest and reference-based delta                                                |
+| `batch`    | Acyclic dependency graph, ready-node concurrency, and failed-descendant skipping            |
+| `ref`      | Slice, search, or release retained evidence                                                 |
+| `cancel`   | Cancel queued or active requests and descendants                                            |
+
+## Concurrency and order
+
+A persistent RPC session can run independent requests concurrently. Final frames
+still follow stable input sequence, so the model side spends no tokens recovering
+from scheduler races. Cancellation control frames bypass final-response ordering
+to stop target work promptly.
+
+## Capabilities and permits
+
+Handshake admits only capabilities supported by both sides. When policy requires
+approval, ash returns a typed challenge. A trusted Harness signs a one-time permit
+bound to session, request, canonical action, policy fingerprint, and expiry.
+Replay, cross-session reuse, and modified actions fail.
+
+Exact fields and canonical fixtures live in
+[`docs/protocol.md`](https://github.com/A3S-Lab/ash/blob/d8756614ad6a54128336f50a6a52fcb6f92d1305/docs/protocol.md) and
+[`spec/fixtures/ason`](https://github.com/A3S-Lab/ash/tree/d8756614ad6a54128336f50a6a52fcb6f92d1305/spec/fixtures/ason).

@@ -1,0 +1,67 @@
+---
+title: System architecture
+description: ASH/1, the execution engine, Tokio/Rayon planes, platform layer, and canonical ASON output.
+---
+
+# System architecture
+
+ash is an independently buildable Rust workspace and release unit. The A3S
+umbrella repository pins proven revisions as its `crates/ash` Git submodule; it
+does not turn ash into a member of the root Cargo package.
+
+## Data flow
+
+```text
+Coding Agent / Harness
+        │ framed ASH/1 or one-shot ASON
+        ▼
+Protocol admission → capability mask → request schema
+        ▼
+Session runtime → hierarchical governor → cancellation tree
+        ├───────────────┬────────────────┐
+        ▼               ▼                ▼
+Tokio I/O plane    Rayon CPU plane   durable store
+process / pipe     search / hash     refs / paths
+RPC / timeout      diff / reduce     snapshots
+        └───────────────┴────────────────┘
+                        ▼
+              stable merge + projection
+                        ▼
+                  canonical ASON
+```
+
+## Why Rust
+
+- One native binary covers six operating-system and architecture targets.
+- Ownership and types express request lifetime, cancellation, transactions, and one-time permits.
+- Tokio handles many I/O waits while Rayon maps splittable CPU work to a fixed multicore pool.
+- `Send + Sync` boundaries let a long-lived Harness share immutable state and schedulers safely.
+
+## Dual execution planes
+
+### Tokio I/O
+
+Owns stdio RPC, child processes, pipes, deadlines, cancellation, update downloads,
+and bounded file I/O. Programs launch through executable + argv by default, never
+through an implicit Bash, PowerShell, or CMD layer.
+
+### Rayon CPU
+
+Owns search preparation, hashing, diffs, reduction, and other splittable work. A
+fixed work-stealing pool uses available host cores without creating a pool per
+request.
+
+### Hierarchical governor
+
+Host, session, request, and action share budgets. A wide graph cannot multiply
+each node's nested parallelism. Budgets cover concurrency, deadlines, bytes read,
+output records, and retained evidence.
+
+## Deterministic boundary
+
+Workers may finish in any order. Responses are first merged by protocol-defined
+stable keys, then projected, truncated, and encoded. Identical input, capability,
+and filesystem state must produce byte-identical canonical ASON.
+
+See the full [repository architecture](https://github.com/A3S-Lab/ash/blob/d8756614ad6a54128336f50a6a52fcb6f92d1305/docs/architecture.md)
+for component ownership and failure boundaries.
