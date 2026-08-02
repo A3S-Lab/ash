@@ -50,6 +50,8 @@ const [
   runtimeReducer,
   runtimePrimitives,
   referenceOperation,
+  repeatedLineReducer,
+  execOperation,
   benchmarkZh,
   benchmarkEn,
 ] = await Promise.all([
@@ -66,6 +68,8 @@ const [
   text('benches/runner/src/runtime/reducer.rs'),
   text('benches/runner/src/runtime/primitives.rs'),
   text('crates/ash-ops/src/reference.rs'),
+  text('crates/ash-ops/src/reducer.rs'),
+  text('crates/ash-ops/src/exec.rs'),
   text('website/docs/next/zh/guide/benchmarks.mdx'),
   text('website/docs/next/en/guide/benchmarks.mdx'),
 ]);
@@ -137,7 +141,7 @@ for (const command of [unixCommand, windowsCommand, cargoCommand]) {
   requireIncludes(switcher, command, 'Homepage install switcher');
 }
 
-requireIncludes(home, "metricTestsValue: '135'", 'Homepage evidence');
+requireIncludes(home, "metricTestsValue: '168'", 'Homepage evidence');
 requireIncludes(
   home,
   `metricTokenValue: '${report.gates.ason_vs_record_json_cl100k_percent}%'`,
@@ -177,15 +181,19 @@ requireIncludes(
 if (!report.formula_algebra.gates.passed) {
   throw new Error('The checked formula algebra gate must pass.');
 }
+if (report.schema !== 3 || !report.repeated_line_reduction?.gates?.passed) {
+  throw new Error('The checked repeated-line token gate must pass.');
+}
 
 for (const marker of [
-  'schema: 9',
+  'schema: 10',
   '"list-recursive"',
   '"search-literal"',
   '"search-regex"',
   '"snapshot-blake3"',
   'require_equivalent_output(&scenarios, "search-literal", "search-regex")',
   'reducer::measure_structured_projection_scenario(',
+  'reducer::measure_repeated_line_scenario(&config)',
   'primitives::measure_path_dictionary_scenario(&config)',
   'primitives::measure_dag_scenario(nodes, id, &config)',
 ]) {
@@ -193,7 +201,10 @@ for (const marker of [
 }
 for (const marker of [
   '"ref-project-structured"',
+  '"reduce-repeated-lines"',
   'const ROWS_PER_FIXTURE_FILE: usize = 64',
+  'const REPEATED_LINES_PER_FIXTURE_FILE: usize = 512',
+  'pool.install(|| collapse_repeated_lines(&workload.input))',
   'validate_response(&response, workload, reference)',
   'runtime_run(',
 ]) {
@@ -204,6 +215,21 @@ for (const marker of [
   '.collect::<Result<Vec<_>, OperationError>>()?',
 ]) {
   requireIncludes(referenceOperation, marker, 'Ordered parallel projection');
+}
+for (const marker of [
+  "const REPEAT_SYMBOL: char = '×';",
+  '.par_chunks(PARTITION_LINES)',
+  "line.ends_with('\\n') && marker.len() < omitted_bytes",
+  'previous.count += run.count',
+]) {
+  requireIncludes(repeatedLineReducer, marker, 'Repeated-line reducer');
+}
+for (const marker of [
+  'let reduction = collapse_repeated_lines(&normalized_text);',
+  'let finalizing = matches!(stop, Stop::TimedOut | Stop::Cancelled);',
+  '.run(move || project_captures(',
+]) {
+  requireIncludes(execOperation, marker, 'Exec compute-plane projection');
 }
 for (const marker of [
   '"path-dictionary-hot"',
@@ -217,10 +243,10 @@ for (const marker of [
   requireIncludes(runtimePrimitives, marker, 'Runtime primitive benchmark');
 }
 for (const [document, markers, label] of [
-  [benchmarkZh, ['schema 9', '十五个场景'], 'Chinese benchmark documentation'],
+  [benchmarkZh, ['schema 10', '十六个场景'], 'Chinese benchmark documentation'],
   [
     benchmarkEn,
-    ['Schema 9', 'fifteen scenarios'],
+    ['Schema 10', 'sixteen scenarios'],
     'English benchmark documentation',
   ],
 ]) {

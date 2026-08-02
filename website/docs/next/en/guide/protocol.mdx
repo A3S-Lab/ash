@@ -54,6 +54,14 @@ retain the complete capture, error `601` is returned with no partial reference.
 After reference release or session shutdown, the final active lease removes the
 corresponding temporary file.
 
+Complete UTF-8 output first normalizes CRLF to LF, then projects a consecutive
+run `ℓ^N` as the first line `ℓ` plus count marker `×N`. `N` includes the retained
+line, and collapse occurs only when the marker is shorter than the omitted bytes.
+Rayon may find runs in a large input concurrently, but boundaries merge in source
+order and worker count cannot change the result. Normalized or reduced output sets
+the corresponding flags and retains the exact source, so `×N` need not be a
+reversible escape syntax.
+
 Every spool carries a versioned owner marker and a lifetime lock. A later
 process reclaims it only after one hour, only when no active lock remains, and
 only when every entry is recognized; uncertain roots are never modified.

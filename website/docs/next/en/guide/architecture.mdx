@@ -75,6 +75,12 @@ Owns search preparation, hashing, diffs, reduction, and other splittable work. A
 fixed work-stealing pool uses available host cores without creating a pool per
 request.
 
+After process pipes drain, UTF-8 projection also enters this fixed pool:
+consecutive repeated lines collapse into `×N` in stable source order before the
+output budget is applied. Timeout or cancellation finalization uses the same
+bounded pool without letting an already-cancelled request permit suppress typed
+termination evidence.
+
 ### Hierarchical governor
 
 Host, session, request, and action share budgets. A wide graph cannot multiply

@@ -25,6 +25,11 @@ uses 80 tokens in both tokenizers, matching the direct ASCII-letter floor; direc
 Greek uses 86/86 and the former wrapper uses 97/98. The canonical form is 84% of
 the wrapper bytes and 83%/82% of its tokens.
 
+The report also calls the production `×N` repeated-line reducer directly. It
+projects 8,192 deterministic diagnostic lines into 128 lines at about 1% of the
+source bytes and tokens under both tokenizers; the checked ceiling is 5%. The
+projection reduces context while a result reference preserves the exact source.
+
 ## Multicore determinism
 
 ```bash
@@ -32,7 +37,7 @@ cargo build -p a3s-ash --release --locked
 cargo run -p a3s-ash-bench --release --locked -- --runtime
 ```
 
-Schema 9 contains fifteen scenarios. Eleven end-to-end paths cover recursive
+Schema 10 contains sixteen scenarios. Eleven end-to-end paths cover recursive
 directory traversal, literal search, regular-expression search, BLAKE3
 snapshot, disk spill/fetch, fresh `ash run` startup, empty child spawn,
 dual-pipe pressure, process-tree cancellation, warm framed RPC dispatch, and
@@ -41,7 +46,10 @@ decodes a 16,384-row source table, then selects six columns in stable order on
 the configured Rayon pool; every worker count must emit identical rows and
 canonical bytes. Four isolated primitives measure 4,096 hot lookups in a
 1,024-entry path dictionary plus DAG validation and scheduling at 64, 256, and
-1,024 nodes. List and search split the fixture into disjoint roots so traversal
+1,024 nodes. A multicore reducer scenario groups 131,072 diagnostic lines into
+consecutive 512-line runs and requires identical `×N` text, collapsed-run
+counts, and omitted-line counts at every worker setting. List and search split
+the fixture into disjoint roots so traversal
 and scanning enter the bounded worker pool. Listing reports item throughput
 without inventing content-byte throughput. Matrix paths run at 1, 2, 4, 8, and
 host-available worker counts. Dictionary and DAG primitives use one caller and
@@ -70,7 +78,7 @@ native shell; it does not run a model or claim an ash task result.
 - Rust unit and integration suites across every workspace crate.
 - `cargo check` and tests on Linux, macOS, and Windows.
 - Real release builds exercised by all three platform installers.
-- Eleven end-to-end runtime paths, including multi-core structured projection, plus hot path-dictionary and three-size DAG scheduling evidence.
+- Eleven end-to-end runtime paths, a multicore repeated-line reducer, hot path-dictionary lookup, and three-size DAG scheduling evidence.
 - Three locked tasks with Linux, macOS, and Windows native-shell baselines.
 - Fuzz targets for ASON, bounded ASH/1 frames, typed requests, and update metadata.
 - File-transaction crash cutpoints, update activation/recovery, and cancellation race tests.

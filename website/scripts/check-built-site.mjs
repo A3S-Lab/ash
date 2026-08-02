@@ -110,8 +110,8 @@ const homepages = {
     'V0.1.0 · SOURCE CHECKPOINT',
     'd8756614ad6a54128336f50a6a52fcb6f92d1305',
   ],
-  'guide/benchmarks.html': ['schema 9', '十五个场景'],
-  'en/guide/benchmarks.html': ['Schema 9', 'fifteen scenarios'],
+  'guide/benchmarks.html': ['schema 10', '十六个场景'],
+  'en/guide/benchmarks.html': ['Schema 10', 'sixteen scenarios'],
 };
 
 for (const [homepage, markers] of Object.entries(homepages)) {
