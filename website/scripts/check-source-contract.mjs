@@ -47,6 +47,7 @@ const [
   switcher,
   alignedStyles,
   runtimeHarness,
+  runtimePrimitives,
   benchmarkZh,
   benchmarkEn,
 ] = await Promise.all([
@@ -60,6 +61,7 @@ const [
   text('website/theme/components/InstallSwitcher.tsx'),
   text('website/theme/a3s-aligned.css'),
   text('benches/runner/src/runtime.rs'),
+  text('benches/runner/src/runtime/primitives.rs'),
   text('website/docs/next/zh/guide/benchmarks.mdx'),
   text('website/docs/next/en/guide/benchmarks.mdx'),
 ]);
@@ -173,24 +175,33 @@ if (!report.formula_algebra.gates.passed) {
 }
 
 for (const marker of [
-  'schema: 7',
+  'schema: 8',
   '"list-recursive"',
   '"search-literal"',
   '"search-regex"',
   '"snapshot-blake3"',
   'require_equivalent_output(&scenarios, "search-literal", "search-regex")',
+  'primitives::measure_path_dictionary_scenario(&config)',
+  'primitives::measure_dag_scenario(nodes, id, &config)',
 ]) {
   requireIncludes(runtimeHarness, marker, 'Runtime benchmark schema');
 }
+for (const marker of [
+  '"path-dictionary-hot"',
+  '"dag-schedule-64"',
+  '"dag-schedule-256"',
+  '"dag-schedule-1024"',
+  'compute_workers: 1',
+  'speedup_basis_points: None',
+  'parallel_efficiency_basis_points: None',
+]) {
+  requireIncludes(runtimePrimitives, marker, 'Runtime primitive benchmark');
+}
 for (const [document, markers, label] of [
-  [
-    benchmarkZh,
-    ['schema 7', '十条真实路径'],
-    'Chinese benchmark documentation',
-  ],
+  [benchmarkZh, ['schema 8', '十四个场景'], 'Chinese benchmark documentation'],
   [
     benchmarkEn,
-    ['Schema 7', 'ten real paths'],
+    ['Schema 8', 'fourteen scenarios'],
     'English benchmark documentation',
   ],
 ]) {
