@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use ash_engine::{PermitKind, Program};
-use ash_platform::{ReplaceOutcome, Workspace};
+use ash_platform::{
+    FileAction, FileActionState, FileTransactionFailure, FileTransactionLimits, PlatformError,
+    TransactionControl, Workspace,
+};
 use ash_protocol::request::{PatchArgs, PatchContent, Request};
 use ash_protocol::response::{
     ErrorCode, ErrorRecord, ErrorStage, FinalResponse, PatchResult, PatchState, RESULT_PARTIAL,
@@ -94,9 +97,7 @@ struct PatchTask {
 struct PreparedFile {
     path: String,
     expected_digest: [u8; 32],
-    original: Vec<u8>,
     replacement: Vec<u8>,
-    new_digest: [u8; 32],
 }
 
 enum Preparation {
@@ -347,13 +348,10 @@ fn prepare_file(
     if replacement.len() != task.result_size {
         return Err(OperationError::InvalidArgument);
     }
-    let new_digest = *blake3::hash(&replacement).as_bytes();
     Ok(Preparation::Ready(PreparedFile {
         path: task.path.clone(),
         expected_digest: task.expected_digest,
-        original,
         replacement,
-        new_digest,
     }))
 }
 
@@ -407,87 +405,63 @@ fn run_transaction(
     files: &[PreparedFile],
     program: &Program,
 ) -> TransactionOutcome {
-    let mut rows = vec![Row::new(PatchState::Skipped, None); files.len()];
-    let transaction = match workspace.begin_mutation() {
-        Ok(transaction) => transaction,
+    let actions = files
+        .iter()
+        .map(|file| FileAction::replace(&file.path, file.expected_digest, file.replacement.clone()))
+        .collect();
+    let limits = match FileTransactionLimits::new(MAX_PATCH_FILE_BYTES, MAX_PATCH_TOTAL_BYTES) {
+        Ok(limits) => limits,
         Err(_) => {
             return TransactionOutcome {
-                rows,
+                rows: vec![Row::new(PatchState::Skipped, None); files.len()],
                 failure: Some(Failure::Filesystem),
             };
         }
     };
-    let mut committed = Vec::new();
-    let mut failure = None;
-
-    for (index, file) in files.iter().enumerate() {
+    let outcome = match workspace.file_transaction(actions, limits, || {
         if program.cancellation().is_cancelled() {
-            failure = Some(Failure::Cancelled);
-            break;
+            TransactionControl::Cancelled
+        } else if program.budget().check_deadline().is_err() {
+            TransactionControl::TimedOut
+        } else {
+            TransactionControl::Continue
         }
-        if program.budget().check_deadline().is_err() {
-            failure = Some(Failure::TimedOut);
-            break;
+    }) {
+        Ok(outcome) => outcome,
+        Err(PlatformError::JournalCorrupt | PlatformError::RecoveryRequired) => {
+            return TransactionOutcome {
+                rows: vec![Row::new(PatchState::RecoveryRequired, None); files.len()],
+                failure: Some(Failure::RecoveryRequired),
+            };
         }
-        match transaction.compare_and_swap_replace(
-            &file.path,
-            file.expected_digest,
-            &file.replacement,
-            MAX_PATCH_FILE_BYTES,
-        ) {
-            Ok(ReplaceOutcome::Committed { new_digest, .. }) => {
-                rows[index] = Row::new(PatchState::Committed, Some(new_digest));
-                committed.push(index);
-            }
-            Ok(ReplaceOutcome::Conflict { actual_digest }) => {
-                rows[index] = Row::new(PatchState::Conflict, Some(actual_digest));
-                failure = Some(Failure::Conflict);
-                break;
-            }
-            Ok(ReplaceOutcome::Indeterminate { actual_digest }) => {
-                rows[index] = Row::new(PatchState::RecoveryRequired, actual_digest);
-                failure = Some(Failure::RecoveryRequired);
-                break;
-            }
-            Err(_) => {
-                failure = Some(Failure::Filesystem);
-                break;
-            }
+        Err(_) => {
+            return TransactionOutcome {
+                rows: vec![Row::new(PatchState::Skipped, None); files.len()],
+                failure: Some(Failure::Filesystem),
+            };
         }
-    }
-
-    if failure.is_some() {
-        let mut recovery_required = matches!(failure, Some(Failure::RecoveryRequired));
-        for index in committed.into_iter().rev() {
-            let file = &files[index];
-            match transaction.compare_and_swap_replace(
-                &file.path,
-                file.new_digest,
-                &file.original,
-                MAX_PATCH_FILE_BYTES,
-            ) {
-                Ok(ReplaceOutcome::Committed { new_digest, .. }) => {
-                    rows[index] = Row::new(PatchState::RolledBack, Some(new_digest));
-                }
-                Ok(ReplaceOutcome::Conflict { actual_digest }) => {
-                    rows[index] = Row::new(PatchState::RecoveryRequired, Some(actual_digest));
-                    recovery_required = true;
-                }
-                Ok(ReplaceOutcome::Indeterminate { actual_digest }) => {
-                    rows[index] = Row::new(PatchState::RecoveryRequired, actual_digest);
-                    recovery_required = true;
-                }
-                Err(_) => {
-                    rows[index] = Row::new(PatchState::RecoveryRequired, None);
-                    recovery_required = true;
-                }
-            }
-        }
-        if recovery_required {
-            failure = Some(Failure::RecoveryRequired);
-        }
-    }
-
+    };
+    let rows = outcome
+        .actions
+        .into_iter()
+        .map(|action| {
+            let state = match action.state {
+                FileActionState::Committed => PatchState::Committed,
+                FileActionState::Conflict => PatchState::Conflict,
+                FileActionState::RolledBack => PatchState::RolledBack,
+                FileActionState::RecoveryRequired => PatchState::RecoveryRequired,
+                FileActionState::Skipped => PatchState::Skipped,
+            };
+            Row::new(state, action.digest)
+        })
+        .collect();
+    let failure = outcome.failure.map(|failure| match failure {
+        FileTransactionFailure::Conflict => Failure::Conflict,
+        FileTransactionFailure::Cancelled => Failure::Cancelled,
+        FileTransactionFailure::TimedOut => Failure::TimedOut,
+        FileTransactionFailure::Filesystem => Failure::Filesystem,
+        FileTransactionFailure::RecoveryRequired => Failure::RecoveryRequired,
+    });
     TransactionOutcome { rows, failure }
 }
 
@@ -615,7 +589,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn later_conflict_rolls_back_earlier_commits() {
+    async fn transaction_preflight_conflict_leaves_every_file_untouched() {
         let directory = TestDirectory::new();
         fs::write(directory.0.join("a"), b"one").expect("write");
         fs::write(directory.0.join("b"), b"two").expect("write");
@@ -650,21 +624,17 @@ mod tests {
             PreparedFile {
                 path: "a".to_owned(),
                 expected_digest: *blake3::hash(b"one").as_bytes(),
-                original: b"one".to_vec(),
-                new_digest: *blake3::hash(&first_new).as_bytes(),
                 replacement: first_new,
             },
             PreparedFile {
                 path: "b".to_owned(),
                 expected_digest: *blake3::hash(b"stale").as_bytes(),
-                original: b"stale".to_vec(),
-                new_digest: *blake3::hash(b"Bwo").as_bytes(),
                 replacement: b"Bwo".to_vec(),
             },
         ];
         let outcome = run_transaction(&workspace, &files, &program);
         assert!(matches!(outcome.failure, Some(Failure::Conflict)));
-        assert_eq!(outcome.rows[0].state, PatchState::RolledBack);
+        assert_eq!(outcome.rows[0].state, PatchState::Skipped);
         assert_eq!(outcome.rows[1].state, PatchState::Conflict);
         assert_eq!(fs::read(directory.0.join("a")).expect("read"), b"one");
         assert_eq!(fs::read(directory.0.join("b")).expect("read"), b"two");

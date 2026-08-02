@@ -32,10 +32,10 @@ change to arguments, session, policy, or validity window.
 ## Workspace and file transactions
 
 - Logical paths are canonicalized and confined to the workspace.
-- Patches use preimage SHA-256 for compare-and-swap.
+- Patches use preimage BLAKE3 for compare-and-swap.
 - Create, copy, move, and remove compose into bounded file transactions.
-- A checksummed journal persists inside a cross-process lock.
-- Conflict and crash run reverse rollback; startup recovery rejects unprovable external changes.
+- Patch preimages, staged replacements, and filesystem actions persist in one checksummed journal inside a cross-process lock.
+- Conflict and crash run reverse rollback; restart recovery rejects unprovable external changes.
 
 ## Process lifecycle
 

@@ -69,7 +69,7 @@ impl Workspace {
         )
     }
 
-    fn compare_and_swap_replace_inner(
+    pub(crate) fn compare_and_swap_replace_inner(
         &self,
         logical: &str,
         expected_digest: [u8; 32],

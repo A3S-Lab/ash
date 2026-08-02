@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 
+use crate::mutation::ReplaceOutcome;
 use crate::workspace::validate_logical;
 use crate::{PlatformError, Workspace};
 
@@ -23,7 +24,7 @@ const STAGE_DIRECTORY: &str = "stage";
 const REMOVED_DIRECTORY: &str = "removed";
 const FORMAT_MARKER: &[u8] = b"ash-workspace-state-v1\n";
 const COMMITTED_MARKER: &[u8] = b"committed\n";
-const MANIFEST_MAGIC: &[u8; 8] = b"ASHFS001";
+const MANIFEST_MAGIC: &[u8; 8] = b"ASHFS002";
 const NONE_LENGTH: u32 = u32::MAX;
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 const LOCK_POLL_MILLIS: u64 = 10;
@@ -40,6 +41,9 @@ pub enum FileActionKind {
     Copy = 1,
     Move = 2,
     Remove = 3,
+    /// Internal durable replacement used by the ASH patch operation. ASH/1
+    /// filesystem action decoding deliberately does not expose this variant.
+    Replace = 4,
 }
 
 #[derive(Clone, Debug)]
@@ -101,6 +105,17 @@ impl FileAction {
             destination: None,
             expected_digest: Some(expected_digest),
             content: None,
+        }
+    }
+
+    #[must_use]
+    pub fn replace(path: impl Into<String>, expected_digest: [u8; 32], content: Vec<u8>) -> Self {
+        Self {
+            kind: FileActionKind::Replace,
+            path: path.into(),
+            destination: None,
+            expected_digest: Some(expected_digest),
+            content: Some(content),
         }
     }
 
@@ -197,6 +212,14 @@ struct PreparedAction {
     destination: Option<String>,
     digest: [u8; 32],
     size: u64,
+    preimage_digest: Option<[u8; 32]>,
+    preimage_size: Option<u64>,
+}
+
+#[derive(Default)]
+struct TransactionTotals {
+    materialized: u64,
+    preimages: u64,
 }
 
 struct TransactionLocks<'a> {
@@ -266,17 +289,11 @@ impl Workspace {
         fs::create_dir(preparing.join(REMOVED_DIRECTORY))?;
         sync_directory(&state)?;
 
-        let mut total_bytes = 0_u64;
+        let mut totals = TransactionTotals::default();
         let mut prepared = Vec::with_capacity(actions.len());
         for (index, action) in actions.iter().enumerate() {
-            let result = self.prepare_action(
-                index,
-                action,
-                &preparing,
-                limits,
-                &mut total_bytes,
-                &mut control,
-            );
+            let result =
+                self.prepare_action(index, action, &preparing, limits, &mut totals, &mut control);
             match result {
                 Ok(action) => prepared.push(action),
                 Err(StepFailure::Conflict(digest)) => {
@@ -426,7 +443,7 @@ impl Workspace {
         action: &FileAction,
         preparing: &Path,
         limits: FileTransactionLimits,
-        total_bytes: &mut u64,
+        totals: &mut TransactionTotals,
         control: &mut F,
     ) -> Result<PreparedAction, StepFailure>
     where
@@ -434,45 +451,74 @@ impl Workspace {
     {
         check_control(control).map_err(StepFailure::Stopped)?;
         let stage = indexed_path(&preparing.join(STAGE_DIRECTORY), index);
-        let (digest, size) = match action.kind {
+        let (digest, size, preimage_digest, preimage_size) = match action.kind {
             FileActionKind::Create => {
-                self.ensure_absent(&action.path, limits, total_bytes, control)?;
+                self.ensure_absent(&action.path, limits, &mut totals.materialized, control)?;
                 let content = action
                     .content
                     .as_deref()
                     .ok_or(StepFailure::Platform(PlatformError::InvalidMutationTarget))?;
-                charge_bytes(content.len() as u64, limits, total_bytes)?;
+                charge_bytes(content.len() as u64, limits, &mut totals.materialized)?;
                 write_new_sync(&stage, content).map_err(StepFailure::Platform)?;
-                (*blake3::hash(content).as_bytes(), content.len() as u64)
+                (
+                    *blake3::hash(content).as_bytes(),
+                    content.len() as u64,
+                    None,
+                    None,
+                )
             }
             FileActionKind::Copy => {
                 let destination = action
                     .destination
                     .as_deref()
                     .ok_or(StepFailure::Platform(PlatformError::InvalidMutationTarget))?;
-                self.ensure_absent(destination, limits, total_bytes, control)?;
+                self.ensure_absent(destination, limits, &mut totals.materialized, control)?;
                 let source = self
                     .checked_mutation_path(&action.path, true)
                     .map_err(StepFailure::Platform)?;
                 let (digest, size) =
-                    copy_file_bounded(&source, &stage, limits, total_bytes, control)?;
+                    copy_file_bounded(&source, &stage, limits, &mut totals.materialized, control)?;
                 if Some(digest) != action.expected_digest {
                     return Err(StepFailure::Conflict(digest));
                 }
-                (digest, size)
+                (digest, size, None, None)
             }
             FileActionKind::Move | FileActionKind::Remove => {
                 if let Some(destination) = action.destination.as_deref() {
-                    self.ensure_absent(destination, limits, total_bytes, control)?;
+                    self.ensure_absent(destination, limits, &mut totals.materialized, control)?;
                 }
                 let source = self
                     .checked_mutation_path(&action.path, true)
                     .map_err(StepFailure::Platform)?;
-                let (digest, size) = hash_file_bounded(&source, limits, total_bytes, control)?;
+                let (digest, size) =
+                    hash_file_bounded(&source, limits, &mut totals.materialized, control)?;
                 if Some(digest) != action.expected_digest {
                     return Err(StepFailure::Conflict(digest));
                 }
-                (digest, size)
+                (digest, size, None, None)
+            }
+            FileActionKind::Replace => {
+                let source = self
+                    .checked_mutation_path(&action.path, true)
+                    .map_err(StepFailure::Platform)?;
+                let preimage = indexed_path(&preparing.join(REMOVED_DIRECTORY), index);
+                let (preimage_digest, preimage_size) =
+                    copy_file_bounded(&source, &preimage, limits, &mut totals.preimages, control)?;
+                if Some(preimage_digest) != action.expected_digest {
+                    return Err(StepFailure::Conflict(preimage_digest));
+                }
+                let content = action
+                    .content
+                    .as_deref()
+                    .ok_or(StepFailure::Platform(PlatformError::InvalidMutationTarget))?;
+                charge_bytes(content.len() as u64, limits, &mut totals.materialized)?;
+                write_new_sync(&stage, content).map_err(StepFailure::Platform)?;
+                (
+                    *blake3::hash(content).as_bytes(),
+                    content.len() as u64,
+                    Some(preimage_digest),
+                    Some(preimage_size),
+                )
             }
         };
         Ok(PreparedAction {
@@ -481,6 +527,8 @@ impl Workspace {
             destination: action.destination.clone(),
             digest,
             size,
+            preimage_digest,
+            preimage_size,
         })
     }
 
@@ -550,6 +598,47 @@ impl Workspace {
                 fs::rename(&source, &removed).map_err(PlatformError::from)?;
                 sync_parent(&source).map_err(StepFailure::Platform)?;
                 sync_directory(&transaction.join(REMOVED_DIRECTORY)).map_err(StepFailure::Platform)
+            }
+            FileActionKind::Replace => {
+                let expected_digest = action
+                    .preimage_digest
+                    .ok_or(StepFailure::Platform(PlatformError::JournalCorrupt))?;
+                let expected_size = action
+                    .preimage_size
+                    .ok_or(StepFailure::Platform(PlatformError::JournalCorrupt))?;
+                let destination = self
+                    .checked_mutation_path(&action.path, true)
+                    .map_err(StepFailure::Platform)?;
+                let (actual_digest, actual_size) =
+                    hash_file_without_charge(&destination, limits, control)?;
+                if actual_digest != expected_digest || actual_size != expected_size {
+                    return Err(StepFailure::Conflict(actual_digest));
+                }
+                let stage = indexed_path(&transaction.join(STAGE_DIRECTORY), index);
+                let contents =
+                    read_staged_replacement(&stage, action.size, action.digest, limits, control)?;
+                match self.compare_and_swap_replace_inner(
+                    &action.path,
+                    expected_digest,
+                    &contents,
+                    limits.max_file_bytes,
+                ) {
+                    Ok(ReplaceOutcome::Committed { new_digest, .. })
+                        if new_digest == action.digest => {}
+                    Ok(ReplaceOutcome::Committed { .. }) => {
+                        return Err(StepFailure::Platform(PlatformError::RecoveryRequired));
+                    }
+                    Ok(ReplaceOutcome::Conflict { actual_digest }) => {
+                        return Err(StepFailure::Conflict(actual_digest));
+                    }
+                    Ok(ReplaceOutcome::Indeterminate { .. }) => {
+                        return Err(StepFailure::Platform(PlatformError::RecoveryRequired));
+                    }
+                    Err(error) => return Err(StepFailure::Platform(error)),
+                }
+                sync_parent(&destination).map_err(StepFailure::Platform)?;
+                fs::remove_file(&stage).map_err(PlatformError::from)?;
+                sync_directory(&transaction.join(STAGE_DIRECTORY)).map_err(StepFailure::Platform)
             }
         }
     }
@@ -755,7 +844,7 @@ impl Workspace {
                     {
                         rows[index] = FileActionOutcome {
                             state: FileActionState::RolledBack,
-                            digest: Some(action.digest),
+                            digest: Some(rollback_digest(action)),
                         };
                     }
                 }
@@ -768,7 +857,7 @@ impl Workspace {
                         if let Some(rows) = rows.as_deref_mut() {
                             rows[index] = FileActionOutcome {
                                 state: FileActionState::RolledBack,
-                                digest: Some(action.digest),
+                                digest: Some(rollback_digest(action)),
                             };
                         }
                     } else {
@@ -842,6 +931,27 @@ impl Workspace {
                     _ => Ok(AppliedState::Indeterminate),
                 }
             }
+            FileActionKind::Replace => {
+                let destination = self.checked_mutation_path(&action.path, false)?;
+                let removed = indexed_path(&transaction.join(REMOVED_DIRECTORY), index);
+                if !exists(&destination)? || !exists(&removed)? {
+                    return Ok(AppliedState::Indeterminate);
+                }
+                let preimage_digest = action
+                    .preimage_digest
+                    .ok_or(PlatformError::JournalCorrupt)?;
+                let preimage_size = action.preimage_size.ok_or(PlatformError::JournalCorrupt)?;
+                if !file_matches_recovery(&removed, preimage_size, preimage_digest)? {
+                    return Ok(AppliedState::Indeterminate);
+                }
+                if file_matches_recovery(&destination, action.size, action.digest)? {
+                    Ok(AppliedState::Applied)
+                } else if file_matches_recovery(&destination, preimage_size, preimage_digest)? {
+                    Ok(AppliedState::NotApplied)
+                } else {
+                    Ok(AppliedState::Indeterminate)
+                }
+            }
         }
     }
 
@@ -895,6 +1005,43 @@ impl Workspace {
                 fs::rename(&removed, &source)?;
                 sync_parent(&source)?;
                 sync_directory(&transaction.join(REMOVED_DIRECTORY))
+            }
+            FileActionKind::Replace => {
+                let preimage_digest = action
+                    .preimage_digest
+                    .ok_or(PlatformError::JournalCorrupt)?;
+                let preimage_size = action.preimage_size.ok_or(PlatformError::JournalCorrupt)?;
+                let destination = self.checked_mutation_path(&action.path, true)?;
+                if !file_matches_recovery(&destination, action.size, action.digest)? {
+                    return Err(PlatformError::RecoveryRequired);
+                }
+                let removed = indexed_path(&transaction.join(REMOVED_DIRECTORY), index);
+                if !file_matches_recovery(&removed, preimage_size, preimage_digest)? {
+                    return Err(PlatformError::RecoveryRequired);
+                }
+                let max_bytes =
+                    usize::try_from(preimage_size).map_err(|_| PlatformError::RecoveryRequired)?;
+                let contents = read_regular_bounded(&removed, max_bytes)?;
+                if contents.len() as u64 != preimage_size
+                    || blake3::hash(&contents).as_bytes() != &preimage_digest
+                {
+                    return Err(PlatformError::RecoveryRequired);
+                }
+                match self.compare_and_swap_replace_inner(
+                    &action.path,
+                    action.digest,
+                    &contents,
+                    MAX_FILE_TRANSACTION_FILE_BYTES,
+                )? {
+                    ReplaceOutcome::Committed { new_digest, .. }
+                        if new_digest == preimage_digest => {}
+                    _ => return Err(PlatformError::RecoveryRequired),
+                }
+                sync_parent(&destination)?;
+                remove_file_if_present(&removed)?;
+                remove_file_if_present(&indexed_path(&transaction.join(STAGE_DIRECTORY), index))?;
+                sync_directory(&transaction.join(REMOVED_DIRECTORY))?;
+                sync_directory(&transaction.join(STAGE_DIRECTORY))
             }
         }
     }
@@ -950,6 +1097,11 @@ fn validate_actions(workspace: &Workspace, actions: &[FileAction]) -> Result<(),
                 action.destination.is_none()
                     && action.expected_digest.is_some()
                     && action.content.is_none()
+            }
+            FileActionKind::Replace => {
+                action.destination.is_none()
+                    && action.expected_digest.is_some()
+                    && action.content.is_some()
             }
         };
         if !shape_valid {
@@ -1156,6 +1308,64 @@ fn hash_file_recovery(path: &Path, expected_size: u64) -> Result<[u8; 32], Platf
     }
 }
 
+fn file_matches_recovery(
+    path: &Path,
+    expected_size: u64,
+    expected_digest: [u8; 32],
+) -> Result<bool, PlatformError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(PlatformError::RecoveryRequired);
+    }
+    if metadata.len() != expected_size {
+        return Ok(false);
+    }
+    Ok(hash_file_recovery(path, expected_size)? == expected_digest)
+}
+
+fn read_staged_replacement<F>(
+    path: &Path,
+    expected_size: u64,
+    expected_digest: [u8; 32],
+    limits: FileTransactionLimits,
+    control: &mut F,
+) -> Result<Vec<u8>, StepFailure>
+where
+    F: FnMut() -> TransactionControl,
+{
+    let metadata = fs::symlink_metadata(path).map_err(PlatformError::from)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != expected_size
+        || expected_size > limits.max_file_bytes
+    {
+        return Err(StepFailure::Platform(PlatformError::JournalCorrupt));
+    }
+    let capacity = usize::try_from(expected_size)
+        .map_err(|_| StepFailure::Platform(PlatformError::JournalCorrupt))?;
+    let mut reader = File::open(path).map_err(PlatformError::from)?;
+    let mut contents = Vec::with_capacity(capacity);
+    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
+    let mut hasher = blake3::Hasher::new();
+    loop {
+        check_control(control).map_err(StepFailure::Stopped)?;
+        let count = reader.read(&mut buffer).map_err(PlatformError::from)?;
+        if count == 0 {
+            break;
+        }
+        if contents.len().saturating_add(count) > capacity {
+            return Err(StepFailure::Platform(PlatformError::JournalCorrupt));
+        }
+        contents.extend_from_slice(&buffer[..count]);
+        hasher.update(&buffer[..count]);
+    }
+    if contents.len() != capacity || hasher.finalize().as_bytes() != &expected_digest {
+        Err(StepFailure::Platform(PlatformError::JournalCorrupt))
+    } else {
+        Ok(contents)
+    }
+}
+
 fn hard_link_error<F>(
     destination: &Path,
     limits: FileTransactionLimits,
@@ -1191,6 +1401,15 @@ fn encode_manifest(actions: &[PreparedAction]) -> Result<Vec<u8>, PlatformError>
         encode_optional_text(&mut bytes, action.destination.as_deref())?;
         bytes.extend_from_slice(&action.digest);
         bytes.extend_from_slice(&action.size.to_be_bytes());
+        match (action.preimage_digest, action.preimage_size) {
+            (Some(digest), Some(size)) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&digest);
+                bytes.extend_from_slice(&size.to_be_bytes());
+            }
+            (None, None) => bytes.push(0),
+            _ => return Err(PlatformError::JournalCorrupt),
+        }
     }
     let checksum = blake3::hash(&bytes);
     bytes.extend_from_slice(checksum.as_bytes());
@@ -1221,6 +1440,7 @@ fn decode_manifest(bytes: &[u8]) -> Result<Vec<PreparedAction>, PlatformError> {
             1 => FileActionKind::Copy,
             2 => FileActionKind::Move,
             3 => FileActionKind::Remove,
+            4 => FileActionKind::Replace,
             _ => return Err(PlatformError::JournalCorrupt),
         };
         let path = decode_text(body, &mut cursor)?;
@@ -1229,6 +1449,18 @@ fn decode_manifest(bytes: &[u8]) -> Result<Vec<PreparedAction>, PlatformError> {
             .try_into()
             .map_err(|_| PlatformError::JournalCorrupt)?;
         let size = read_u64(body, &mut cursor)?;
+        let (preimage_digest, preimage_size) = match take(body, &mut cursor, 1)?[0] {
+            0 => (None, None),
+            1 => (
+                Some(
+                    take(body, &mut cursor, 32)?
+                        .try_into()
+                        .map_err(|_| PlatformError::JournalCorrupt)?,
+                ),
+                Some(read_u64(body, &mut cursor)?),
+            ),
+            _ => return Err(PlatformError::JournalCorrupt),
+        };
         validate_logical(&path).map_err(|_| PlatformError::JournalCorrupt)?;
         if path == "."
             || path == STATE_DIRECTORY
@@ -1248,8 +1480,15 @@ fn decode_manifest(bytes: &[u8]) -> Result<Vec<PreparedAction>, PlatformError> {
             }
         }
         let shape_valid = match kind {
-            FileActionKind::Create | FileActionKind::Remove => destination.is_none(),
-            FileActionKind::Copy | FileActionKind::Move => destination.is_some(),
+            FileActionKind::Create | FileActionKind::Remove => {
+                destination.is_none() && preimage_digest.is_none()
+            }
+            FileActionKind::Copy | FileActionKind::Move => {
+                destination.is_some() && preimage_digest.is_none()
+            }
+            FileActionKind::Replace => {
+                destination.is_none() && preimage_digest.is_some() && preimage_size.is_some()
+            }
         };
         if !shape_valid {
             return Err(PlatformError::JournalCorrupt);
@@ -1260,6 +1499,8 @@ fn decode_manifest(bytes: &[u8]) -> Result<Vec<PreparedAction>, PlatformError> {
             destination,
             digest,
             size,
+            preimage_digest,
+            preimage_size,
         });
     }
     if cursor != body.len() {
@@ -1270,16 +1511,28 @@ fn decode_manifest(bytes: &[u8]) -> Result<Vec<PreparedAction>, PlatformError> {
 }
 
 fn validate_manifest_sizes(actions: &[PreparedAction]) -> Result<(), PlatformError> {
-    let mut total = 0_u64;
+    let mut materialized = 0_u64;
+    let mut preimages = 0_u64;
     for action in actions {
         if action.size > MAX_FILE_TRANSACTION_FILE_BYTES {
             return Err(PlatformError::JournalCorrupt);
         }
-        total = total
+        materialized = materialized
             .checked_add(action.size)
             .ok_or(PlatformError::JournalCorrupt)?;
-        if total > MAX_FILE_TRANSACTION_TOTAL_BYTES {
+        if materialized > MAX_FILE_TRANSACTION_TOTAL_BYTES {
             return Err(PlatformError::JournalCorrupt);
+        }
+        if let Some(size) = action.preimage_size {
+            if size > MAX_FILE_TRANSACTION_FILE_BYTES {
+                return Err(PlatformError::JournalCorrupt);
+            }
+            preimages = preimages
+                .checked_add(size)
+                .ok_or(PlatformError::JournalCorrupt)?;
+            if preimages > MAX_FILE_TRANSACTION_TOTAL_BYTES {
+                return Err(PlatformError::JournalCorrupt);
+            }
         }
     }
     Ok(())
@@ -1353,6 +1606,22 @@ fn take<'a>(bytes: &'a [u8], cursor: &mut usize, length: usize) -> Result<&'a [u
 
 fn indexed_path(directory: &Path, index: usize) -> PathBuf {
     directory.join(format!("{index:08x}"))
+}
+
+fn rollback_digest(action: &PreparedAction) -> [u8; 32] {
+    action.preimage_digest.unwrap_or(action.digest)
+}
+
+fn remove_file_if_present(path: &Path) -> Result<(), PlatformError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            fs::remove_file(path)?;
+            Ok(())
+        }
+        Ok(_) => Err(PlatformError::RecoveryRequired),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn write_new_sync(path: &Path, bytes: &[u8]) -> Result<(), PlatformError> {
@@ -1484,12 +1753,18 @@ mod tests {
         fs::write(directory.0.join("copy-source"), b"copy").expect("copy source");
         fs::write(directory.0.join("move-source"), b"move").expect("move source");
         fs::write(directory.0.join("remove-source"), b"remove").expect("remove source");
+        fs::write(directory.0.join("replace-source"), b"before").expect("replace source");
         let workspace = Workspace::new(&directory.0).expect("workspace");
         let actions = vec![
             FileAction::create("created", b"created".to_vec()),
             FileAction::copy("copy-source", "copied", *blake3::hash(b"copy").as_bytes()),
             FileAction::move_file("move-source", "moved", *blake3::hash(b"move").as_bytes()),
             FileAction::remove("remove-source", *blake3::hash(b"remove").as_bytes()),
+            FileAction::replace(
+                "replace-source",
+                *blake3::hash(b"before").as_bytes(),
+                b"after".to_vec(),
+            ),
         ];
 
         let outcome = workspace
@@ -1518,6 +1793,10 @@ mod tests {
         assert_eq!(fs::read(directory.0.join("moved")).expect("moved"), b"move");
         assert!(!directory.0.join("move-source").exists());
         assert!(!directory.0.join("remove-source").exists());
+        assert_eq!(
+            fs::read(directory.0.join("replace-source")).expect("replace source"),
+            b"after"
+        );
         assert!(
             !directory
                 .0
@@ -1578,6 +1857,59 @@ mod tests {
         assert_eq!(outcome.actions[1].state, FileActionState::Conflict);
         assert!(!directory.0.join("created").exists());
         assert_eq!(fs::read(guarded).expect("guarded"), b"external");
+        assert!(
+            !directory
+                .0
+                .join(".ash")
+                .join(TRANSACTION_DIRECTORY)
+                .exists()
+        );
+    }
+
+    #[test]
+    fn later_apply_conflict_rolls_back_an_earlier_durable_replace() {
+        let directory = TestDirectory::new();
+        let first = directory.0.join("first");
+        let second = directory.0.join("second");
+        fs::write(&first, b"first-old").expect("first");
+        fs::write(&second, b"second-old").expect("second");
+        let workspace = Workspace::new(&directory.0).expect("workspace");
+        let root = directory.0.clone();
+        let mut injected = false;
+        let outcome = workspace
+            .file_transaction(
+                vec![
+                    FileAction::replace(
+                        "first",
+                        *blake3::hash(b"first-old").as_bytes(),
+                        b"first-new".to_vec(),
+                    ),
+                    FileAction::replace(
+                        "second",
+                        *blake3::hash(b"second-old").as_bytes(),
+                        b"second-new".to_vec(),
+                    ),
+                ],
+                limits(),
+                || {
+                    if !injected && root.join(".ash").join(TRANSACTION_DIRECTORY).exists() {
+                        fs::write(&second, b"external").expect("inject conflict");
+                        injected = true;
+                    }
+                    TransactionControl::Continue
+                },
+            )
+            .expect("transaction");
+
+        assert_eq!(outcome.failure, Some(FileTransactionFailure::Conflict));
+        assert_eq!(outcome.actions[0].state, FileActionState::RolledBack);
+        assert_eq!(
+            outcome.actions[0].digest,
+            Some(*blake3::hash(b"first-old").as_bytes())
+        );
+        assert_eq!(outcome.actions[1].state, FileActionState::Conflict);
+        assert_eq!(fs::read(first).expect("first"), b"first-old");
+        assert_eq!(fs::read(second).expect("second"), b"external");
         assert!(
             !directory
                 .0
@@ -1657,6 +1989,63 @@ mod tests {
     }
 
     #[test]
+    fn replace_recovery_covers_published_applied_and_committed_cutpoints() {
+        for (applied, committed, expected) in [
+            (false, false, b"before".as_slice()),
+            (true, false, b"before".as_slice()),
+            (true, true, b"after".as_slice()),
+        ] {
+            let directory = TestDirectory::new();
+            fs::write(directory.0.join("file"), b"before").expect("file");
+            let workspace = Workspace::new(&directory.0).expect("workspace");
+            install_replace_cutpoint(&workspace, "file", b"before", b"after", applied, committed);
+            drop(workspace);
+
+            let restarted = Workspace::new(&directory.0).expect("restart workspace");
+            assert!(
+                restarted
+                    .recover_file_transactions(|| TransactionControl::Continue)
+                    .expect("recover")
+            );
+            assert_eq!(fs::read(directory.0.join("file")).expect("file"), expected);
+            assert!(
+                !directory
+                    .0
+                    .join(".ash")
+                    .join(TRANSACTION_DIRECTORY)
+                    .exists()
+            );
+        }
+    }
+
+    #[test]
+    fn replace_recovery_preserves_ambiguous_external_content_and_journal() {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("file"), b"before").expect("file");
+        let workspace = Workspace::new(&directory.0).expect("workspace");
+        install_replace_cutpoint(&workspace, "file", b"before", b"after", true, false);
+        fs::write(directory.0.join("file"), b"external").expect("external");
+        drop(workspace);
+
+        let restarted = Workspace::new(&directory.0).expect("restart workspace");
+        assert!(matches!(
+            restarted.recover_file_transactions(|| TransactionControl::Continue),
+            Err(PlatformError::RecoveryRequired)
+        ));
+        assert_eq!(
+            fs::read(directory.0.join("file")).expect("file"),
+            b"external"
+        );
+        assert!(
+            directory
+                .0
+                .join(".ash")
+                .join(TRANSACTION_DIRECTORY)
+                .exists()
+        );
+    }
+
+    #[test]
     fn recovery_fails_closed_when_visible_content_no_longer_matches_manifest() {
         let directory = TestDirectory::new();
         let workspace = Workspace::new(&directory.0).expect("workspace");
@@ -1710,6 +2099,8 @@ mod tests {
             destination: None,
             digest: [0; 32],
             size: super::MAX_FILE_TRANSACTION_FILE_BYTES + 1,
+            preimage_digest: None,
+            preimage_size: None,
         };
         assert!(matches!(
             encode_manifest(&[oversized]),
@@ -1760,6 +2151,8 @@ mod tests {
             destination: None,
             digest: *blake3::hash(contents).as_bytes(),
             size: contents.len() as u64,
+            preimage_digest: None,
+            preimage_size: None,
         };
         write_new_sync(
             &transaction.join(MANIFEST_FILE),
@@ -1770,6 +2163,48 @@ mod tests {
         write_new_sync(&stage, contents).expect("write stage");
         fs::hard_link(&stage, workspace.native_root().join(logical)).expect("publish create");
         fs::remove_file(stage).expect("remove stage link");
+        if committed {
+            write_new_sync(&transaction.join(COMMITTED_FILE), COMMITTED_MARKER)
+                .expect("commit marker");
+        }
+    }
+
+    fn install_replace_cutpoint(
+        workspace: &Workspace,
+        logical: &str,
+        before: &[u8],
+        after: &[u8],
+        applied: bool,
+        committed: bool,
+    ) {
+        assert!(!committed || applied);
+        workspace.ensure_internal_state().expect("state");
+        let transaction = workspace.state_directory().join(TRANSACTION_DIRECTORY);
+        fs::create_dir(&transaction).expect("transaction directory");
+        fs::create_dir(transaction.join(STAGE_DIRECTORY)).expect("stage directory");
+        fs::create_dir(transaction.join(REMOVED_DIRECTORY)).expect("removed directory");
+        let action = PreparedAction {
+            kind: super::FileActionKind::Replace,
+            path: logical.to_owned(),
+            destination: None,
+            digest: *blake3::hash(after).as_bytes(),
+            size: after.len() as u64,
+            preimage_digest: Some(*blake3::hash(before).as_bytes()),
+            preimage_size: Some(before.len() as u64),
+        };
+        write_new_sync(
+            &transaction.join(MANIFEST_FILE),
+            &encode_manifest(std::slice::from_ref(&action)).expect("manifest"),
+        )
+        .expect("write manifest");
+        let stage = indexed_path(&transaction.join(STAGE_DIRECTORY), 0);
+        let removed = indexed_path(&transaction.join(REMOVED_DIRECTORY), 0);
+        write_new_sync(&stage, after).expect("stage");
+        write_new_sync(&removed, before).expect("preimage");
+        if applied {
+            fs::write(workspace.native_root().join(logical), after).expect("visible replace");
+            fs::remove_file(stage).expect("remove stage");
+        }
         if committed {
             write_new_sync(&transaction.join(COMMITTED_FILE), COMMITTED_MARKER)
                 .expect("commit marker");
