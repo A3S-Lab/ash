@@ -3,7 +3,10 @@ use std::io;
 use std::time::Instant;
 
 use ash_engine::{ComputePool, Engine, Parallelism, SessionConfig};
-use ash_ops::{PortableOperations, RepeatedLineReduction, collapse_repeated_lines};
+use ash_ops::{
+    PortableOperations, RepeatedBlockReduction, RepeatedLineReduction, collapse_repeated_blocks,
+    collapse_repeated_lines,
+};
 use ash_protocol::ason::{Atom, Cell, Document, Field, Key, Table, Value};
 use ash_protocol::request::{
     Arguments, Budget, MAX_REQUEST_RECORDS, MAX_REQUEST_TOKENS, RefArgs, Request,
@@ -26,6 +29,9 @@ const PROJECTED_INDEXES: [usize; 6] = [0, 1, 2, 3, 5, 6];
 const REPEATED_LINES_PER_FIXTURE_FILE: usize = 512;
 const REPEATED_RUN_LINES: usize = 512;
 const MAX_REPEATED_LINES: usize = 262_144;
+const REPEATED_BLOCK_LINES: usize = 8;
+const REPEATED_BLOCK_REPETITIONS: usize = 64;
+const MAX_REPEATED_BLOCK_GROUPS: usize = 512;
 
 struct ProjectionWorkload {
     source: Vec<u8>,
@@ -40,6 +46,16 @@ struct RepeatedLineWorkload {
     expected: String,
     lines: usize,
     collapsed_runs: usize,
+    omitted_lines: usize,
+    input_sha256: String,
+}
+
+struct RepeatedBlockWorkload {
+    input: String,
+    expected: String,
+    lines: usize,
+    collapsed_blocks: usize,
+    omitted_repetitions: usize,
     omitted_lines: usize,
     input_sha256: String,
 }
@@ -157,6 +173,53 @@ pub(super) fn measure_repeated_line_scenario(
     })
 }
 
+pub(super) fn measure_repeated_block_scenario(
+    config: &RuntimeConfig,
+) -> Result<ScenarioReport, Box<dyn Error>> {
+    let workload = RepeatedBlockWorkload::new(config.files)?;
+    let mut runs = Vec::with_capacity(config.worker_counts.len());
+    let mut expected_output = None;
+    let mut baseline = None;
+
+    for &workers in &config.worker_counts {
+        let parallelism = Parallelism::for_available_cpus(workers);
+        let pool = ComputePool::new(parallelism)?;
+        let (warm_output, _) = execute_repeated_block_once(&pool, &workload)?;
+        require_stable_output(&mut expected_output, &warm_output)?;
+
+        let mut observations = Vec::with_capacity(config.samples);
+        for _ in 0..config.samples {
+            let (output, elapsed) = execute_repeated_block_once(&pool, &workload)?;
+            require_stable_output(&mut expected_output, &output)?;
+            observations.push(elapsed);
+        }
+
+        let output = expected_output
+            .as_ref()
+            .ok_or_else(|| io::Error::other("repeated-block reduction emitted no output"))?;
+        runs.push(runtime_run(
+            parallelism,
+            observations,
+            &mut baseline,
+            u128::try_from(workload.lines)?,
+            u128::try_from(workload.input.len())?,
+            output,
+        ));
+    }
+
+    let output = expected_output
+        .ok_or_else(|| io::Error::other("missing repeated-block reduction output"))?;
+    Ok(ScenarioReport {
+        id: "reduce-repeated-blocks",
+        work_items: workload.lines,
+        work_bytes: u64::try_from(workload.input.len())?,
+        input_sha256: workload.input_sha256,
+        output_bytes: output.len(),
+        output_sha256: sha256_hex(&output),
+        runs,
+    })
+}
+
 impl ProjectionWorkload {
     fn new(fixture_files: usize) -> Result<Self, Box<dyn Error>> {
         let rows = fixture_files
@@ -231,6 +294,44 @@ impl RepeatedLineWorkload {
     }
 }
 
+impl RepeatedBlockWorkload {
+    fn new(fixture_files: usize) -> Result<Self, Box<dyn Error>> {
+        let groups = fixture_files.clamp(1, MAX_REPEATED_BLOCK_GROUPS);
+        let lines_per_group = REPEATED_BLOCK_LINES
+            .checked_mul(REPEATED_BLOCK_REPETITIONS)
+            .ok_or_else(|| io::Error::other("repeated-block group size overflow"))?;
+        let lines = groups
+            .checked_mul(lines_per_group)
+            .ok_or_else(|| io::Error::other("repeated-block fixture count overflow"))?;
+        let mut input = String::new();
+        let mut expected = String::new();
+        for group in 0..groups {
+            let block = repeated_block(group);
+            for _ in 0..REPEATED_BLOCK_REPETITIONS {
+                input.push_str(&block);
+            }
+            expected.push_str(&block);
+            expected.push_str(&format!(
+                "×{REPEATED_BLOCK_REPETITIONS}#{REPEATED_BLOCK_LINES}\n"
+            ));
+        }
+        let collapsed_blocks = groups;
+        let omitted_repetitions = groups * (REPEATED_BLOCK_REPETITIONS - 1);
+        let omitted_lines = omitted_repetitions * REPEATED_BLOCK_LINES;
+        let mut evidence = b"reduce-repeated-blocks-v1".to_vec();
+        append_evidence(&mut evidence, input.as_bytes())?;
+        Ok(Self {
+            input,
+            expected,
+            lines,
+            collapsed_blocks,
+            omitted_repetitions,
+            omitted_lines,
+            input_sha256: sha256_hex(&evidence),
+        })
+    }
+}
+
 fn execute_repeated_line_once(
     pool: &ComputePool,
     workload: &RepeatedLineWorkload,
@@ -282,6 +383,66 @@ fn repeated_line(group: usize) -> String {
         group % 64,
         group % 256,
     )
+}
+
+fn execute_repeated_block_once(
+    pool: &ComputePool,
+    workload: &RepeatedBlockWorkload,
+) -> Result<(Vec<u8>, u128), Box<dyn Error>> {
+    let started = Instant::now();
+    let reduction = pool.install(|| collapse_repeated_blocks(&workload.input));
+    let elapsed = started.elapsed().as_nanos().max(1);
+    validate_repeated_block_reduction(&reduction, workload)?;
+    Ok((repeated_block_evidence(&reduction)?, elapsed))
+}
+
+fn validate_repeated_block_reduction(
+    reduction: &RepeatedBlockReduction,
+    workload: &RepeatedBlockWorkload,
+) -> Result<(), io::Error> {
+    if reduction.text() != workload.expected
+        || reduction.collapsed_blocks() != workload.collapsed_blocks
+        || reduction.omitted_repetitions() != workload.omitted_repetitions
+        || reduction.omitted_lines() != workload.omitted_lines
+    {
+        return Err(io::Error::other(
+            "repeated-block reduction changed block counts or stable output",
+        ));
+    }
+    Ok(())
+}
+
+fn repeated_block_evidence(reduction: &RepeatedBlockReduction) -> Result<Vec<u8>, io::Error> {
+    let mut output = b"reduce-repeated-blocks-output-v1".to_vec();
+    for value in [
+        reduction.collapsed_blocks(),
+        reduction.omitted_repetitions(),
+        reduction.omitted_lines(),
+    ] {
+        output.extend_from_slice(
+            &u64::try_from(value)
+                .map_err(io::Error::other)?
+                .to_le_bytes(),
+        );
+    }
+    append_evidence(&mut output, reduction.text().as_bytes())?;
+    Ok(output)
+}
+
+fn repeated_block(group: usize) -> String {
+    let mut block = String::new();
+    for frame in 0..REPEATED_BLOCK_LINES {
+        let seed = u64::try_from(group)
+            .unwrap_or(u64::MAX)
+            .wrapping_mul(0x517c_c1b7_2722_0a95)
+            .wrapping_add(u64::try_from(frame).unwrap_or(u64::MAX));
+        block.push_str(&format!(
+            "trace-{group:06} frame={frame:02} path=src/d{:02}/f{group:06}.rs code=E{:03} payload={seed:016x}\n",
+            group % 64,
+            (group + frame) % 256,
+        ));
+    }
+    block
 }
 
 async fn execute_once(

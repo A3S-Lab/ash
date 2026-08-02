@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fs;
 
-use ash_ops::collapse_repeated_lines;
+use ash_ops::{collapse_repeated_blocks, collapse_repeated_lines};
 use ash_protocol::ason::{Atom, Cell, Document, Field, Key, Record, Table, Value, decode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
@@ -44,6 +44,7 @@ struct Report {
     aggregate: EncodingSet,
     formula_algebra: FormulaAlgebraReport,
     repeated_line_reduction: RepeatedLineReport,
+    repeated_block_reduction: RepeatedBlockReport,
     gates: Gates,
 }
 
@@ -55,11 +56,23 @@ struct RepeatedLineReport {
     omitted_lines: usize,
     source: Measurement,
     projection: Measurement,
-    gates: RepeatedLineGates,
+    gates: ReductionGates,
 }
 
 #[derive(Debug, Serialize)]
-struct RepeatedLineGates {
+struct RepeatedBlockReport {
+    source_lines: usize,
+    projected_lines: usize,
+    collapsed_blocks: usize,
+    omitted_repetitions: usize,
+    omitted_lines: usize,
+    source: Measurement,
+    projection: Measurement,
+    gates: ReductionGates,
+}
+
+#[derive(Debug, Serialize)]
+struct ReductionGates {
     projection_vs_source_bytes_percent: usize,
     projection_vs_source_cl100k_percent: usize,
     projection_vs_source_o200k_percent: usize,
@@ -195,6 +208,7 @@ fn build_report() -> Result<Report, Box<dyn Error>> {
     let o200k = o200k_base()?;
     let formula_algebra = build_formula_algebra(&cl100k, &o200k)?;
     let repeated_line_reduction = build_repeated_line_report(&cl100k, &o200k)?;
+    let repeated_block_reduction = build_repeated_block_report(&cl100k, &o200k)?;
     let mut datasets = Vec::with_capacity(corpus.datasets.len());
     let mut aggregate = EncodingSet::default();
     for dataset in corpus.datasets {
@@ -237,7 +251,7 @@ fn build_report() -> Result<Report, Box<dyn Error>> {
         return Err("ASON token-efficiency release gate failed".into());
     }
     Ok(Report {
-        schema: 3,
+        schema: 4,
         corpus: "benches/corpus/v1.json".to_owned(),
         corpus_sha256: hex(&Sha256::digest(CORPUS_BYTES)),
         workspace_lock_sha256: hex(&Sha256::digest(WORKSPACE_LOCK)),
@@ -249,6 +263,7 @@ fn build_report() -> Result<Report, Box<dyn Error>> {
         aggregate,
         formula_algebra,
         repeated_line_reduction,
+        repeated_block_reduction,
         gates: Gates {
             semantic_round_trip: true,
             ason_vs_record_json_cl100k_percent: cl100k_percent,
@@ -301,7 +316,66 @@ fn build_repeated_line_report(
         omitted_lines: reduction.omitted_lines(),
         source: source_measurement,
         projection,
-        gates: RepeatedLineGates {
+        gates: ReductionGates {
+            projection_vs_source_bytes_percent: bytes_percent,
+            projection_vs_source_cl100k_percent: cl100k_percent,
+            projection_vs_source_o200k_percent: o200k_percent,
+            required_max_percent: REQUIRED_MAX_PERCENT,
+            passed,
+        },
+    })
+}
+
+fn build_repeated_block_report(
+    cl100k: &tiktoken_rs::CoreBPE,
+    o200k: &tiktoken_rs::CoreBPE,
+) -> Result<RepeatedBlockReport, Box<dyn Error>> {
+    const GROUPS: usize = 32;
+    const BLOCK_LINES: usize = 6;
+    const REPETITIONS: usize = 64;
+    const REQUIRED_MAX_PERCENT: usize = 5;
+
+    let mut source = String::new();
+    for group in 0..GROUPS {
+        let mut block = String::new();
+        for frame in 0..BLOCK_LINES {
+            block.push_str(&format!(
+                "error[E{:03}] path=src/component-{:02}/module-{group:02}.rs frame={frame:02} repeated block {group:02}\n",
+                (group + frame) % 32,
+                group % 16,
+            ));
+        }
+        for _ in 0..REPETITIONS {
+            source.push_str(&block);
+        }
+    }
+    let reduction = collapse_repeated_blocks(&source);
+    if reduction.collapsed_blocks() != GROUPS
+        || reduction.omitted_repetitions() != GROUPS * (REPETITIONS - 1)
+        || reduction.omitted_lines() != GROUPS * BLOCK_LINES * (REPETITIONS - 1)
+    {
+        return Err("repeated-block reducer produced unexpected evidence".into());
+    }
+    let source_measurement = measure(&source, cl100k, o200k);
+    let projection = measure(reduction.text(), cl100k, o200k);
+    let bytes_percent = percentage(projection.bytes, source_measurement.bytes);
+    let cl100k_percent = percentage(projection.cl100k_tokens, source_measurement.cl100k_tokens);
+    let o200k_percent = percentage(projection.o200k_tokens, source_measurement.o200k_tokens);
+    let passed = bytes_percent <= REQUIRED_MAX_PERCENT
+        && cl100k_percent <= REQUIRED_MAX_PERCENT
+        && o200k_percent <= REQUIRED_MAX_PERCENT;
+    if !passed {
+        return Err("repeated-block token-efficiency gate failed".into());
+    }
+    Ok(RepeatedBlockReport {
+        source_lines: GROUPS * BLOCK_LINES * REPETITIONS,
+        projected_lines: reduction.text().lines().count(),
+        collapsed_blocks: reduction.collapsed_blocks(),
+        omitted_repetitions: reduction.omitted_repetitions(),
+        omitted_lines: reduction.omitted_lines(),
+        source: source_measurement,
+        projection,
+        gates: ReductionGates {
             projection_vs_source_bytes_percent: bytes_percent,
             projection_vs_source_cl100k_percent: cl100k_percent,
             projection_vs_source_o200k_percent: o200k_percent,
@@ -686,12 +760,15 @@ mod tests {
     #[test]
     fn corpus_round_trips_and_passes_the_token_gate() {
         let report = build_report().expect("benchmark report");
-        assert_eq!(report.schema, 3);
+        assert_eq!(report.schema, 4);
         assert!(report.gates.semantic_round_trip);
         assert!(report.gates.passed);
         assert!(report.repeated_line_reduction.gates.passed);
         assert_eq!(report.repeated_line_reduction.source_lines, 8_192);
         assert_eq!(report.repeated_line_reduction.projected_lines, 128);
+        assert!(report.repeated_block_reduction.gates.passed);
+        assert_eq!(report.repeated_block_reduction.source_lines, 12_288);
+        assert_eq!(report.repeated_block_reduction.projected_lines, 224);
         assert_eq!(report.datasets.len(), 4);
         assert!(report.aggregate.ason.bytes < report.aggregate.json_records.bytes);
     }
