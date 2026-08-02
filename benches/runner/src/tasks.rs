@@ -23,6 +23,10 @@ use tokio::task::JoinHandle;
 
 use super::{Measurement, measure};
 
+mod agent;
+
+pub(super) use agent::{build_agent_report, validate_agent_trace};
+
 const MANIFEST_BYTES: &[u8] = include_bytes!("../../tasks/v1/manifest.json");
 const MANIFEST_TEXT: &str = include_str!("../../tasks/v1/manifest.json");
 const LOCK_BYTES: &[u8] = include_bytes!("../../tasks/v1/lock.json");

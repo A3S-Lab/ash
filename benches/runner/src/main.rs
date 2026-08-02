@@ -2,6 +2,7 @@
 
 use std::error::Error;
 use std::fs;
+use std::path::Path;
 
 use ash_ops::{collapse_repeated_blocks, collapse_repeated_lines, focus_error_output};
 use ash_protocol::ason::{Atom, Cell, Document, Field, Key, Record, Table, Value, decode};
@@ -178,6 +179,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         print!("{}", std::str::from_utf8(&encoded)?);
         return Ok(());
     }
+    if matches!(arguments.as_slice(), [command, _] if command == "--validate-agent-trace") {
+        let [_, path] = arguments.as_slice() else {
+            unreachable!("agent trace validation arguments were matched above");
+        };
+        tasks::validate_agent_trace(Path::new(path))?;
+        return Ok(());
+    }
+    if matches!(arguments.as_slice(), [command, _, allow] if command == "--agent-trace" && allow == "--allow-native-agent-exec")
+    {
+        let [_, path, _] = arguments.as_slice() else {
+            unreachable!("agent trace replay arguments were matched above");
+        };
+        let mut encoded =
+            serde_json::to_vec_pretty(&tasks::build_agent_report(Path::new(path)).await?)?;
+        encoded.push(b'\n');
+        print!("{}", std::str::from_utf8(&encoded)?);
+        return Ok(());
+    }
     if matches!(arguments.as_slice(), [command, _] if command == "--write-task-lock" || command == "--check-task-lock")
     {
         let encoded = tasks::encoded_lock().await?;
@@ -205,7 +224,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         _ => {
             return Err(
-                "usage: a3s-ash-bench [--runtime [path-to-ash]|--tasks|--write-task-lock <path>|--check-task-lock <path>|--write <path>|--check <path>]".into(),
+                "usage: a3s-ash-bench [--runtime [path-to-ash]|--tasks|--validate-agent-trace <path>|--agent-trace <path> --allow-native-agent-exec|--write-task-lock <path>|--check-task-lock <path>|--write <path>|--check <path>]".into(),
             );
         }
     }

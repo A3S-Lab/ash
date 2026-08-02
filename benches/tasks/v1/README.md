@@ -11,4 +11,5 @@ executes the current platform baseline. It counts every canonical ASON request
 and response, but the plans are hand-authored and deterministic. This corpus
 therefore establishes tool-protocol denominators and correctness, not Coding
 Agent results. Model, prompt, retry, and model-selected trace evidence belongs
-in a later versioned report.
+in a later versioned report. The strict paired input and replay rules for that
+report are defined in [`../../agents/v1/`](../../agents/v1/README.md).

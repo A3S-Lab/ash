@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:a3s:ash:agent-trace:v1",
+  "title": "ASH paired Coding Agent trace v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "evidence_kind",
+    "experiment_id",
+    "captured_at_utc",
+    "manifest_sha256",
+    "lock_sha256",
+    "driver",
+    "model",
+    "platform",
+    "architecture",
+    "repetitions",
+    "primers",
+    "runs"
+  ],
+  "properties": {
+    "schema": { "const": 1 },
+    "evidence_kind": { "const": "model-selected-trace" },
+    "experiment_id": { "$ref": "#/$defs/name" },
+    "captured_at_utc": { "type": "string", "format": "date-time", "maxLength": 64 },
+    "manifest_sha256": { "$ref": "#/$defs/sha256" },
+    "lock_sha256": { "$ref": "#/$defs/sha256" },
+    "driver": { "$ref": "#/$defs/driver" },
+    "model": { "$ref": "#/$defs/model" },
+    "platform": { "enum": ["linux", "macos", "windows"] },
+    "architecture": { "enum": ["x86", "x86_64", "arm", "aarch64"] },
+    "repetitions": { "type": "integer", "minimum": 1, "maximum": 32 },
+    "primers": { "$ref": "#/$defs/primers" },
+    "runs": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/run" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "metadata": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\r\\n\\u0000]+$"
+    },
+    "visibleText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "pattern": "^[^\\r\\u0000]*$"
+    },
+    "finalText": {
+      "type": "string",
+      "maxLength": 65536,
+      "pattern": "^[^\\r\\u0000]*$"
+    },
+    "driver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "source_sha256"],
+      "properties": {
+        "name": { "$ref": "#/$defs/metadata" },
+        "version": { "$ref": "#/$defs/metadata" },
+        "source_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "id",
+        "revision",
+        "context_tokens",
+        "max_output_tokens",
+        "temperature",
+        "top_p"
+      ],
+      "properties": {
+        "provider": { "$ref": "#/$defs/metadata" },
+        "id": { "$ref": "#/$defs/metadata" },
+        "revision": { "$ref": "#/$defs/metadata" },
+        "context_tokens": { "type": "integer", "minimum": 1, "maximum": 1000000000 },
+        "max_output_tokens": { "type": "integer", "minimum": 1, "maximum": 1000000000 },
+        "temperature": { "$ref": "#/$defs/metadata" },
+        "top_p": { "$ref": "#/$defs/metadata" }
+      }
+    },
+    "primers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shared", "ash", "native_shell"],
+      "properties": {
+        "shared": { "$ref": "#/$defs/visibleText" },
+        "ash": { "$ref": "#/$defs/visibleText" },
+        "native_shell": { "$ref": "#/$defs/visibleText" }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_tokens",
+        "cached_input_tokens",
+        "visible_output_tokens",
+        "hidden_reasoning_tokens",
+        "raw_usage_sha256"
+      ],
+      "properties": {
+        "input_tokens": { "type": "integer", "minimum": 1, "maximum": 1000000000 },
+        "cached_input_tokens": { "type": "integer", "minimum": 0, "maximum": 1000000000 },
+        "visible_output_tokens": { "type": "integer", "minimum": 1, "maximum": 1000000000 },
+        "hidden_reasoning_tokens": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0, "maximum": 1000000000 },
+            { "type": "null" }
+          ]
+        },
+        "raw_usage_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "model_output", "tool_result_sha256", "model_elapsed_millis"],
+      "properties": {
+        "kind": { "enum": ["request", "invalid-request", "policy-rejected"] },
+        "model_output": { "$ref": "#/$defs/visibleText" },
+        "tool_result_sha256": { "$ref": "#/$defs/sha256" },
+        "model_elapsed_millis": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600000
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "attempts",
+        "final_stdout",
+        "final_stderr",
+        "finish_elapsed_millis",
+        "usage"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/name" },
+        "attempts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/attempt" }
+        },
+        "final_stdout": { "$ref": "#/$defs/finalText" },
+        "final_stderr": { "$ref": "#/$defs/finalText" },
+        "finish_elapsed_millis": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600000
+        },
+        "usage": { "$ref": "#/$defs/usage" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["arm", "repetition", "seed", "tasks"],
+      "properties": {
+        "arm": { "enum": ["ash", "native-shell"] },
+        "repetition": { "type": "integer", "minimum": 0, "maximum": 31 },
+        "seed": { "type": "integer", "minimum": 0 },
+        "tasks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/task" }
+        }
+      }
+    }
+  }
+}
