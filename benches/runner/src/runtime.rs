@@ -33,6 +33,11 @@ const DEFAULT_STORE_FETCH_BYTES: usize = 64 * 1024;
 const DEFAULT_PROCESS_STREAM_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_PROCESS_FETCH_BYTES: usize = 64 * 1024;
 const STORE_CHUNK_BYTES: usize = 16 * 1024;
+const STEADY_CHUNKS: &[usize] = &[16 * 1024];
+const FRAGMENTED_CHUNKS: &[usize] = &[1, 7, 31, 257, 4_093, 16_384, 65_521];
+const BURSTY_CHUNKS: &[usize] = &[512, 4_096, 16_384, 65_536];
+const BURST_BYTES: usize = 256 * 1024;
+const BURST_PAUSE_MICROS: u64 = 2_000;
 const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 const PROCESS_RESPONSE_BYTES: u64 = 64 * 1024;
 const REQUEST_MILLIS: u64 = 120_000;
@@ -43,13 +48,82 @@ const PROCESS_CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_HELPER_SOURCE: &str = r#"
 use std::error::Error;
 use std::fs;
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-const CHUNK_BYTES: usize = 16 * 1024;
+const STEADY_CHUNKS: &[usize] = &[16 * 1024];
+const FRAGMENTED_CHUNKS: &[usize] = &[1, 7, 31, 257, 4_093, 16_384, 65_521];
+const BURSTY_CHUNKS: &[usize] = &[512, 4_096, 16_384, 65_536];
+const BURST_BYTES: usize = 256 * 1024;
+const BURST_PAUSE_MICROS: u64 = 2_000;
+const MAX_CHUNK_BYTES: usize = 65_536;
 const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+enum Profile {
+    Steady,
+    Fragmented,
+    Bursty,
+}
+
+impl Profile {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "steady" => Some(Self::Steady),
+            "fragmented" => Some(Self::Fragmented),
+            "bursty" => Some(Self::Bursty),
+            _ => None,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Steady => "steady",
+            Self::Fragmented => "fragmented",
+            Self::Bursty => "bursty",
+        }
+    }
+
+    const fn chunks(self) -> &'static [usize] {
+        match self {
+            Self::Steady => STEADY_CHUNKS,
+            Self::Fragmented => FRAGMENTED_CHUNKS,
+            Self::Bursty => BURSTY_CHUNKS,
+        }
+    }
+
+    const fn flush_policy(self) -> &'static str {
+        match self {
+            Self::Steady => "end",
+            Self::Fragmented => "chunk",
+            Self::Bursty => "burst",
+        }
+    }
+
+    const fn burst_bytes(self) -> usize {
+        match self {
+            Self::Bursty => BURST_BYTES,
+            Self::Steady | Self::Fragmented => 0,
+        }
+    }
+
+    const fn pause_micros(self) -> u64 {
+        match self {
+            Self::Bursty => BURST_PAUSE_MICROS,
+            Self::Steady | Self::Fragmented => 0,
+        }
+    }
+
+    const fn seed_offset(self) -> usize {
+        match self {
+            Self::Steady => 0,
+            Self::Fragmented => 29,
+            Self::Bursty => 47,
+        }
+    }
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = std::env::args_os().skip(1);
@@ -85,19 +159,32 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .and_then(|value| value.to_str().and_then(|value| value.parse().ok()))
                 .filter(|bytes: &usize| *bytes > 0 && *bytes <= MAX_STREAM_BYTES)
                 .ok_or("invalid emit byte count")?;
+            let profile = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .as_deref()
+                .and_then(Profile::parse)
+                .ok_or("invalid emit profile")?;
             if arguments.next().is_some() {
                 return Err("unexpected emit argument".into());
             }
+            let stdout_profile = profile;
             let stdout = thread::spawn(move || {
                 let stdout = io::stdout();
-                emit(BufWriter::new(stdout.lock()), bytes, 0)
+                emit(stdout.lock(), bytes, 0, stdout_profile)
             });
             let stderr = thread::spawn(move || {
                 let stderr = io::stderr();
-                emit(BufWriter::new(stderr.lock()), bytes, 13)
+                emit(stderr.lock(), bytes, 13, profile)
             });
             stdout.join().map_err(|_| "stdout thread panicked")??;
             stderr.join().map_err(|_| "stderr thread panicked")??;
+        }
+        Some(mode) if mode == "describe" => {
+            if arguments.next().is_some() {
+                return Err("unexpected describe argument".into());
+            }
+            describe_profiles(io::stdout().lock())?;
         }
         Some(mode) if mode == "tree" => {
             let ready = arguments.next().ok_or("missing ready path")?;
@@ -130,21 +217,65 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn emit(mut writer: impl Write, total: usize, seed: usize) -> io::Result<()> {
-    let mut chunk = [0_u8; CHUNK_BYTES];
+fn emit(mut writer: impl Write, total: usize, seed: usize, profile: Profile) -> io::Result<()> {
+    let mut chunk = [0_u8; MAX_CHUNK_BYTES];
     let mut offset = 0_usize;
+    let mut chunk_index = 0_usize;
+    let mut burst_offset = 0_usize;
     while offset < total {
-        let length = (total - offset).min(chunk.len());
+        let requested = profile.chunks()[chunk_index % profile.chunks().len()];
+        let burst_remaining = match profile {
+            Profile::Bursty => BURST_BYTES - burst_offset,
+            Profile::Steady | Profile::Fragmented => usize::MAX,
+        };
+        let length = (total - offset)
+            .min(requested)
+            .min(burst_remaining);
         for (index, byte) in chunk[..length].iter_mut().enumerate() {
             let position = offset + index;
             *byte = if position % 127 == 126 {
                 b'\n'
             } else {
-                b'a' + ((position + seed) % 26) as u8
+                b'a' + ((position + seed + profile.seed_offset()) % 26) as u8
             };
         }
         writer.write_all(&chunk[..length])?;
         offset += length;
+        chunk_index += 1;
+        if matches!(profile, Profile::Fragmented) {
+            writer.flush()?;
+        }
+        if matches!(profile, Profile::Bursty) {
+            burst_offset += length;
+            if burst_offset == BURST_BYTES || offset == total {
+                writer.flush()?;
+                burst_offset = 0;
+                if offset < total {
+                    thread::sleep(Duration::from_micros(BURST_PAUSE_MICROS));
+                }
+            }
+        }
+    }
+    writer.flush()
+}
+
+fn describe_profiles(mut writer: impl Write) -> io::Result<()> {
+    for profile in [Profile::Steady, Profile::Fragmented, Profile::Bursty] {
+        write!(writer, "{};chunks=", profile.name())?;
+        for (index, chunk) in profile.chunks().iter().enumerate() {
+            if index > 0 {
+                writer.write_all(b",")?;
+            }
+            write!(writer, "{chunk}")?;
+        }
+        writeln!(
+            writer,
+            ";flush={};burst={};pause_us={};seed={}",
+            profile.flush_policy(),
+            profile.burst_bytes(),
+            profile.pause_micros(),
+            profile.seed_offset()
+        )?;
     }
     writer.flush()
 }
@@ -169,6 +300,7 @@ pub(crate) struct RuntimeReport {
     schema: u8,
     host: HostReport,
     fixture: FixtureReport,
+    process_capture: ProcessCaptureReport,
     samples: usize,
     scenarios: Vec<ScenarioReport>,
 }
@@ -185,6 +317,26 @@ struct FixtureReport {
     files: usize,
     bytes: u64,
     sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProcessCaptureReport {
+    streams: usize,
+    stream_bytes: usize,
+    fetched_tail_bytes: usize,
+    profile_descriptor_sha256: String,
+    profiles: [CaptureProfileReport; 3],
+}
+
+#[derive(Debug, Serialize)]
+struct CaptureProfileReport {
+    scenario_id: &'static str,
+    profile: &'static str,
+    producer_chunk_cycle_bytes: &'static [usize],
+    flush_policy: &'static str,
+    burst_bytes: usize,
+    pause_micros: u64,
+    seed_offset: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -244,11 +396,117 @@ struct StoreWorkload {
     fetch_bytes: usize,
 }
 
+struct ProcessCaptureWorkload {
+    request: Request,
+    stream_bytes: usize,
+    fetch_bytes: usize,
+    profile: CaptureProfile,
+}
+
 struct WorkspaceWorkload<'a> {
     scenario: Scenario,
     workspace: &'a str,
     fixture: &'a FixtureReport,
     request: Request,
+}
+
+#[derive(Clone, Copy)]
+enum CaptureProfile {
+    Steady,
+    Fragmented,
+    Bursty,
+}
+
+impl CaptureProfile {
+    const ALL: [Self; 3] = [Self::Steady, Self::Fragmented, Self::Bursty];
+
+    const fn scenario_id(self) -> &'static str {
+        match self {
+            Self::Steady => "exec-capture-pressure",
+            Self::Fragmented => "exec-capture-fragmented",
+            Self::Bursty => "exec-capture-bursty",
+        }
+    }
+
+    const fn argument(self) -> &'static str {
+        match self {
+            Self::Steady => "steady",
+            Self::Fragmented => "fragmented",
+            Self::Bursty => "bursty",
+        }
+    }
+
+    const fn chunks(self) -> &'static [usize] {
+        match self {
+            Self::Steady => STEADY_CHUNKS,
+            Self::Fragmented => FRAGMENTED_CHUNKS,
+            Self::Bursty => BURSTY_CHUNKS,
+        }
+    }
+
+    const fn flush_policy(self) -> &'static str {
+        match self {
+            Self::Steady => "end",
+            Self::Fragmented => "chunk",
+            Self::Bursty => "burst",
+        }
+    }
+
+    const fn burst_bytes(self) -> usize {
+        match self {
+            Self::Bursty => BURST_BYTES,
+            Self::Steady | Self::Fragmented => 0,
+        }
+    }
+
+    const fn pause_micros(self) -> u64 {
+        match self {
+            Self::Bursty => BURST_PAUSE_MICROS,
+            Self::Steady | Self::Fragmented => 0,
+        }
+    }
+
+    const fn seed_offset(self) -> usize {
+        match self {
+            Self::Steady => 0,
+            Self::Fragmented => 29,
+            Self::Bursty => 47,
+        }
+    }
+
+    const fn report(self) -> CaptureProfileReport {
+        CaptureProfileReport {
+            scenario_id: self.scenario_id(),
+            profile: self.argument(),
+            producer_chunk_cycle_bytes: self.chunks(),
+            flush_policy: self.flush_policy(),
+            burst_bytes: self.burst_bytes(),
+            pause_micros: self.pause_micros(),
+            seed_offset: self.seed_offset(),
+        }
+    }
+}
+
+fn capture_profile_descriptor() -> String {
+    CaptureProfile::ALL
+        .into_iter()
+        .map(|profile| {
+            let chunks = profile
+                .chunks()
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{};chunks={chunks};flush={};burst={};pause_us={};seed={}\n",
+                profile.argument(),
+                profile.flush_policy(),
+                profile.burst_bytes(),
+                profile.pause_micros(),
+                profile.seed_offset()
+            )
+        })
+        .collect()
 }
 
 impl RuntimeConfig {
@@ -406,7 +664,7 @@ async fn runtime_report_with_config(
     let workspace_text = fixture.directory.path().to_string_lossy().into_owned();
     let process_fixture = prepare_process_fixture()?;
     let cold_fixture = cold::prepare_fixture(ash_binary, &process_fixture)?;
-    let mut scenarios = Vec::with_capacity(Scenario::ALL.len() + 14);
+    let mut scenarios = Vec::with_capacity(Scenario::ALL.len() + 16);
     for scenario in Scenario::ALL {
         scenarios.push(
             measure_scenario(
@@ -424,7 +682,9 @@ async fn runtime_report_with_config(
     scenarios
         .push(cold::measure_cold_startup_scenario(&cold_fixture, &workspace_text, &config).await?);
     scenarios.push(measure_process_spawn_scenario(&process_fixture, &config).await?);
-    scenarios.push(measure_process_capture_scenario(&process_fixture, &config).await?);
+    for profile in CaptureProfile::ALL {
+        scenarios.push(measure_process_capture_scenario(&process_fixture, &config, profile).await?);
+    }
     scenarios.push(measure_process_cancel_scenario(&process_fixture, &config).await?);
     scenarios.push(dispatch::measure_rpc_dispatch_scenario(&workspace_text, &config).await?);
     scenarios.push(
@@ -439,13 +699,20 @@ async fn runtime_report_with_config(
         scenarios.push(primitives::measure_dag_scenario(nodes, id, &config).await?);
     }
     Ok(RuntimeReport {
-        schema: 12,
+        schema: 13,
         host: HostReport {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
             available_cpus: available_cpus(),
         },
         fixture: fixture.report,
+        process_capture: ProcessCaptureReport {
+            streams: 2,
+            stream_bytes: config.process_stream_bytes,
+            fetched_tail_bytes: config.process_fetch_bytes,
+            profile_descriptor_sha256: sha256_hex(capture_profile_descriptor().as_bytes()),
+            profiles: CaptureProfile::ALL.map(CaptureProfile::report),
+        },
         samples: config.samples,
         scenarios,
     })
@@ -692,20 +959,32 @@ async fn execute_store_once(
 async fn measure_process_capture_scenario(
     fixture: &ProcessFixture,
     config: &RuntimeConfig,
+    profile: CaptureProfile,
 ) -> Result<ScenarioReport, Box<dyn Error>> {
-    let request = process_request(
-        2,
-        fixture,
-        vec!["emit".to_owned(), config.process_stream_bytes.to_string()],
-    )?;
+    let workload = ProcessCaptureWorkload {
+        request: process_request(
+            2,
+            fixture,
+            vec![
+                "emit".to_owned(),
+                config.process_stream_bytes.to_string(),
+                profile.argument().to_owned(),
+            ],
+        )?,
+        stream_bytes: config.process_stream_bytes,
+        fetch_bytes: config.process_fetch_bytes,
+        profile,
+    };
     let work_bytes = u64::try_from(config.process_stream_bytes)?
         .checked_mul(2)
         .ok_or_else(|| io::Error::other("process capture workload is too large"))?;
     let input_sha256 = process_input_sha256(
         fixture,
         &format!(
-            "mode=emit\nstream_bytes={}\nfetch_bytes={}\n",
-            config.process_stream_bytes, config.process_fetch_bytes
+            "mode=emit\nprofile={}\nstream_bytes={}\nfetch_bytes={}\n",
+            profile.argument(),
+            config.process_stream_bytes,
+            config.process_fetch_bytes
         ),
     );
     let mut runs = Vec::with_capacity(config.worker_counts.len());
@@ -715,31 +994,16 @@ async fn measure_process_capture_scenario(
     for &workers in &config.worker_counts {
         let parallelism = Parallelism::for_available_cpus(workers);
         let engine = Engine::new(parallelism)?;
-        let (warm_output, _) = execute_process_capture_once(
-            &engine,
-            fixture,
-            parallelism,
-            &request,
-            20_000,
-            config.process_stream_bytes,
-            config.process_fetch_bytes,
-        )
-        .await?;
+        let (warm_output, _) =
+            execute_process_capture_once(&engine, fixture, parallelism, &workload, 20_000).await?;
         require_stable_output(&mut expected_output, &warm_output)?;
 
         let mut observations = Vec::with_capacity(config.samples);
         for sample in 0..config.samples {
             let session_id = u64::try_from(sample)?.saturating_add(20_001);
-            let (output, elapsed) = execute_process_capture_once(
-                &engine,
-                fixture,
-                parallelism,
-                &request,
-                session_id,
-                config.process_stream_bytes,
-                config.process_fetch_bytes,
-            )
-            .await?;
+            let (output, elapsed) =
+                execute_process_capture_once(&engine, fixture, parallelism, &workload, session_id)
+                    .await?;
             require_stable_output(&mut expected_output, &output)?;
             observations.push(elapsed);
         }
@@ -758,7 +1022,7 @@ async fn measure_process_capture_scenario(
 
     let output = expected_output.ok_or_else(|| io::Error::other("missing capture output"))?;
     Ok(ScenarioReport {
-        id: "exec-capture-pressure",
+        id: profile.scenario_id(),
         work_items: 2,
         work_bytes,
         input_sha256,
@@ -772,12 +1036,10 @@ async fn execute_process_capture_once(
     engine: &Engine,
     fixture: &ProcessFixture,
     parallelism: Parallelism,
-    request: &Request,
+    workload: &ProcessCaptureWorkload,
     session_id: u64,
-    stream_bytes: usize,
-    fetch_bytes: usize,
 ) -> Result<(Vec<u8>, u128), Box<dyn Error>> {
-    let retained_bytes = u64::try_from(stream_bytes)?
+    let retained_bytes = u64::try_from(workload.stream_bytes)?
         .checked_mul(2)
         .ok_or_else(|| io::Error::other("process capture is too large"))?;
     let mut session_config = SessionConfig::new(
@@ -792,8 +1054,11 @@ async fn execute_process_capture_once(
     };
     let session = engine.open_session(session_config)?;
     let started = Instant::now();
-    let program = session.begin(request).await?;
-    let response = fixture.operations.execute(request, &program).await?;
+    let program = session.begin(&workload.request).await?;
+    let response = fixture
+        .operations
+        .execute(&workload.request, &program)
+        .await?;
     let _canonical = response.encode()?.encode();
     let elapsed = started.elapsed().as_nanos().max(1);
     if response.status() != Status::Success
@@ -819,14 +1084,15 @@ async fn execute_process_capture_once(
         return Err(io::Error::other("process streams unexpectedly deduplicated").into());
     }
     let store = program.store().clone();
-    let mut output = Vec::with_capacity(fetch_bytes.saturating_mul(2));
+    let mut output = Vec::with_capacity(workload.fetch_bytes.saturating_mul(2));
     for reference in [stdout_reference, stderr_reference] {
         let lease = store.get(reference)?;
-        if lease.len() != u64::try_from(stream_bytes)? || lease.residency() != StoreResidency::Disk
+        if lease.len() != u64::try_from(workload.stream_bytes)?
+            || lease.residency() != StoreResidency::Disk
         {
             return Err(io::Error::other("process stream did not remain disk-backed").into());
         }
-        let fetch_bytes = u64::try_from(fetch_bytes)?;
+        let fetch_bytes = u64::try_from(workload.fetch_bytes)?;
         output.extend_from_slice(
             &lease
                 .read_range(
@@ -839,8 +1105,14 @@ async fn execute_process_capture_once(
         drop(lease);
         store.release(reference)?;
     }
-    let mut expected = process_stream_tail(stream_bytes, fetch_bytes, 0);
-    expected.extend_from_slice(&process_stream_tail(stream_bytes, fetch_bytes, 13));
+    let seed_offset = workload.profile.seed_offset();
+    let mut expected =
+        process_stream_tail(workload.stream_bytes, workload.fetch_bytes, seed_offset);
+    expected.extend_from_slice(&process_stream_tail(
+        workload.stream_bytes,
+        workload.fetch_bytes,
+        13 + seed_offset,
+    ));
     if output != expected {
         return Err(io::Error::other("retained process stream bytes changed").into());
     }
@@ -1214,6 +1486,16 @@ fn prepare_process_fixture() -> Result<ProcessFixture, Box<dyn Error>> {
 
         fs::set_permissions(&executable_path, fs::Permissions::from_mode(0o700))?;
     }
+    let described = Command::new(&executable_path).arg("describe").output()?;
+    if !described.status.success()
+        || !described.stderr.is_empty()
+        || described.stdout != capture_profile_descriptor().as_bytes()
+    {
+        return Err(io::Error::other(
+            "runtime process helper capture profiles differ from report metadata",
+        )
+        .into());
+    }
     let workspace = Workspace::new(directory.path())?;
     Ok(ProcessFixture {
         workspace: directory.path().to_string_lossy().into_owned(),
@@ -1311,11 +1593,39 @@ mod tests {
         .await
         .expect("runtime report");
 
-        assert_eq!(report.schema, 12);
+        assert_eq!(report.schema, 13);
         assert_eq!(report.fixture.files, 8);
         assert_eq!(report.fixture.bytes, 8 * 4 * 1024);
+        assert_eq!(report.process_capture.streams, 2);
+        assert_eq!(report.process_capture.stream_bytes, 5 * 1024 * 1024);
+        assert_eq!(report.process_capture.fetched_tail_bytes, 4 * 1024);
+        assert_eq!(report.process_capture.profile_descriptor_sha256.len(), 64);
+        assert_eq!(
+            report
+                .process_capture
+                .profiles
+                .iter()
+                .map(|profile| profile.scenario_id)
+                .collect::<Vec<_>>(),
+            vec![
+                "exec-capture-pressure",
+                "exec-capture-fragmented",
+                "exec-capture-bursty"
+            ]
+        );
+        assert_eq!(
+            report.process_capture.profiles[0].producer_chunk_cycle_bytes,
+            &[16 * 1024]
+        );
+        assert_eq!(
+            report.process_capture.profiles[1].producer_chunk_cycle_bytes,
+            &[1, 7, 31, 257, 4_093, 16_384, 65_521]
+        );
+        assert_eq!(report.process_capture.profiles[1].flush_policy, "chunk");
+        assert_eq!(report.process_capture.profiles[2].burst_bytes, 256 * 1024);
+        assert_eq!(report.process_capture.profiles[2].pause_micros, 2_000);
         assert_eq!(report.samples, 2);
-        assert_eq!(report.scenarios.len(), 18);
+        assert_eq!(report.scenarios.len(), 20);
         for scenario in &report.scenarios {
             assert!(scenario.output_bytes > 0);
             for run in &scenario.runs {
@@ -1330,7 +1640,7 @@ mod tests {
             .iter()
             .filter(|scenario| scenario.runs[0].speedup_basis_points.is_some())
             .collect::<Vec<_>>();
-        assert_eq!(scaled.len(), 13);
+        assert_eq!(scaled.len(), 15);
         for scenario in scaled {
             assert_eq!(scenario.runs.len(), 2);
             assert_eq!(scenario.runs[0].compute_workers, 1);
@@ -1397,47 +1707,63 @@ mod tests {
         assert_eq!(spawn.work_items, 1);
         assert_eq!(spawn.work_bytes, 0);
 
-        let capture = &report.scenarios[7];
-        assert_eq!(capture.id, "exec-capture-pressure");
-        assert_eq!(capture.work_items, 2);
-        assert_eq!(capture.work_bytes, 2 * 5 * 1024 * 1024);
-        assert_eq!(capture.output_bytes, 2 * 4 * 1024);
+        let captures = &report.scenarios[7..10];
+        assert_eq!(
+            captures
+                .iter()
+                .map(|scenario| scenario.id)
+                .collect::<Vec<_>>(),
+            vec![
+                "exec-capture-pressure",
+                "exec-capture-fragmented",
+                "exec-capture-bursty"
+            ]
+        );
+        for capture in captures {
+            assert_eq!(capture.work_items, 2);
+            assert_eq!(capture.work_bytes, 2 * 5 * 1024 * 1024);
+            assert_eq!(capture.output_bytes, 2 * 4 * 1024);
+        }
+        assert_ne!(captures[0].input_sha256, captures[1].input_sha256);
+        assert_ne!(captures[1].input_sha256, captures[2].input_sha256);
+        assert_ne!(captures[0].output_sha256, captures[1].output_sha256);
+        assert_ne!(captures[1].output_sha256, captures[2].output_sha256);
 
-        let cancellation = &report.scenarios[8];
+        let cancellation = &report.scenarios[10];
         assert_eq!(cancellation.id, "exec-cancel-tree-empty");
         assert_eq!(cancellation.work_items, 1);
         assert_eq!(cancellation.work_bytes, 0);
 
-        let dispatch = &report.scenarios[9];
+        let dispatch = &report.scenarios[11];
         assert_eq!(dispatch.id, "rpc-warm-dispatch");
         assert_eq!(dispatch.work_items, 1);
         assert!(dispatch.work_bytes > 0);
 
-        let reducer = &report.scenarios[10];
+        let reducer = &report.scenarios[12];
         assert_eq!(reducer.id, "ref-project-structured");
         assert_eq!(reducer.work_items, 8 * 64);
         assert!(reducer.work_bytes > 0);
         assert_eq!(reducer.runs.len(), 2);
 
-        let repeated = &report.scenarios[11];
+        let repeated = &report.scenarios[13];
         assert_eq!(repeated.id, "reduce-repeated-lines");
         assert_eq!(repeated.work_items, 8 * 512);
         assert!(repeated.work_bytes > repeated.output_bytes as u64);
         assert_eq!(repeated.runs.len(), 2);
 
-        let repeated_blocks = &report.scenarios[12];
+        let repeated_blocks = &report.scenarios[14];
         assert_eq!(repeated_blocks.id, "reduce-repeated-blocks");
         assert_eq!(repeated_blocks.work_items, 8 * 512);
         assert!(repeated_blocks.work_bytes > repeated_blocks.output_bytes as u64);
         assert_eq!(repeated_blocks.runs.len(), 2);
 
-        let error_focus = &report.scenarios[13];
+        let error_focus = &report.scenarios[15];
         assert_eq!(error_focus.id, "reduce-error-focused");
         assert_eq!(error_focus.work_items, 8 * 512);
         assert!(error_focus.work_bytes > error_focus.output_bytes as u64);
         assert_eq!(error_focus.runs.len(), 2);
 
-        let primitives = &report.scenarios[14..];
+        let primitives = &report.scenarios[16..];
         assert_eq!(
             primitives
                 .iter()
