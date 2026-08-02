@@ -21,6 +21,7 @@ use tempfile::TempDir;
 
 mod cold;
 mod dispatch;
+mod primitives;
 
 const DEFAULT_FILES: usize = 256;
 const DEFAULT_BYTES_PER_FILE: usize = 32 * 1024;
@@ -404,7 +405,7 @@ async fn runtime_report_with_config(
     let workspace_text = fixture.directory.path().to_string_lossy().into_owned();
     let process_fixture = prepare_process_fixture()?;
     let cold_fixture = cold::prepare_fixture(ash_binary, &process_fixture)?;
-    let mut scenarios = Vec::with_capacity(Scenario::ALL.len() + 6);
+    let mut scenarios = Vec::with_capacity(Scenario::ALL.len() + 10);
     for scenario in Scenario::ALL {
         scenarios.push(
             measure_scenario(
@@ -425,8 +426,12 @@ async fn runtime_report_with_config(
     scenarios.push(measure_process_capture_scenario(&process_fixture, &config).await?);
     scenarios.push(measure_process_cancel_scenario(&process_fixture, &config).await?);
     scenarios.push(dispatch::measure_rpc_dispatch_scenario(&workspace_text, &config).await?);
+    scenarios.push(primitives::measure_path_dictionary_scenario(&config)?);
+    for (nodes, id) in primitives::DAG_SCENARIOS {
+        scenarios.push(primitives::measure_dag_scenario(nodes, id, &config).await?);
+    }
     Ok(RuntimeReport {
-        schema: 7,
+        schema: 8,
         host: HostReport {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
@@ -1298,11 +1303,11 @@ mod tests {
         .await
         .expect("runtime report");
 
-        assert_eq!(report.schema, 7);
+        assert_eq!(report.schema, 8);
         assert_eq!(report.fixture.files, 8);
         assert_eq!(report.fixture.bytes, 8 * 4 * 1024);
         assert_eq!(report.samples, 2);
-        assert_eq!(report.scenarios.len(), 10);
+        assert_eq!(report.scenarios.len(), 14);
         for scenario in &report.scenarios {
             assert!(scenario.output_bytes > 0);
             for run in &scenario.runs {
@@ -1312,11 +1317,13 @@ mod tests {
                 assert_eq!(run.output_sha256, scenario.output_sha256);
             }
         }
-        for scenario in report
+        let scaled = report
             .scenarios
             .iter()
-            .filter(|scenario| scenario.id != "cli-cold-startup")
-        {
+            .filter(|scenario| scenario.runs[0].speedup_basis_points.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(scaled.len(), 9);
+        for scenario in scaled {
             assert_eq!(scenario.runs.len(), 2);
             assert_eq!(scenario.runs[0].compute_workers, 1);
             assert_eq!(scenario.runs[0].io_workers, 1);
@@ -1397,5 +1404,34 @@ mod tests {
         assert_eq!(dispatch.id, "rpc-warm-dispatch");
         assert_eq!(dispatch.work_items, 1);
         assert!(dispatch.work_bytes > 0);
+
+        let primitives = &report.scenarios[10..];
+        assert_eq!(
+            primitives
+                .iter()
+                .map(|scenario| scenario.id)
+                .collect::<Vec<_>>(),
+            vec![
+                "path-dictionary-hot",
+                "dag-schedule-64",
+                "dag-schedule-256",
+                "dag-schedule-1024"
+            ]
+        );
+        for scenario in primitives {
+            assert_eq!(scenario.runs.len(), 1);
+            assert_eq!(scenario.runs[0].compute_workers, 1);
+            assert_eq!(scenario.runs[0].io_workers, 1);
+            assert_eq!(scenario.runs[0].speedup_basis_points, None);
+            assert_eq!(scenario.runs[0].parallel_efficiency_basis_points, None);
+            assert!(scenario.work_bytes > 0);
+        }
+        let dictionary = &primitives[0];
+        assert_eq!(dictionary.work_items, 4_096);
+        assert_eq!(dictionary.output_bytes, 4_096 * 8);
+        for (scenario, nodes) in primitives[1..].iter().zip([64, 256, 1_024]) {
+            assert_eq!(scenario.work_items, nodes);
+            assert_eq!(scenario.output_bytes, nodes * 8);
+        }
     }
 }
