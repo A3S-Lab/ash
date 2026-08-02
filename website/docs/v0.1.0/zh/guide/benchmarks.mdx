@@ -31,12 +31,25 @@ schema 6 测量八条真实路径：字面量搜索、BLAKE3 快照、磁盘 spi
 分发复用一条生产 RPC 会话，只排除握手。任何规范输出变化都会让报告失败。冷启动没有扩展
 曲线，因此加速比和并行效率为 `null`。时序仅代表当前主机。
 
+## 原生 Shell 任务种子
+
+```bash
+cargo run -p a3s-ash-bench --locked -- \
+  --check-task-lock benches/tasks/v1/lock.json
+cargo run -p a3s-ash-bench --locked -- --tasks
+```
+
+首批任务覆盖源码发现、诊断聚合和一次精确配置修改。锁文件绑定完整清单、每个初始工作区和
+期望最终工作区。Runner 校验输出与最终状态，再用两种 tokenizer 统计目标、命令、stdout
+和 stderr。它只执行当前平台的原生 Shell，不运行模型，也不声称这是 ash 任务成绩。
+
 ## 当前自动化
 
 - 覆盖所有 workspace crate 的 Rust 单元与集成测试。
 - Linux、macOS、Windows 的 `cargo check` 与测试。
 - 三平台安装器的真实发行构建 Smoke。
 - 八条真实运行时路径，校验输出完全一致并执行有界的进程与服务清理。
+- 三个锁定任务及 Linux、macOS、Windows 原生 Shell 基线。
 - ASON、受限 ASH/1 帧、类型化请求与更新元数据 fuzz target。
 - 文件事务 crash cutpoint、更新激活/恢复和取消竞态测试。
 - 锁定的第三方许可证清单。

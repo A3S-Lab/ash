@@ -41,12 +41,27 @@ session alive and excludes only its handshake. A changed canonical result fails
 the report. Cold startup has no scaling curve, so its speedup and parallel
 efficiency are `null`. Timing remains host-local.
 
+## Native-shell task seed
+
+```bash
+cargo run -p a3s-ash-bench --locked -- \
+  --check-task-lock benches/tasks/v1/lock.json
+cargo run -p a3s-ash-bench --locked -- --tasks
+```
+
+The seed covers source discovery, diagnostic aggregation, and one exact config
+mutation. Its lock binds the manifest plus every initial and expected final
+workspace tree. The runner checks output and final state, then counts objective,
+command, stdout, and stderr with both tokenizers. It runs the current platform's
+native shell; it does not run a model or claim an ash task result.
+
 ## Current automation
 
 - Rust unit and integration suites across every workspace crate.
 - `cargo check` and tests on Linux, macOS, and Windows.
 - Real release builds exercised by all three platform installers.
 - Eight real runtime paths, including fresh CLI startup, warm RPC dispatch, direct child spawn, dual-pipe disk capture, and cancellation to tree empty.
+- Three locked tasks with Linux, macOS, and Windows native-shell baselines.
 - Fuzz targets for ASON, bounded ASH/1 frames, typed requests, and update metadata.
 - File-transaction crash cutpoints, update activation/recovery, and cancellation race tests.
 - A locked third-party license inventory.

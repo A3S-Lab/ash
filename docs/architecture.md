@@ -4,7 +4,7 @@ Status: architecture baseline plus implementation checkpoint
 
 This document defines the intended architecture of `ash` and is normative for component ownership and runtime boundaries. Statements explicitly labeled as the current source checkpoint describe implemented behavior; the remaining contracts are design targets rather than release claims.
 
-The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution with quota-bound disk-backed lossless retained output and conservative crash-orphan cleanup, bounded read/list/search, durable compare-and-swap patching and file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, an eight-path host-local runtime harness, scheduled ASON/frame/update-metadata fuzz targets, deterministic six-target packaging, and a fail-closed native release workflow. Release-key and platform-signing credential provisioning, the first published release, sustained fuzz evidence, agent-task benchmarks, and published hardware-labelled runtime measurements remain open.
+The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution with quota-bound disk-backed lossless retained output and conservative crash-orphan cleanup, bounded read/list/search, durable compare-and-swap patching and file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, a locked three-task cross-platform native-shell baseline seed, an eight-path host-local runtime harness, scheduled ASON/frame/update-metadata fuzz targets, deterministic six-target packaging, and a fail-closed native release workflow. Release-key and platform-signing credential provisioning, the first published release, sustained fuzz evidence, real Coding Agent task runs, broader task families, and published hardware-labelled runtime measurements remain open.
 
 The runtime evidence covers search, snapshot, disk spill/fetch, fresh `ash run` startup, empty child spawn, simultaneous disk-backed stdout/stderr pressure, repeated cancellation of a parent plus pipe-inheriting descendant, and warm framed RPC dispatch. Cold startup launches and reaps a real shell process for every observation. Warm dispatch uses the same embeddable gateway as `ash rpc`, excludes its handshake, and keeps one session alive per worker configuration. Cancellation is recorded only after the owned native process group or Job Object has emptied and the final response is canonicalized; it is not merely a signal-delivery timer.
 
@@ -500,9 +500,13 @@ ash/
 |   |-- ash-1.md
 |   `-- fixtures/
 |-- benches/
-|   |-- tasks/
-|   |-- baselines/
-|   `-- tokenizers/
+|   |-- corpus/
+|   |-- runner/
+|   |-- reports/
+|   `-- tasks/v1/
+|       |-- manifest.json
+|       |-- lock.json
+|       `-- workspaces/
 |-- fuzz/
 |-- tests/
 |   `-- platform-contract/
@@ -573,7 +577,7 @@ The benchmark contract in [benchmarks.md](./benchmarks.md) measures correctness,
 
 - define the current ASH/1 core types and ASON canonical rules; freeze them only with the first supported release;
 - build protocol fixtures and parser fuzz targets;
-- define the multi-platform task corpus and baseline recorder;
+- maintain the implemented locked cross-platform task seed and native-shell baseline recorder, then expand it to the complete task-family matrix;
 - establish release artifact names and installer contracts.
 
 ### M1: smallest end-to-end shell

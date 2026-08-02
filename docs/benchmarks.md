@@ -1,6 +1,6 @@
 # Token-efficiency benchmark contract
 
-Status: deterministic format corpus, two-tokenizer representation evidence, retained-formula regression gate, and an eight-scenario host-local runtime harness covering search, snapshot, disk spill/fetch, fresh CLI startup, empty child spawn, dual-stream process capture, process-tree cancellation, and warm framed RPC dispatch; agent-task and published hardware reports remain open
+Status: deterministic format corpus, two-tokenizer representation evidence, retained-formula regression gate, a three-task cross-platform native-shell baseline seed, and an eight-scenario host-local runtime harness; Coding Agent results and published hardware reports remain open
 
 Token reduction is the primary performance objective of `ash`. This document defines how it is measured without trading away task correctness or hiding protocol overhead.
 
@@ -27,6 +27,18 @@ cargo run -p a3s-ash-bench --release --locked -- --runtime ./path/to/ash
 ```
 
 The schema-6 report includes every observation, p50/p95/p99 nanoseconds, item and byte throughput, selected compute and I/O workers, host OS/architecture/available CPU count, per-scenario input digest, and output digest. Matrix scenarios also report speedup and parallel efficiency in basis points. Fresh CLI startup uses the host-detected runtime once rather than pretending it belongs to the configurable scaling matrix, so both scaling fields are `null`. Stable evidence bytes are compared across warm-up, samples, and applicable worker counts; a difference fails before timing is printed. Host timings are not checked in or gated because shared-runner performance is not portable.
+
+The versioned task seed is independently locked and executable on all three operating systems:
+
+```sh
+cargo run -p a3s-ash-bench --locked -- \
+  --check-task-lock benches/tasks/v1/lock.json
+cargo run -p a3s-ash-bench --locked -- --tasks
+```
+
+`manifest.json` contains three tasks: source-marker discovery, compiler-diagnostic aggregation, and an exact worker-limit mutation. It names objectives, allowed `ash` capabilities, output policy, hard limits, declarative expected output/files, and a native command for Linux, macOS, and Windows. The generated lock binds the complete manifest, each initial tree, and each expected final tree. The runner copies a fixture into a temporary workspace, executes only the current platform baseline, enforces a deadline and output ceiling, normalizes CRLF only for semantic comparison, verifies declared files and the complete final tree, and performs bounded child cleanup. Its total token count is the sum of separately tokenized objective, native command, stdout, and stderr messages. Raw platform output remains separately measured and hashed.
+
+This seed establishes native-shell denominators and fixture correctness. It does not execute a model, choose `ash` operations for an agent, or establish any Agent-task token reduction claim. Host-local elapsed time is printed by `--tasks` but not committed.
 
 ## 1. Optimization target
 
@@ -73,7 +85,7 @@ No baseline may receive less task context, a different repository state, or a mo
 
 ## 4. Corpus
 
-The initial corpus contains small, medium, and large fixtures in these families:
+The implemented v1 seed covers one small workspace-discovery task, one tests-and-diagnostics task, and one coding-mutation task. The target corpus expands those seeds to small, medium, and large fixtures in these families:
 
 ### 4.1 Workspace discovery
 
@@ -134,20 +146,21 @@ The initial corpus contains small, medium, and large fixtures in these families:
 
 ## 5. Task fixture
 
-Every task is versioned and contains:
+The implemented seed manifest contains:
 
 ```text
 task id
-platform constraints
-initial workspace archive and digest
+task family
+initial workspace fixture and locked digest
 agent objective
 allowed capabilities
 time and resource limits
-expected final-state verifier
-native-shell baseline definition
-ash program opportunities
+expected stdout, stderr, and exact file content
+Linux, macOS, and Windows native-shell baseline definitions
 output-retention policy
 ```
+
+Its lock adds the manifest digest and the expected complete final-tree digest. Later Agent-task reports must additionally pin model/prompt configuration, the selected `ash` request trace, retries, verifier version, and raw normalized evidence. A compressed workspace archive becomes necessary when fixtures are published outside this source tree; it is not simulated for the current small checked-in directories.
 
 Fixtures must not depend on an external network, current package registry state, wall-clock date, or unpinned tool version unless the task explicitly measures those conditions.
 
@@ -277,16 +290,15 @@ A gate is promoted from target to requirement only after the benchmark runner pr
 benches/
 |-- corpus/v1.json
 |-- runner/
+|-- tasks/v1/
+|   |-- manifest.json
+|   |-- lock.json
+|   `-- workspaces/
 |-- reports/v0.1.0/
 |   |-- format.json
 |   `-- README.md
-|-- tasks/<task-id>/
-|   |-- task.json
-|   |-- workspace.tar.zst
-|   |-- verify/
-|   `-- baselines/
 |-- tokenizers/<profile>/
 `-- schemas/
 ```
 
-Future task and runtime reports add `summary.json`, `runs.jsonl`, and `environment.json` beside their versioned report README. Published summaries link to raw versioned evidence. README marketing copy may quote a benchmark only after the corresponding report is available and reproducible.
+Future model-task and published runtime reports add `summary.json`, `runs.jsonl`, and `environment.json` beside their versioned report README. Larger task versions may package immutable workspace archives and standalone verifiers under their version directory. Published summaries link to raw versioned evidence. README marketing copy may quote a benchmark only after the corresponding report is available and reproducible.

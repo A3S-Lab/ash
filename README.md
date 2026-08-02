@@ -117,6 +117,9 @@ cd ash
 cargo test --workspace --all-targets
 cargo run -p a3s-ash-bench --release --locked -- \
   --check benches/reports/v0.1.0/format.json
+cargo run -p a3s-ash-bench --release --locked -- \
+  --check-task-lock benches/tasks/v1/lock.json
+cargo run -p a3s-ash-bench --release --locked -- --tasks
 cargo build -p a3s-ash --release --locked
 cargo run -p a3s-ash-bench --release --locked -- --runtime
 npm --prefix website ci
@@ -134,6 +137,8 @@ The pinned Rust workspace currently verifies typed ASH/1 schemas, canonical fram
 The runtime harness also forces an 8 MiB retained capture across the 4 MiB memory ceiling, commits its disk-backed identity on Rayon, fetches only the final 64 KiB, and verifies identical bytes across the worker matrix. Store tests prove that normal release removes spools and that crash-orphan recovery skips live, recent, malformed, or foreign roots.
 
 Fresh-start measurements launch the same-profile `ash run` binary for every observation and include spawn, request I/O, exit, and pipe drain. Warm dispatch keeps one production RPC service alive per worker configuration, excludes its handshake, and times a complete framed request/response round trip. Direct child overhead launches a silent executable through the normal governor and process owner. The process-pressure paths still require the Unix process group or Windows Job Object to empty, both pipes to reach EOF, and the request to unregister before evidence is accepted. Cold startup has no scaling comparison, so its speedup and parallel-efficiency fields are `null` rather than invented values.
+
+The versioned task seed adds three cross-platform contracts: fault-marker discovery, diagnostic aggregation, and an exact configuration mutation. Its generated lock binds the manifest plus initial and expected final workspace trees. `--tasks` executes the current platform's native-shell procedure in an isolated copy, verifies output and final state, and counts objective, command, stdout, and stderr under both pinned tokenizers. This is native-shell baseline infrastructure, not a Coding Agent or `ash` task score.
 
 ## Release contract
 
@@ -166,7 +171,7 @@ It is a local execution boundary for coding agents. Workspace capabilities, reso
 4. Provision protected release credentials and execute the implemented six-target signing, notarization, attestation, clean-host upgrade/rollback, and installer gates.
 5. Gate release promotion on correctness, token cost, latency, cancellation, installer, upgrade, and benchmark evidence, and keep every proven integration revision pinned in the A3S submodule.
 
-The first checked-in evidence is intentionally format-only: on its deterministic corpus, canonical ASON uses 62% of compact row-object JSON tokens under both pinned tokenizer profiles, while the closer columnar JSON baseline is reported alongside it. The real-operation runtime harness is reproducible locally but deliberately does not check host timing into source. Neither result is an agent-task claim. The report rules, runtime schema, remaining acceptance criteria, and accounting rules are defined in [docs/benchmarks.md](./docs/benchmarks.md).
+The checked-in numeric report remains intentionally format-only: on its deterministic corpus, canonical ASON uses 62% of compact row-object JSON tokens under both pinned tokenizer profiles, while the closer columnar JSON baseline is reported alongside it. The task lock records fixture identity, not timing or model results. Runtime and native-shell reports are reproducible locally but deliberately not checked in as cross-host evidence. None of these results is an Agent-task claim. The report rules, schemas, remaining acceptance criteria, and accounting rules are defined in [docs/benchmarks.md](./docs/benchmarks.md).
 
 ## Contributing and support
 
