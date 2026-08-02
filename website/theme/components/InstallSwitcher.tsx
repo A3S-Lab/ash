@@ -65,22 +65,20 @@ const labels = {
     aria: '选择 ash 安装目标',
     copy: '复制',
     copied: '已复制',
-    release: '签名发行安装器',
+    release: 'Release 安装器',
     source: '源码构建',
-    releaseNotice:
-      '安装器已经过三平台测试；首个签名二进制尚未发布，在此之前会安全失败。',
-    sourceNotice: '从当前 main 构建，适合开发验证；它不是受支持的签名发行版。',
+    releaseNotice: '签名二进制尚未发布；安装器会在下载前退出。',
+    sourceNotice: '从指定提交构建，适合开发和验证。',
   },
   en: {
     aria: 'Choose an ash installation target',
     copy: 'Copy',
     copied: 'Copied',
-    release: 'SIGNED RELEASE INSTALLER',
+    release: 'RELEASE INSTALLER',
     source: 'SOURCE BUILD',
     releaseNotice:
-      'The installer passes all three platform suites. It fails closed until the first signed binary is published.',
-    sourceNotice:
-      'Builds the current main branch for development validation; this is not a supported signed release.',
+      'Signed binaries are not published yet; the installer exits before download.',
+    sourceNotice: 'Builds the selected commit for development and validation.',
   },
 } satisfies Record<Locale, Record<string, string>>;
 

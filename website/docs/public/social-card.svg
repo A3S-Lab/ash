@@ -1,32 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="ash — AI Native Shell">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#080b10"/>
-      <stop offset="1" stop-color="#111827"/>
-    </linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
-      <stop stop-color="#65e6c4"/>
-      <stop offset=".58" stop-color="#91a6ff"/>
-      <stop offset="1" stop-color="#f3bd67"/>
-    </linearGradient>
-    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
-      <path d="M48 0H0v48" fill="none" stroke="#ffffff" stroke-opacity=".035"/>
-    </pattern>
-  </defs>
-  <rect width="1200" height="630" fill="url(#bg)"/>
-  <rect width="1200" height="630" fill="url(#grid)"/>
-  <rect x="72" y="72" width="1056" height="486" rx="24" fill="#0b1017" stroke="#283344"/>
-  <rect x="112" y="112" width="88" height="88" rx="20" fill="#111a25" stroke="#34465a"/>
-  <path d="M134 137 151 154 134 171" fill="none" stroke="#65e6c4" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M160 172h19" fill="none" stroke="#9faeff" stroke-width="8" stroke-linecap="round"/>
-  <text x="232" y="178" fill="#f4f7fb" font-family="Inter,Segoe UI,sans-serif" font-size="78" font-weight="700">ash</text>
-  <text x="112" y="306" fill="url(#accent)" font-family="Inter,Segoe UI,sans-serif" font-size="72" font-weight="700">AI Native Shell</text>
-  <text x="112" y="380" fill="#9aa7b7" font-family="Inter,Segoe UI,sans-serif" font-size="31">Typed parallel execution · compact ASON evidence</text>
-  <g font-family="SFMono-Regular,Cascadia Code,monospace" font-size="21">
-    <text x="112" y="477" fill="#65e6c4">TOKIO / IO</text>
-    <text x="327" y="477" fill="#77869b">+</text>
-    <text x="365" y="477" fill="#9faeff">RAYON / CPU</text>
-    <text x="590" y="477" fill="#77869b">→</text>
-    <text x="630" y="477" fill="#f3bd67">CANONICAL ASON</text>
+  <rect width="1200" height="630" fill="#000"/>
+  <path d="M0 84h1200M0 546h1200M84 0v630M1116 0v630" stroke="#202422"/>
+  <path d="M84 315h1032" stroke="#171a18" stroke-dasharray="3 8"/>
+  <g transform="translate(98 96) scale(2.25)" fill="none">
+    <path d="M25.2 4.8A19.2 19.2 0 1 0 42.1 33.2" stroke="#75c7c3" stroke-width="3.6" stroke-linecap="round"/>
+    <path d="m14.5 16.2 7.8 7.8-7.8 7.8M25.5 32h10" stroke="#f1f4f2" stroke-width="3.3" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M7.4 32.8c6-3.7 10.8-3.2 15.8.2 5.2 3.5 10.3 2.2 17.5-4.8" stroke="#75c7c3" stroke-width="3.6" stroke-linecap="round"/>
   </g>
+  <text x="98" y="305" fill="#f1f4f2" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="96" font-weight="600" letter-spacing="-6">ash</text>
+  <text x="98" y="396" fill="#f1f4f2" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="52" letter-spacing="-2">AI Native Shell</text>
+  <text x="100" y="459" fill="#858b88" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="25">ASH/1 · ASON · RUST</text>
+  <circle cx="1010" cy="456" r="7" fill="#75c7c3"/>
+  <text x="1032" y="465" fill="#75c7c3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="23">OPEN</text>
 </svg>

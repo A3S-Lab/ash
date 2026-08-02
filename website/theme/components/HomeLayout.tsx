@@ -11,16 +11,18 @@ type Localized = {
 
 const copy = {
   zh: {
-    eyebrow: 'OPEN SOURCE · RUST · AGENT FIRST',
-    titleLead: '为 Coding Agent 构建的',
-    titleAccent: 'AI Native Shell',
+    eyebrow: '开源 · RUST · CODING AGENT 优先',
+    titleLead: 'AI Native',
+    titleAccent: 'Shell.',
     subtitle:
-      '用类型化请求替代脚本文本，用有界并行执行替代串行往返，用紧凑 ASON 证据替代冗余终端输出。',
-    start: '开始使用',
-    protocol: '阅读 ASH/1',
+      'ash 接收类型化请求，并发运行 I/O 与 CPU 任务，返回紧凑的 ASON 结果。',
+    start: '阅读文档',
+    architectureAction: '查看架构',
     github: 'GitHub',
-    installLabel: '跨平台安装',
-    status: 'PRE-RELEASE · NO SIGNED BINARY YET',
+    commandLabel: 'ASH/1 请求',
+    command: 'ash rpc < task.ason',
+    installLabel: '安装 ash',
+    status: '预发布 · 暂无签名二进制',
     runtimeLabel: '执行拓扑',
     request: 'ASH/1 REQUEST',
     governor: 'HIERARCHICAL GOVERNOR',
@@ -32,48 +34,63 @@ const copy = {
     metricTokenValue: '62%',
     metricTests: 'Rust 测试',
     metricTestsValue: '135',
-    metricTargets: '原生发布目标',
+    metricTargets: '原生目标',
     metricTargetsValue: '6',
-    whyEyebrow: 'WHY ASH',
-    whyTitle: 'Shell 应该直接服务模型上下文',
+    signalProtocol: 'ASH/1 类型化请求',
+    signalParallel: 'Tokio + Rayon',
+    signalAson: 'ASON 62% / JSON',
+    signalTargets: '6 个原生目标',
+    whyEyebrow: '核心接口',
+    whyTitle: '为程序调用设计',
     whyBody:
-      'ash 不追求人类交互兼容性。协议、调度、输出和错误都围绕 Coding Agent 完成任务时的 Token、延迟、确定性和恢复能力设计。',
-    architectureEyebrow: 'ONE RUNTIME · TWO PLANES',
-    architectureTitle: 'I/O 与 CPU 各自并行，但共享同一个预算',
+      'ASH/1 定义请求、权限、预算、结果和错误。调用方不必拼接命令字符串，也不必解析终端文本。',
+    architectureEyebrow: '运行时',
+    architectureTitle: 'Tokio 与 Rayon，共用一套预算',
     architectureBody:
-      'Tokio 管理进程、管道、RPC、超时与取消；Rayon 使用固定工作窃取池处理搜索、哈希、Diff 和归约。分层 Governor 阻止批图与内部并行相乘。',
-    asonEyebrow: 'LLM-NATIVE EVIDENCE',
-    asonTitle: '先压缩结构，再交给模型',
+      'Tokio 处理进程、管道、RPC、超时与取消；Rayon 处理搜索、哈希、Diff 和归约。Governor 限制全局、会话和请求并发。',
+    asonEyebrow: '输出格式',
+    asonTitle: 'ASON：紧凑、稳定、可取回',
     asonBody:
-      'ASON 是 ash 原生设计并实现的结构化格式。同构记录按列编码，路径进入字典，大值转为可检索引用；稳定归并保证相同输入得到逐字节一致输出。',
-    asonLink: '查看 ASON 设计',
-    safetyEyebrow: 'CAPABILITY BOUNDARY',
-    safetyTitle: '执行权限是请求的一部分',
+      '同构记录按列编码，路径进入字典，大值保留为引用。稳定归并让相同输入得到相同输出。',
+    asonLink: '查看 ASON 格式',
+    safetyEyebrow: '权限',
+    safetyTitle: '高风险操作需要一次性 Permit',
     safetyBody:
-      '会话协商最小能力集。高风险动作需要绑定会话、动作、策略与过期时间的一次性 Permit；文件事务带摘要守卫、日志、回滚和重启恢复。',
-    deliveryEyebrow: 'CROSS-PLATFORM DELIVERY',
-    deliveryTitle: '一个协议，六个原生目标',
+      'Permit 绑定会话、动作、策略和过期时间。文件事务带摘要校验、日志与回滚。',
+    deliveryEyebrow: '平台',
+    deliveryTitle: 'Linux、macOS 与 Windows',
     deliveryBody:
-      'Linux、macOS、Windows 的 x86-64 与 ARM64 使用同一语义契约。发布流水线要求签名、SBOM、来源证明、干净主机安装、更新与回滚门禁。',
-    ctaEyebrow: 'START WITH THE CONTRACT',
-    ctaTitle: '让 Agent 发结构化请求，而不是拼 Shell 字符串',
-    ctaBody:
-      '从安装与 ASH/1 协议开始；当前版本是源码检查点，签名稳定版发布前不会隐藏信任边界。',
-    ctaPrimary: '安装指南',
-    ctaSecondary: 'CLI 参考',
-    footer: 'MIT 开源 · Rust 构建 · Linux / macOS / Windows',
+      'x86-64 与 ARM64 使用同一协议。发布流程校验签名、SBOM、来源证明、安装、更新和回滚。',
+    installEyebrow: '安装 / 本机',
+    installTitle: '选择平台并复制命令',
+    installBody:
+      '当前为预发布版本。Cargo 可从源码安装；Release 安装器会在签名二进制发布前退出。',
+    installDocs: '查看安装说明',
+    checkpoint: 'V0.1.0 · 源码检查点',
+    ctaEyebrow: '文档与源码',
+    ctaTitle: '从协议、CLI 或源码开始。',
+    ctaBody: '接口说明、架构决策和实现都在仓库中。',
+    ctaPrimary: '打开文档',
+    ctaSecondary: '浏览 GitHub',
+    footerDescription: '面向 Coding Agent 的开源 Shell。',
+    footerDocs: '文档',
+    footerProtocol: 'ASH/1 协议',
+    footerSource: '源码',
+    footerLicense: 'MIT 许可 · Rust 构建',
   },
   en: {
-    eyebrow: 'OPEN SOURCE · RUST · AGENT FIRST',
-    titleLead: 'The shell built for',
-    titleAccent: 'Coding Agents',
+    eyebrow: 'OPEN SOURCE · RUST · CODING AGENT FIRST',
+    titleLead: 'AI Native',
+    titleAccent: 'Shell.',
     subtitle:
-      'Replace script text with typed requests, serial round trips with bounded parallel execution, and terminal noise with compact ASON evidence.',
-    start: 'Get started',
-    protocol: 'Read ASH/1',
+      'ash accepts typed requests, runs I/O and CPU work in parallel, and returns compact ASON results.',
+    start: 'Read the docs',
+    architectureAction: 'View architecture',
     github: 'GitHub',
-    installLabel: 'Cross-platform install',
-    status: 'PRE-RELEASE · NO SIGNED BINARY YET',
+    commandLabel: 'ASH/1 request',
+    command: 'ash rpc < task.ason',
+    installLabel: 'Install ash',
+    status: 'PRE-RELEASE · NO SIGNED BINARY',
     runtimeLabel: 'Execution topology',
     request: 'ASH/1 REQUEST',
     governor: 'HIERARCHICAL GOVERNOR',
@@ -85,73 +102,87 @@ const copy = {
     metricTokenValue: '62%',
     metricTests: 'Rust tests',
     metricTestsValue: '135',
-    metricTargets: 'Native release targets',
+    metricTargets: 'Native targets',
     metricTargetsValue: '6',
-    whyEyebrow: 'WHY ASH',
-    whyTitle: 'A shell should serve model context directly',
+    signalProtocol: 'ASH/1 typed requests',
+    signalParallel: 'Tokio + Rayon',
+    signalAson: 'ASON 62% / JSON',
+    signalTargets: '6 native targets',
+    whyEyebrow: 'CORE INTERFACE',
+    whyTitle: 'Designed for programmatic use',
     whyBody:
-      'ash does not optimize for human shell compatibility. Its protocol, scheduler, output, and errors target token cost, latency, determinism, and recovery for Coding Agent tasks.',
-    architectureEyebrow: 'ONE RUNTIME · TWO PLANES',
-    architectureTitle: 'I/O and CPU run in parallel under one budget',
+      'ASH/1 defines requests, permissions, budgets, results, and errors. Callers do not assemble shell strings or parse terminal text.',
+    architectureEyebrow: 'RUNTIME',
+    architectureTitle: 'Tokio and Rayon share one budget',
     architectureBody:
-      'Tokio owns processes, pipes, RPC, deadlines, and cancellation. A fixed Rayon work-stealing pool handles search, hashing, diffs, and reduction. A hierarchical governor prevents graph width from multiplying nested parallelism.',
-    asonEyebrow: 'LLM-NATIVE EVIDENCE',
-    asonTitle: 'Compact the structure before the model sees it',
+      'Tokio handles processes, pipes, RPC, deadlines, and cancellation. Rayon handles search, hashing, diffs, and reduction. The governor bounds global, session, and request concurrency.',
+    asonEyebrow: 'OUTPUT FORMAT',
+    asonTitle: 'ASON: compact, stable, retrievable',
     asonBody:
-      'ASON is designed and implemented natively by ash. Homogeneous records become columns, paths enter dictionaries, and large values become retrievable references. Stable merge makes identical input byte-identical at the boundary.',
-    asonLink: 'Explore ASON',
-    safetyEyebrow: 'CAPABILITY BOUNDARY',
-    safetyTitle: 'Execution authority travels with the request',
+      'Homogeneous records use columns, paths use dictionaries, and large values remain available by reference. Stable merge keeps output deterministic.',
+    asonLink: 'Read the ASON format',
+    safetyEyebrow: 'PERMISSIONS',
+    safetyTitle: 'Risky actions require a one-time permit',
     safetyBody:
-      'Sessions negotiate the least capability set. High-risk actions require one-time permits bound to session, action, policy, and expiry. File transactions add digest guards, journaling, rollback, and restart recovery.',
-    deliveryEyebrow: 'CROSS-PLATFORM DELIVERY',
-    deliveryTitle: 'One protocol, six native targets',
+      'A permit binds the session, action, policy, and expiry. File transactions add digest checks, a journal, and rollback.',
+    deliveryEyebrow: 'PLATFORMS',
+    deliveryTitle: 'Linux, macOS, and Windows',
     deliveryBody:
-      'Linux, macOS, and Windows on x86-64 and ARM64 share one semantic contract. Release promotion requires signatures, SBOM, provenance, clean-host install, update, and rollback gates.',
-    ctaEyebrow: 'START WITH THE CONTRACT',
-    ctaTitle: 'Send typed requests instead of assembling shell strings',
+      'x86-64 and ARM64 use the same protocol. Releases verify signatures, SBOM, provenance, installation, updates, and rollback.',
+    installEyebrow: 'INSTALL / LOCAL',
+    installTitle: 'Choose a platform and copy the command',
+    installBody:
+      'This is a pre-release. Cargo can build from source; release installers exit until signed binaries are available.',
+    installDocs: 'Read installation notes',
+    checkpoint: 'V0.1.0 · SOURCE CHECKPOINT',
+    ctaEyebrow: 'DOCS AND SOURCE',
+    ctaTitle: 'Start with the protocol, CLI, or source.',
     ctaBody:
-      'Start with installation and ASH/1. The current line is a source checkpoint, and the trust boundary remains explicit until a signed stable release exists.',
-    ctaPrimary: 'Installation guide',
-    ctaSecondary: 'CLI reference',
-    footer: 'MIT licensed · Built in Rust · Linux / macOS / Windows',
+      'Interfaces, architecture decisions, and implementation are public.',
+    ctaPrimary: 'Open documentation',
+    ctaSecondary: 'Browse GitHub',
+    footerDescription: 'An open-source shell for coding agents.',
+    footerDocs: 'Documentation',
+    footerProtocol: 'ASH/1 protocol',
+    footerSource: 'Source',
+    footerLicense: 'MIT licensed · Built in Rust',
   },
 };
 
 const features = [
   {
     index: '01',
-    title: { zh: '类型化操作', en: 'Typed operations' },
+    title: { zh: '类型化请求', en: 'Typed requests' },
     body: {
-      zh: 'exec、read、list、search、patch、fs、snapshot 与 batch 都有严格 Schema，不需要脆弱的命令拼接。',
-      en: 'exec, read, list, search, patch, fs, snapshot, and batch use strict schemas instead of fragile command assembly.',
+      zh: 'exec、read、list、search、patch、snapshot 与 batch 使用固定 Schema。',
+      en: 'exec, read, list, search, patch, snapshot, and batch use fixed schemas.',
     },
     tags: ['ASH/1', 'schema', 'argv'],
   },
   {
     index: '02',
-    title: { zh: '可控多核并行', en: 'Governed multicore work' },
+    title: { zh: '有界并行', en: 'Bounded parallelism' },
     body: {
-      zh: '批图、I/O 与 CPU 工作可以重叠；全局、会话和请求预算限制并发、输出、时间与保留证据。',
-      en: 'Batch graphs, I/O, and CPU work can overlap while global, session, and request budgets bound concurrency, output, time, and retained evidence.',
+      zh: 'Tokio 处理 I/O，Rayon 处理 CPU 任务；Governor 限制并发与资源。',
+      en: 'Tokio handles I/O, Rayon handles CPU work, and the governor bounds resources.',
     },
     tags: ['Tokio', 'Rayon', 'DAG'],
   },
   {
     index: '03',
-    title: { zh: '紧凑可取回证据', en: 'Compact retrievable evidence' },
+    title: { zh: 'ASON 输出', en: 'ASON output' },
     body: {
-      zh: '输出可以投影、截断并保留完整引用。Agent 先读取必要部分，再按 slice 或 search 精确取回。',
-      en: 'Output can be projected, truncated, and retained by reference. Agents read the useful slice first and retrieve more with slice or search.',
+      zh: '结果支持列编码、字段投影、截断和按引用取回。',
+      en: 'Results support column encoding, projection, truncation, and retrieval by reference.',
     },
     tags: ['ASON', 'ref', 'projection'],
   },
   {
     index: '04',
-    title: { zh: '失败可恢复', en: 'Recoverable failure' },
+    title: { zh: '可恢复执行', en: 'Recoverable execution' },
     body: {
-      zh: '取消会传播到进程树与批图；文件事务和更新流程在崩溃后恢复，并保留可验证状态。',
-      en: 'Cancellation reaches process trees and batch graphs. File transactions and updates recover after crashes with verifiable state.',
+      zh: '取消传播到进程树；文件事务提供摘要校验、日志与回滚。',
+      en: 'Cancellation reaches process trees; file transactions provide digest checks, journaling, and rollback.',
     },
     tags: ['cancel', 'journal', 'rollback'],
   },
@@ -258,82 +289,60 @@ export function HomeLayout() {
     return <MarkdownHome locale={locale} />;
   }
 
+  const signals = [
+    labels.signalProtocol,
+    labels.signalParallel,
+    labels.signalAson,
+    labels.signalTargets,
+  ];
+
   return (
-    <main className="ash-home">
-      <section className="ash-hero">
-        <div className="ash-hero-copy">
-          <span className="ash-eyebrow">
-            <i aria-hidden="true" />
-            {labels.eyebrow}
-          </span>
-          <h1>
-            {locale === 'zh' ? (
-              <>
-                为 Coding Agent
-                <br />
-                构建的
-              </>
-            ) : (
-              labels.titleLead
-            )}
-            <span>{labels.titleAccent}</span>
-          </h1>
-          <p>{labels.subtitle}</p>
-          <div className="ash-hero-actions">
-            <a
-              className="ash-button ash-button-primary"
-              href={route('/guide/')}
-            >
-              {labels.start}
-              <ArrowIcon />
-            </a>
-            <a className="ash-button" href={route('/guide/protocol.html')}>
-              {labels.protocol}
-            </a>
-            <a
-              className="ash-button ash-button-quiet"
-              href="https://github.com/A3S-Lab/ash"
-            >
-              {labels.github}
-            </a>
-          </div>
-          <div className="ash-install-wrap">
-            <div className="ash-install-heading">
-              <span>{labels.installLabel}</span>
-              <small>
-                {isCheckpoint ? 'V0.1.0 · SOURCE CHECKPOINT' : labels.status}
-              </small>
+    <main className="ash-home" data-lang={locale}>
+      <section className="ash-hero" aria-labelledby="ash-hero-title">
+        <div className="ash-hero-grid">
+          <div className="ash-hero-copy">
+            <span className="ash-eyebrow">
+              <i aria-hidden="true" />
+              {labels.eyebrow}
+            </span>
+            <h1 id="ash-hero-title">
+              <span>{labels.titleLead}</span> <em>{labels.titleAccent}</em>
+            </h1>
+            <p>{labels.subtitle}</p>
+            <div className="ash-hero-actions">
+              <a
+                className="ash-button ash-button-primary"
+                href={route('/guide/')}
+              >
+                {labels.start}
+                <ArrowIcon />
+              </a>
+              <a className="ash-button" href="#architecture">
+                {labels.architectureAction}
+              </a>
             </div>
-            <InstallSwitcher locale={locale} revision={sourceRevision} />
+            <div className="ash-hero-command" aria-label={labels.commandLabel}>
+              <span>$</span>
+              <code>{labels.command}</code>
+              <i aria-hidden="true" />
+            </div>
           </div>
-        </div>
-        <div className="ash-hero-visual">
-          <div className="ash-orbit ash-orbit-one" aria-hidden="true" />
-          <div className="ash-orbit ash-orbit-two" aria-hidden="true" />
           <AshTerminalDemo locale={locale} />
         </div>
       </section>
 
-      <section className="ash-metrics" aria-label="Project evidence">
+      <section className="ash-signal-strip" aria-label="ash project facts">
         <div>
-          <strong>{labels.metricTokenValue}</strong>
-          <span>{labels.metricToken}</span>
+          {signals.map((signal, index) => (
+            <span key={signal}>
+              <i aria-hidden="true">{String(index + 1).padStart(2, '0')}</i>
+              {signal}
+            </span>
+          ))}
         </div>
-        <div>
-          <strong>{labels.metricTestsValue}</strong>
-          <span>{labels.metricTests}</span>
-        </div>
-        <div>
-          <strong>{labels.metricTargetsValue}</strong>
-          <span>{labels.metricTargets}</span>
-        </div>
-        <a href={route('/guide/benchmarks.html')}>
-          <span>REPRODUCIBLE EVIDENCE</span>
-          <ArrowIcon />
-        </a>
       </section>
 
-      <section className="ash-section ash-why" id="why">
+      <section className="ash-section ash-why" id="core">
         <header className="ash-section-header">
           <div>
             <span>{labels.whyEyebrow}</span>
@@ -357,21 +366,23 @@ export function HomeLayout() {
         </div>
       </section>
 
-      <section className="ash-section ash-architecture" id="architecture">
-        <header className="ash-section-header">
-          <div>
-            <span>{labels.architectureEyebrow}</span>
-            <h2>{labels.architectureTitle}</h2>
-          </div>
-          <p>{labels.architectureBody}</p>
-        </header>
-        <div className="ash-architecture-stage">
-          <RuntimeDiagram labels={labels} />
-          <div className="ash-budget-stack">
-            <span>HOST BUDGET</span>
-            <span>SESSION BUDGET</span>
-            <span>REQUEST BUDGET</span>
-            <span>ACTION PERMIT</span>
+      <section className="ash-architecture" id="architecture">
+        <div className="ash-section ash-architecture-inner">
+          <header className="ash-section-header">
+            <div>
+              <span>{labels.architectureEyebrow}</span>
+              <h2>{labels.architectureTitle}</h2>
+            </div>
+            <p>{labels.architectureBody}</p>
+          </header>
+          <div className="ash-architecture-stage">
+            <RuntimeDiagram labels={labels} />
+            <div className="ash-budget-stack">
+              <span>HOST BUDGET</span>
+              <span>SESSION BUDGET</span>
+              <span>REQUEST BUDGET</span>
+              <span>ACTION PERMIT</span>
+            </div>
           </div>
         </div>
       </section>
@@ -395,7 +406,7 @@ export function HomeLayout() {
           <div className="ash-ason-score">
             <span>CL100K / O200K</span>
             <strong>0.62×</strong>
-            <small>vs compact row-object JSON</small>
+            <small>compact row-object JSON</small>
             <a href={route('/guide/ason.html')}>
               {labels.asonLink}
               <ArrowIcon />
@@ -427,28 +438,69 @@ export function HomeLayout() {
         </article>
       </section>
 
-      <section className="ash-cta">
-        <span>{labels.ctaEyebrow}</span>
-        <h2>{labels.ctaTitle}</h2>
-        <p>{labels.ctaBody}</p>
-        <div>
-          <a
-            className="ash-button ash-button-primary"
-            href={route('/guide/install.html')}
-          >
-            {labels.ctaPrimary}
+      <section className="ash-section ash-quickstart" id="install">
+        <div className="ash-quickstart-copy">
+          <span className="ash-section-eyebrow">{labels.installEyebrow}</span>
+          <h2>{labels.installTitle}</h2>
+          <p>{labels.installBody}</p>
+          <a href={route('/guide/install.html')}>
+            {labels.installDocs}
             <ArrowIcon />
           </a>
-          <a className="ash-button" href={route('/guide/cli.html')}>
-            {labels.ctaSecondary}
-          </a>
+          <small>{isCheckpoint ? labels.checkpoint : labels.status}</small>
+        </div>
+        <InstallSwitcher locale={locale} revision={sourceRevision} />
+      </section>
+
+      <section className="ash-cta" aria-labelledby="ash-cta-title">
+        <div className="ash-cta-mark" aria-hidden="true">
+          <span>&gt;</span>
+          <i />
+        </div>
+        <div>
+          <span>{labels.ctaEyebrow}</span>
+          <h2 id="ash-cta-title">{labels.ctaTitle}</h2>
+          <p>{labels.ctaBody}</p>
+          <div className="ash-cta-actions">
+            <a className="ash-button ash-button-light" href={route('/guide/')}>
+              {labels.ctaPrimary}
+              <ArrowIcon />
+            </a>
+            <a
+              className="ash-button ash-button-outline"
+              href="https://github.com/A3S-Lab/ash"
+            >
+              {labels.ctaSecondary}
+            </a>
+          </div>
         </div>
       </section>
 
       <footer className="ash-footer">
-        <span>ash / AI NATIVE SHELL</span>
-        <span>{labels.footer}</span>
-        <a href="https://github.com/A3S-Lab/ash">A3S-Lab/ash ↗</a>
+        <div className="ash-footer-inner">
+          <div className="ash-footer-brand">
+            <a href={route('/')}>
+              <span aria-hidden="true">&gt;_</span>
+              <strong>ash</strong>
+            </a>
+            <p>{labels.footerDescription}</p>
+          </div>
+          <div className="ash-footer-column">
+            <b>{labels.footerDocs}</b>
+            <a href={route('/guide/')}>{labels.footerDocs}</a>
+            <a href={route('/guide/protocol.html')}>{labels.footerProtocol}</a>
+          </div>
+          <div className="ash-footer-column">
+            <b>{labels.footerSource}</b>
+            <a href="https://github.com/A3S-Lab/ash">GitHub</a>
+            <a href="https://github.com/A3S-Lab">A3S Lab</a>
+          </div>
+        </div>
+        <div className="ash-footer-base">
+          <span>© {new Date().getFullYear()} A3S Lab</span>
+          <span>{labels.footerLicense}</span>
+          <span>RUST / ASYNC / OPEN</span>
+        </div>
       </footer>
     </main>
   );

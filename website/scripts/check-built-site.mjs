@@ -70,7 +70,8 @@ for (const file of requiredFiles) {
 const homepages = {
   'index.html': [
     '<html lang="zh"',
-    '为 Coding Agent 构建的',
+    'AI Native',
+    '为程序调用设计',
     'ash-install',
     'ash-terminal-demo',
     'data-phase="done"',
@@ -81,7 +82,8 @@ const homepages = {
   ],
   'en/index.html': [
     '<html lang="en"',
-    'The shell built for',
+    'AI Native',
+    'Designed for programmatic use',
     'ash-install',
     'ash-terminal-demo',
     'data-phase="done"',
@@ -91,7 +93,7 @@ const homepages = {
     'A3S-Lab/ash/main/install.sh',
   ],
   'v0.1.0/index.html': [
-    'V0.1.0 · SOURCE CHECKPOINT',
+    'V0.1.0 · 源码检查点',
     'd8756614ad6a54128336f50a6a52fcb6f92d1305',
   ],
   'v0.1.0/en/index.html': [

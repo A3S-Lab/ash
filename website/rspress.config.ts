@@ -46,7 +46,7 @@ export default defineConfig({
   siteOrigin,
   title: 'ash',
   description:
-    'AI Native Shell for typed parallel execution, compact ASON evidence, and capability-scoped automation.',
+    'AI Native Shell with typed requests, bounded parallel execution, and ASON output.',
   lang: 'zh',
   icon: '/favicon.svg',
   logo: `${base}ash-mark.svg`,
@@ -67,19 +67,18 @@ export default defineConfig({
       lang: 'zh',
       label: '简体中文',
       title: 'ash · AI Native Shell',
-      description:
-        '为 Coding Agent 构建的 AI Native Shell：类型化并行执行、紧凑 ASON 证据与能力边界。',
+      description: 'AI Native Shell：类型化请求、有界并行执行与 ASON 输出。',
     },
     {
       lang: 'en',
       label: 'English',
       title: 'ash · AI Native Shell',
       description:
-        'An AI Native Shell for typed parallel execution, compact ASON evidence, and capability boundaries.',
+        'AI Native Shell with typed requests, bounded parallel execution, and ASON output.',
     },
   ],
   head: [
-    ['meta', { name: 'theme-color', content: '#080b10' }],
+    ['meta', { name: 'theme-color', content: '#000000' }],
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:site_name', content: 'ash' }],
     [
@@ -90,6 +89,22 @@ export default defineConfig({
       },
     ],
     ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
+    [
+      'link',
+      {
+        rel: 'preconnect',
+        href: 'https://fonts.gstatic.com',
+        crossorigin: 'anonymous',
+      },
+    ],
+    [
+      'link',
+      {
+        rel: 'stylesheet',
+        href: 'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap',
+      },
+    ],
     (route) => [
       'link',
       {
