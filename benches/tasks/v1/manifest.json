@@ -1,12 +1,12 @@
 {
-  "schema": 1,
+  "schema": 2,
   "tasks": [
     {
       "id": "discover-fault-markers",
       "family": "workspace-discovery",
       "workspace": "discovery",
       "objective": "List every Rust source file containing ASH_FAULT, one normalized relative path per line in byte order.",
-      "capabilities": ["list", "search", "read"],
+      "capabilities": ["search"],
       "output_retention": "immediate",
       "limits": {
         "millis": 10000,
@@ -16,6 +16,17 @@
         "stdout": "src/cache.rs\nsrc/net.rs\n",
         "stderr": "",
         "files": []
+      },
+      "ash": {
+        "steps": [
+          {
+            "op": "search",
+            "query": "ASH_FAULT",
+            "paths": ["src"],
+            "flags": 0
+          }
+        ],
+        "answer": { "kind": "search-paths", "step": 0 }
       },
       "baselines": {
         "linux": {
@@ -37,7 +48,7 @@
       "family": "tests-and-diagnostics",
       "workspace": "diagnostics",
       "objective": "Count each error code in build.log and output CODE COUNT sorted by code.",
-      "capabilities": ["read", "search"],
+      "capabilities": ["search"],
       "output_retention": "immediate",
       "limits": {
         "millis": 10000,
@@ -47,6 +58,17 @@
         "stdout": "E201 2\nE404 1\n",
         "stderr": "",
         "files": []
+      },
+      "ash": {
+        "steps": [
+          {
+            "op": "search",
+            "query": "^error E[0-9]{3}:",
+            "paths": ["build.log"],
+            "flags": 1
+          }
+        ],
+        "answer": { "kind": "error-code-counts", "step": 0 }
       },
       "baselines": {
         "linux": {
@@ -84,6 +106,27 @@
           }
         ]
       },
+      "ash": {
+        "steps": [
+          {
+            "op": "read",
+            "paths": ["config/ash.toml"],
+            "mode": "bytes",
+            "offset": 0,
+            "length": 1024
+          },
+          {
+            "op": "patch",
+            "paths": ["config/ash.toml"],
+            "digests": [{ "step": 0, "path": "config/ash.toml" }],
+            "edits": [
+              { "file": 0, "offset": 19, "delete_bytes": 1, "value": "8" }
+            ],
+            "flags": 0
+          }
+        ],
+        "answer": { "kind": "none" }
+      },
       "baselines": {
         "linux": {
           "shell": "sh",
@@ -96,6 +139,221 @@
         "windows": {
           "shell": "powershell",
           "script": "$path = (Resolve-Path 'config/ash.toml').Path; $value = [IO.File]::ReadAllText($path); if ($value -notmatch '(?m)^workers = 2$') { throw 'missing worker setting' }; $value = [Text.RegularExpressions.Regex]::Replace($value, '(?m)^workers = 2$', 'workers = 8'); $utf8 = New-Object Text.UTF8Encoding($false); [IO.File]::WriteAllText($path, $value, $utf8)"
+        }
+      }
+    },
+    {
+      "id": "list-rust-sources",
+      "family": "workspace-listing",
+      "workspace": "discovery",
+      "objective": "List every regular file under src, one normalized relative path per line in byte order.",
+      "capabilities": ["list"],
+      "output_retention": "immediate",
+      "limits": {
+        "millis": 10000,
+        "output_bytes": 16384
+      },
+      "expected": {
+        "stdout": "src/cache.rs\nsrc/main.rs\nsrc/net.rs\n",
+        "stderr": "",
+        "files": []
+      },
+      "ash": {
+        "steps": [
+          {
+            "op": "list",
+            "paths": ["src"],
+            "depth": 64,
+            "flags": 2
+          }
+        ],
+        "answer": { "kind": "list-paths", "step": 0 }
+      },
+      "baselines": {
+        "linux": {
+          "shell": "sh",
+          "script": "find src -type f | LC_ALL=C sort"
+        },
+        "macos": {
+          "shell": "sh",
+          "script": "find src -type f | LC_ALL=C sort"
+        },
+        "windows": {
+          "shell": "powershell",
+          "script": "$root = (Get-Location).Path.TrimEnd('\\') + '\\'; Get-ChildItem -LiteralPath src -Recurse -File | ForEach-Object { $_.FullName.Substring($root.Length).Replace('\\', '/') } | Sort-Object -CaseSensitive | ForEach-Object { [Console]::Out.WriteLine($_) }"
+        }
+      }
+    },
+    {
+      "id": "read-module-heads",
+      "family": "workspace-reading",
+      "workspace": "discovery",
+      "objective": "Output the first line of src/cache.rs, src/main.rs, and src/net.rs in that order.",
+      "capabilities": ["read"],
+      "output_retention": "immediate",
+      "limits": {
+        "millis": 10000,
+        "output_bytes": 16384
+      },
+      "expected": {
+        "stdout": "// ASH_FAULT cache-miss\nmod cache;\n// ASH_FAULT connection-reset\n",
+        "stderr": "",
+        "files": []
+      },
+      "ash": {
+        "steps": [
+          {
+            "op": "read",
+            "paths": ["src/cache.rs", "src/main.rs", "src/net.rs"],
+            "mode": "lines",
+            "offset": 1,
+            "length": 1
+          }
+        ],
+        "answer": { "kind": "read-text", "step": 0 }
+      },
+      "baselines": {
+        "linux": {
+          "shell": "sh",
+          "script": "sed -n '1p' src/cache.rs; sed -n '1p' src/main.rs; sed -n '1p' src/net.rs"
+        },
+        "macos": {
+          "shell": "sh",
+          "script": "sed -n '1p' src/cache.rs; sed -n '1p' src/main.rs; sed -n '1p' src/net.rs"
+        },
+        "windows": {
+          "shell": "powershell",
+          "script": "foreach ($path in @('src/cache.rs', 'src/main.rs', 'src/net.rs')) { $line = Get-Content -LiteralPath $path -TotalCount 1; [Console]::Out.WriteLine($line) }"
+        }
+      }
+    },
+    {
+      "id": "refresh-generated-config",
+      "family": "coding-mutation",
+      "workspace": "transaction",
+      "objective": "Copy template.txt to generated.txt and remove obsolete.txt without changing template.txt or README.md.",
+      "capabilities": ["read", "fs"],
+      "output_retention": "immediate",
+      "limits": {
+        "millis": 10000,
+        "output_bytes": 16384
+      },
+      "expected": {
+        "stdout": "",
+        "stderr": "",
+        "files": [
+          {
+            "path": "generated.txt",
+            "content": "mode=fast\nworkers=8\n"
+          }
+        ]
+      },
+      "ash": {
+        "steps": [
+          {
+            "op": "read",
+            "paths": ["template.txt", "obsolete.txt"],
+            "mode": "bytes",
+            "offset": 0,
+            "length": 1024
+          },
+          {
+            "op": "fs",
+            "actions": [
+              {
+                "id": 1,
+                "kind": "copy",
+                "path": "template.txt",
+                "destination": "generated.txt",
+                "digest": { "step": 0, "path": "template.txt" },
+                "value": null
+              },
+              {
+                "id": 2,
+                "kind": "remove",
+                "path": "obsolete.txt",
+                "destination": null,
+                "digest": { "step": 0, "path": "obsolete.txt" },
+                "value": null
+              }
+            ]
+          }
+        ],
+        "answer": { "kind": "none" }
+      },
+      "baselines": {
+        "linux": {
+          "shell": "sh",
+          "script": "test ! -e generated.txt && cp template.txt generated.txt && rm obsolete.txt"
+        },
+        "macos": {
+          "shell": "sh",
+          "script": "test ! -e generated.txt && cp template.txt generated.txt && rm obsolete.txt"
+        },
+        "windows": {
+          "shell": "powershell",
+          "script": "if (Test-Path -LiteralPath 'generated.txt') { throw 'destination exists' }; Copy-Item -LiteralPath 'template.txt' -Destination 'generated.txt'; Remove-Item -LiteralPath 'obsolete.txt'"
+        }
+      }
+    },
+    {
+      "id": "validate-independent-markers",
+      "family": "batch-and-graph",
+      "workspace": "discovery",
+      "objective": "Verify cache.rs contains E_CACHE and net.rs contains E_NET; produce no output on success.",
+      "capabilities": ["batch", "search"],
+      "output_retention": "immediate",
+      "limits": {
+        "millis": 10000,
+        "output_bytes": 16384
+      },
+      "expected": {
+        "stdout": "",
+        "stderr": "",
+        "files": []
+      },
+      "ash": {
+        "steps": [
+          {
+            "op": "batch",
+            "nodes": [
+              {
+                "id": 1,
+                "dependencies": [],
+                "action": {
+                  "op": "search",
+                  "query": "E_CACHE",
+                  "paths": ["src/cache.rs"],
+                  "flags": 0
+                }
+              },
+              {
+                "id": 2,
+                "dependencies": [],
+                "action": {
+                  "op": "search",
+                  "query": "E_NET",
+                  "paths": ["src/net.rs"],
+                  "flags": 0
+                }
+              }
+            ]
+          }
+        ],
+        "answer": { "kind": "none" }
+      },
+      "baselines": {
+        "linux": {
+          "shell": "sh",
+          "script": "grep -q 'E_CACHE' src/cache.rs & left=$!; grep -q 'E_NET' src/net.rs & right=$!; wait \"$left\"; wait \"$right\""
+        },
+        "macos": {
+          "shell": "sh",
+          "script": "grep -q 'E_CACHE' src/cache.rs & left=$!; grep -q 'E_NET' src/net.rs & right=$!; wait \"$left\"; wait \"$right\""
+        },
+        "windows": {
+          "shell": "powershell",
+          "script": "if (!(Select-String -LiteralPath 'src/cache.rs' -SimpleMatch 'E_CACHE' -Quiet)) { throw 'missing cache marker' }; if (!(Select-String -LiteralPath 'src/net.rs' -SimpleMatch 'E_NET' -Quiet)) { throw 'missing net marker' }"
         }
       }
     }

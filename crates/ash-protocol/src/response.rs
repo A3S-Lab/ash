@@ -338,6 +338,11 @@ impl FinalResponse {
     }
 
     #[must_use]
+    pub fn paths(&self) -> &[PathMapping] {
+        &self.paths
+    }
+
+    #[must_use]
     pub const fn data(&self) -> Option<&ResultData> {
         self.data.as_ref()
     }

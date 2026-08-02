@@ -1,10 +1,14 @@
 # Task corpus v1
 
-`manifest.json` defines cross-platform task objectives, limits, expected output,
-expected file content, and native-shell baselines. `lock.json` is generated from
-that manifest plus the fixture trees; it binds each initial and expected final
-tree by SHA-256.
+`manifest.json` defines seven cross-platform task objectives, limits, expected
+output, expected file content, declarative ASH plans, and native-shell
+baselines. `lock.json` is generated only after both executors reach the same
+state; it binds the manifest plus each initial and expected final visible tree
+by SHA-256.
 
-This corpus establishes reproducible native-shell baselines. It does not contain
-or claim Coding Agent results. Model, prompt, retry, and success evidence belongs
+`--tasks` executes each plan through the production ASH session and separately
+executes the current platform baseline. It counts every canonical ASON request
+and response, but the plans are hand-authored and deterministic. This corpus
+therefore establishes tool-protocol denominators and correctness, not Coding
+Agent results. Model, prompt, retry, and model-selected trace evidence belongs
 in a later versioned report.

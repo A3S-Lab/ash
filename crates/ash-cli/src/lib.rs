@@ -15,6 +15,7 @@ use ash_engine::Parallelism;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, stdout};
 
 pub use cli_error::CliError;
+pub use execution::ExecutionSession;
 
 /// Runs the command selected by the process argument vector.
 pub async fn run_cli() -> Result<(), CliError> {

@@ -907,19 +907,34 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn task_corpus_baselines_are_bound_correct_and_cross_platform() {
         let report = tasks::build_report().await.expect("task corpus report");
-        assert_eq!(report.schema, 1);
+        assert_eq!(report.schema, 2);
         assert_eq!(report.platform, std::env::consts::OS);
-        assert_eq!(report.tasks.len(), 3);
+        assert_eq!(report.tasks.len(), 7);
         assert!(report.gates.manifest_valid);
-        assert!(report.gates.all_baselines_success);
+        assert!(report.gates.all_native_shell_success);
+        assert!(report.gates.all_ash_success);
+        assert!(report.gates.all_initial_states_match);
         assert!(report.gates.all_final_states_match);
         assert!(report.gates.passed);
         for task in &report.tasks {
-            assert!(task.baseline.success);
-            assert_eq!(task.initial_tree_sha256, task.declared_initial_tree_sha256);
-            assert_eq!(task.final_tree_sha256, task.expected_final_tree_sha256);
-            assert!(task.baseline.total.bytes > task.baseline.stdout.bytes);
-            assert_eq!(task.baseline.stderr.bytes, 0);
+            assert!(task.native_shell.success);
+            assert!(task.ash.success);
+            assert_eq!(
+                task.native_shell.initial_tree_sha256,
+                task.declared_initial_tree_sha256
+            );
+            assert_eq!(
+                task.ash.initial_tree_sha256,
+                task.declared_initial_tree_sha256
+            );
+            assert_eq!(
+                task.native_shell.final_tree_sha256,
+                task.expected_final_tree_sha256
+            );
+            assert_eq!(task.ash.final_tree_sha256, task.expected_final_tree_sha256);
+            assert!(task.native_shell.total.bytes > task.native_shell.stdout.bytes);
+            assert!(task.ash.total.bytes > 0);
+            assert_eq!(task.native_shell.stderr.bytes, 0);
         }
     }
 }

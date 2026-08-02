@@ -1,6 +1,6 @@
 {
-  "schema": 1,
-  "manifest_sha256": "1846f33076eb953c4e4820e40f1dfc0488f13cee80b93da929fee8e9fd0ed5d1",
+  "schema": 2,
+  "manifest_sha256": "ff02b6fae33ded86bd7a4f1e9f0b6d09865dfa7acf3dc357ff0930731c178f72",
   "tasks": [
     {
       "id": "discover-fault-markers",
@@ -16,6 +16,26 @@
       "id": "raise-worker-limit",
       "initial_tree_sha256": "de49f2dad6857ab686962ead80fabed6d861ce4eeba9d9ec4639d2e390ff6dd4",
       "expected_final_tree_sha256": "66a1b5e81da18f673b8eb1f7d60c5cd688e885b22767cf0b66783ccdcd3d6633"
+    },
+    {
+      "id": "list-rust-sources",
+      "initial_tree_sha256": "b228d0dc836339af4f2a2d0d6e7cd98c511dafac4793846c36742bf40f59b0a7",
+      "expected_final_tree_sha256": "b228d0dc836339af4f2a2d0d6e7cd98c511dafac4793846c36742bf40f59b0a7"
+    },
+    {
+      "id": "read-module-heads",
+      "initial_tree_sha256": "b228d0dc836339af4f2a2d0d6e7cd98c511dafac4793846c36742bf40f59b0a7",
+      "expected_final_tree_sha256": "b228d0dc836339af4f2a2d0d6e7cd98c511dafac4793846c36742bf40f59b0a7"
+    },
+    {
+      "id": "refresh-generated-config",
+      "initial_tree_sha256": "9d864e5acf557eb17f10ce5e97384aa48e83f08783e8f2492a0ad27132e57159",
+      "expected_final_tree_sha256": "cb3765af581c897a6a1110d2d9deb5fca3ad1a84ebeb6ee52f0be873582bc937"
+    },
+    {
+      "id": "validate-independent-markers",
+      "initial_tree_sha256": "b228d0dc836339af4f2a2d0d6e7cd98c511dafac4793846c36742bf40f59b0a7",
+      "expected_final_tree_sha256": "b228d0dc836339af4f2a2d0d6e7cd98c511dafac4793846c36742bf40f59b0a7"
     }
   ]
 }
