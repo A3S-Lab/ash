@@ -16,7 +16,7 @@
 
 `ash` is a greenfield shell designed around coding agents rather than terminal users. It turns shell work into typed programs, executes independent work across bounded I/O and CPU planes, and returns only the evidence worth placing in an LLM context.
 
-The [project website](https://a3s-lab.github.io/ash/) opens in Chinese by default, switches between Chinese and English plus `next` and frozen documentation versions, and uses a reduced-motion-aware terminal animation to walk through the implemented ASH/1 execution path.
+The [project website](https://a3s-lab.github.io/ash/) opens in Chinese by default, switches between Chinese and English plus `next` and frozen documentation versions, and uses a reduced-motion-aware terminal animation, scroll-linked command tour, and hover/focus formula notes to explain the implemented ASH/1 execution path.
 
 ## Proof starts at the result
 

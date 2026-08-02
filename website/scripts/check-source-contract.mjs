@@ -137,6 +137,19 @@ requireIncludes(
   '<AshSymbolAlgebra locale={locale} />',
   'Homepage algebra',
 );
+for (const marker of [
+  "event.pointerType !== 'touch'",
+  'setHovered(operator.id)',
+  'setHovered(null)',
+  'onFocus={() => setFocused(operator.id)}',
+  'const closing = selected === operator.id',
+  'if (closing) event.currentTarget.blur()',
+  'aria-describedby={noteId}',
+  'role="tooltip"',
+  '悬停或聚焦符号查看批注',
+]) {
+  requireIncludes(symbolAlgebra, marker, 'Formula hover notes');
+}
 for (const operator of report.formula_algebra.operators) {
   requireIncludes(
     symbolAlgebra,

@@ -139,19 +139,23 @@ export function AshSymbolAlgebra({ locale }: { locale: Locale }) {
               className="ash-symbol-item"
               data-open={open ? 'true' : 'false'}
               key={operator.id}
-              onMouseEnter={() => setHovered(operator.id)}
-              onMouseLeave={() => setHovered(null)}
+              onPointerEnter={(event) => {
+                if (event.pointerType !== 'touch') setHovered(operator.id);
+              }}
+              onPointerLeave={(event) => {
+                if (event.pointerType !== 'touch') setHovered(null);
+              }}
             >
               <button
                 type="button"
                 aria-describedby={noteId}
                 aria-expanded={open}
                 onBlur={() => setFocused(null)}
-                onClick={() =>
-                  setSelected((current) =>
-                    current === operator.id ? null : operator.id,
-                  )
-                }
+                onClick={(event) => {
+                  const closing = selected === operator.id;
+                  setSelected(closing ? null : operator.id);
+                  if (closing) event.currentTarget.blur();
+                }}
                 onFocus={() => setFocused(operator.id)}
                 onKeyDown={(event) => {
                   if (event.key === 'Escape') {
