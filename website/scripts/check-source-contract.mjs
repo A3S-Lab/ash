@@ -48,6 +48,7 @@ const [
   switcher,
   alignedStyles,
   runtimeHarness,
+  runtimeMixed,
   runtimeReducer,
   runtimePrimitives,
   referenceOperation,
@@ -67,6 +68,7 @@ const [
   text('website/theme/components/InstallSwitcher.tsx'),
   text('website/theme/a3s-aligned.css'),
   text('benches/runner/src/runtime.rs'),
+  text('benches/runner/src/runtime/mixed.rs'),
   text('benches/runner/src/runtime/reducer.rs'),
   text('benches/runner/src/runtime/primitives.rs'),
   text('crates/ash-ops/src/reference.rs'),
@@ -193,7 +195,7 @@ if (
 }
 
 for (const marker of [
-  'schema: 13',
+  'schema: 14',
   '"list-recursive"',
   '"search-literal"',
   '"search-regex"',
@@ -212,6 +214,17 @@ for (const marker of [
   'primitives::measure_dag_scenario(nodes, id, &config)',
 ]) {
   requireIncludes(runtimeHarness, marker, 'Runtime benchmark schema');
+}
+for (const marker of [
+  '"io-spill-idle-compute"',
+  '"io-spill-saturated-compute"',
+  '"xorshift64-busy-loop"',
+  'all-compute-workers-active-at-capture-finish',
+  'alternating-paired-order',
+  'active_workers != parallelism.compute_workers().get()',
+  'speedup_basis_points: None',
+]) {
+  requireIncludes(runtimeMixed, marker, 'Mixed I/O runtime benchmark');
 }
 for (const marker of [
   '"ref-project-structured"',
@@ -284,12 +297,26 @@ for (const marker of [
 for (const [document, markers, label] of [
   [
     benchmarkZh,
-    ['schema 13', '二十个场景', 'fragmented', 'bursty', '⋯N'],
+    [
+      'schema 14',
+      '二十二个场景',
+      'io-spill-saturated-compute',
+      'fragmented',
+      'bursty',
+      '⋯N',
+    ],
     'Chinese benchmark documentation',
   ],
   [
     benchmarkEn,
-    ['Schema 13', 'twenty scenarios', 'fragmented', 'bursty', '⋯N'],
+    [
+      'Schema 14',
+      'twenty-two scenarios',
+      'io-spill-saturated-compute',
+      'fragmented',
+      'bursty',
+      '⋯N',
+    ],
     'English benchmark documentation',
   ],
 ]) {

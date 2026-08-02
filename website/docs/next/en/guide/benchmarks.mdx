@@ -46,9 +46,10 @@ cargo build -p a3s-ash --release --locked
 cargo run -p a3s-ash-bench --release --locked -- --runtime
 ```
 
-Schema 13 contains twenty scenarios. Thirteen end-to-end paths cover recursive
+Schema 14 contains twenty-two scenarios. Fifteen end-to-end paths cover recursive
 directory traversal, literal search, regular-expression search, BLAKE3
-snapshot, disk spill/fetch, fresh `ash run` startup, empty child spawn,
+snapshot, disk spill/fetch, paired disk I/O with idle and fully occupied compute,
+fresh `ash run` startup, empty child spawn,
 three dual-pipe capture profiles, process-tree cancellation, warm framed RPC dispatch, and
 `|` column projection over retained ASON. Structured projection reads and
 decodes a 16,384-row source table, then selects six columns in stable order on
@@ -79,6 +80,14 @@ microseconds at every 256 KiB boundary. The report carries these parameters and
 a profile-descriptor digest; the compiled fixture must describe the same
 configuration before timing begins.
 
+`io-spill-idle-compute` and `io-spill-saturated-compute` consume the same 8 MiB
+input and time only zero-memory-ceiling asynchronous writes plus the final
+flush. The saturated side keeps every Rayon worker inside an integer workload
+and proves all workers remain active when I/O completes. Only then does it stop
+the load, compute BLAKE3, and verify the same 64 KiB tail. Sample order alternates;
+the report emits a saturated/idle p50 ratio per worker configuration without a
+cross-host threshold.
+
 ## Native-shell task seed
 
 ```bash
@@ -98,7 +107,7 @@ native shell; it does not run a model or claim an ash task result.
 - Rust unit and integration suites across every workspace crate.
 - `cargo check` and tests on Linux, macOS, and Windows.
 - Real release builds exercised by all three platform installers.
-- Thirteen end-to-end runtime paths, three multicore output reducers, hot path-dictionary lookup, and three-size DAG scheduling evidence.
+- Fifteen end-to-end runtime paths, three multicore output reducers, hot path-dictionary lookup, and three-size DAG scheduling evidence.
 - Three locked tasks with Linux, macOS, and Windows native-shell baselines.
 - Fuzz targets for ASON, bounded ASH/1 frames, typed requests, and update metadata.
 - File-transaction crash cutpoints, update activation/recovery, and cancellation race tests.
