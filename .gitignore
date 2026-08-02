@@ -23,6 +23,7 @@ Desktop.ini
 
 # Local output
 *.log
+!benches/tasks/**/build.log
 *.tmp
 *.temp
 .cache/

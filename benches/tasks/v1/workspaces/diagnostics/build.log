@@ -1,0 +1,6 @@
+warning W100: unused cache entry
+error E201: expected Result<T, E>
+note: required by validate_config
+error E404: module registry was not found
+error E201: expected Result<T, E>
+warning W220: fallback path selected

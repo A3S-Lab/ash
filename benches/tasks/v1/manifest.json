@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "tasks": [
+    {
+      "id": "discover-fault-markers",
+      "family": "workspace-discovery",
+      "workspace": "discovery",
+      "objective": "List every Rust source file containing ASH_FAULT, one normalized relative path per line in byte order.",
+      "capabilities": ["list", "search", "read"],
+      "output_retention": "immediate",
+      "limits": {
+        "millis": 10000,
+        "output_bytes": 16384
+      },
+      "expected": {
+        "stdout": "src/cache.rs\nsrc/net.rs\n",
+        "stderr": "",
+        "files": []
+      },
+      "baselines": {
+        "linux": {
+          "shell": "sh",
+          "script": "find src -type f -name '*.rs' -exec grep -l 'ASH_FAULT' {} + | LC_ALL=C sort"
+        },
+        "macos": {
+          "shell": "sh",
+          "script": "find src -type f -name '*.rs' -exec grep -l 'ASH_FAULT' {} + | LC_ALL=C sort"
+        },
+        "windows": {
+          "shell": "powershell",
+          "script": "$root = (Get-Location).Path.TrimEnd('\\') + '\\'; Get-ChildItem -LiteralPath src -Recurse -File -Filter *.rs | Where-Object { Select-String -LiteralPath $_.FullName -SimpleMatch 'ASH_FAULT' -Quiet } | ForEach-Object { $_.FullName.Substring($root.Length).Replace('\\', '/') } | Sort-Object -CaseSensitive | ForEach-Object { [Console]::Out.WriteLine($_) }"
+        }
+      }
+    },
+    {
+      "id": "count-build-errors",
+      "family": "tests-and-diagnostics",
+      "workspace": "diagnostics",
+      "objective": "Count each error code in build.log and output CODE COUNT sorted by code.",
+      "capabilities": ["read", "search"],
+      "output_retention": "immediate",
+      "limits": {
+        "millis": 10000,
+        "output_bytes": 16384
+      },
+      "expected": {
+        "stdout": "E201 2\nE404 1\n",
+        "stderr": "",
+        "files": []
+      },
+      "baselines": {
+        "linux": {
+          "shell": "sh",
+          "script": "grep '^error E[0-9][0-9][0-9]:' build.log | sed 's/^error \\([^:]*\\):.*/\\1/' | LC_ALL=C sort | uniq -c | awk '{print $2 \" \" $1}'"
+        },
+        "macos": {
+          "shell": "sh",
+          "script": "grep '^error E[0-9][0-9][0-9]:' build.log | sed 's/^error \\([^:]*\\):.*/\\1/' | LC_ALL=C sort | uniq -c | awk '{print $2 \" \" $1}'"
+        },
+        "windows": {
+          "shell": "powershell",
+          "script": "Select-String -LiteralPath build.log -Pattern '^error (E[0-9]{3}):' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Group-Object | Sort-Object Name | ForEach-Object { [Console]::Out.WriteLine(\"$($_.Name) $($_.Count)\") }"
+        }
+      }
+    },
+    {
+      "id": "raise-worker-limit",
+      "family": "coding-mutation",
+      "workspace": "mutation",
+      "objective": "Set engine workers to 8 without changing io_workers or any other file.",
+      "capabilities": ["read", "patch"],
+      "output_retention": "immediate",
+      "limits": {
+        "millis": 10000,
+        "output_bytes": 16384
+      },
+      "expected": {
+        "stdout": "",
+        "stderr": "",
+        "files": [
+          {
+            "path": "config/ash.toml",
+            "content": "[engine]\nworkers = 8\nio_workers = 2\n"
+          }
+        ]
+      },
+      "baselines": {
+        "linux": {
+          "shell": "sh",
+          "script": "grep -qx 'workers = 2' config/ash.toml && sed -i 's/^workers = 2$/workers = 8/' config/ash.toml"
+        },
+        "macos": {
+          "shell": "sh",
+          "script": "grep -qx 'workers = 2' config/ash.toml && sed -i '' 's/^workers = 2$/workers = 8/' config/ash.toml"
+        },
+        "windows": {
+          "shell": "powershell",
+          "script": "$path = (Resolve-Path 'config/ash.toml').Path; $value = [IO.File]::ReadAllText($path); if ($value -notmatch '(?m)^workers = 2$') { throw 'missing worker setting' }; $value = [Text.RegularExpressions.Regex]::Replace($value, '(?m)^workers = 2$', 'workers = 8'); $utf8 = New-Object Text.UTF8Encoding($false); [IO.File]::WriteAllText($path, $value, $utf8)"
+        }
+      }
+    }
+  ]
+}

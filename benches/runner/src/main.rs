@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use tiktoken_rs::{cl100k_base, o200k_base};
 
 mod runtime;
+mod tasks;
 
 const CORPUS_BYTES: &[u8] = include_bytes!("../../corpus/v1.json");
 const CORPUS_TEXT: &str = include_str!("../../corpus/v1.json");
@@ -123,6 +124,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         print!("{}", std::str::from_utf8(&encoded)?);
         return Ok(());
     }
+    if matches!(arguments.as_slice(), [command] if command == "--tasks") {
+        let mut encoded = serde_json::to_vec_pretty(&tasks::build_report().await?)?;
+        encoded.push(b'\n');
+        print!("{}", std::str::from_utf8(&encoded)?);
+        return Ok(());
+    }
+    if matches!(arguments.as_slice(), [command, _] if command == "--write-task-lock" || command == "--check-task-lock")
+    {
+        let encoded = tasks::encoded_lock().await?;
+        match arguments.as_slice() {
+            [command, path] if command == "--write-task-lock" => fs::write(path, encoded)?,
+            [command, path] if command == "--check-task-lock" => {
+                if fs::read(path)? != encoded {
+                    return Err("checked-in task corpus lock is stale".into());
+                }
+            }
+            _ => unreachable!("task lock arguments were matched above"),
+        }
+        return Ok(());
+    }
     let report = build_report()?;
     let mut encoded = serde_json::to_vec_pretty(&report)?;
     encoded.push(b'\n');
@@ -136,8 +157,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         _ => {
             return Err(
-                "usage: a3s-ash-bench [--runtime [path-to-ash]|--write <path>|--check <path>]"
-                    .into(),
+                "usage: a3s-ash-bench [--runtime [path-to-ash]|--tasks|--write-task-lock <path>|--check-task-lock <path>|--write <path>|--check <path>]".into(),
             );
         }
     }
@@ -585,7 +605,7 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_formula_algebra, build_report, measure};
+    use super::{build_formula_algebra, build_report, measure, tasks};
 
     #[test]
     fn corpus_round_trips_and_passes_the_token_gate() {
@@ -642,5 +662,24 @@ mod tests {
         assert_eq!(report.candidates.canonical_symbols.o200k_tokens, 80);
         assert_eq!(report.candidates.direct_greek.cl100k_tokens, 86);
         assert_eq!(report.candidates.direct_greek.o200k_tokens, 86);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_corpus_baselines_are_bound_correct_and_cross_platform() {
+        let report = tasks::build_report().await.expect("task corpus report");
+        assert_eq!(report.schema, 1);
+        assert_eq!(report.platform, std::env::consts::OS);
+        assert_eq!(report.tasks.len(), 3);
+        assert!(report.gates.manifest_valid);
+        assert!(report.gates.all_baselines_success);
+        assert!(report.gates.all_final_states_match);
+        assert!(report.gates.passed);
+        for task in &report.tasks {
+            assert!(task.baseline.success);
+            assert_eq!(task.initial_tree_sha256, task.declared_initial_tree_sha256);
+            assert_eq!(task.final_tree_sha256, task.expected_final_tree_sha256);
+            assert!(task.baseline.total.bytes > task.baseline.stdout.bytes);
+            assert_eq!(task.baseline.stderr.bytes, 0);
+        }
     }
 }

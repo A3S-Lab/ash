@@ -58,6 +58,8 @@ jobs:
         run: rustup toolchain install 1.97.1 --profile minimal
       - name: Check all targets
         run: cargo check --workspace --all-targets --locked
+      - name: Verify native-shell task corpus
+        run: cargo run -p a3s-ash-bench --locked -- --check-task-lock benches/tasks/v1/lock.json
       - name: Test all targets
         run: cargo test --workspace --all-targets --locked
 

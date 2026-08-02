@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "manifest_sha256": "1846f33076eb953c4e4820e40f1dfc0488f13cee80b93da929fee8e9fd0ed5d1",
+  "tasks": [
+    {
+      "id": "discover-fault-markers",
+      "initial_tree_sha256": "b228d0dc836339af4f2a2d0d6e7cd98c511dafac4793846c36742bf40f59b0a7",
+      "expected_final_tree_sha256": "b228d0dc836339af4f2a2d0d6e7cd98c511dafac4793846c36742bf40f59b0a7"
+    },
+    {
+      "id": "count-build-errors",
+      "initial_tree_sha256": "607c1792858bca69215acdebd9a135d6ca0066ac3687774d8c33dd03cfabc38e",
+      "expected_final_tree_sha256": "607c1792858bca69215acdebd9a135d6ca0066ac3687774d8c33dd03cfabc38e"
+    },
+    {
+      "id": "raise-worker-limit",
+      "initial_tree_sha256": "de49f2dad6857ab686962ead80fabed6d861ce4eeba9d9ec4639d2e390ff6dd4",
+      "expected_final_tree_sha256": "66a1b5e81da18f673b8eb1f7d60c5cd688e885b22767cf0b66783ccdcd3d6633"
+    }
+  ]
+}
