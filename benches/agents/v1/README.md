@@ -42,7 +42,8 @@ e:policy-rejected
 For the native arm, every attempt is a `request` whose `model_output` is a
 script for `sh` on Linux/macOS or non-interactive PowerShell on Windows. The
 runner clears the child environment, restores only the platform variables
-needed to find and start tools, and returns this exact normalized envelope:
+needed to find and start tools (including Windows system-module discovery),
+and returns this exact normalized envelope:
 
 ```text
 exit:<code|signal|timeout|output-limit>

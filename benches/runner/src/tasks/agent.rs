@@ -1207,6 +1207,11 @@ async fn run_native_agent_command(
         "PATHEXT",
         "TEMP",
         "TMP",
+        "PSModulePath",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "ProgramData",
     ] {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
