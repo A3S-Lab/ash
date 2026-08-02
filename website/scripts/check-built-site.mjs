@@ -83,6 +83,8 @@ const homepages = {
     '字段注释',
     '07-project.ason',
     '×64#2',
+    '⋯18',
+    'running 180 tests',
     'CANONICAL ASON',
     'A3S-Lab/ash/main/install.sh',
   ],
@@ -101,6 +103,8 @@ const homepages = {
     'Field notes',
     '07-project.ason',
     '×64#2',
+    '⋯18',
+    'running 180 tests',
     'CANONICAL ASON',
     'A3S-Lab/ash/main/install.sh',
   ],
@@ -112,8 +116,8 @@ const homepages = {
     'V0.1.0 · SOURCE CHECKPOINT',
     'd8756614ad6a54128336f50a6a52fcb6f92d1305',
   ],
-  'guide/benchmarks.html': ['schema 11', '十七个场景', '×N#K'],
-  'en/guide/benchmarks.html': ['Schema 11', 'seventeen scenarios', '×N#K'],
+  'guide/benchmarks.html': ['schema 12', '十八个场景', '×N#K', '⋯N'],
+  'en/guide/benchmarks.html': ['Schema 12', 'eighteen scenarios', '×N#K', '⋯N'],
 };
 
 for (const [homepage, markers] of Object.entries(homepages)) {

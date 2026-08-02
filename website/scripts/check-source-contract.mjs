@@ -143,7 +143,7 @@ for (const command of [unixCommand, windowsCommand, cargoCommand]) {
   requireIncludes(switcher, command, 'Homepage install switcher');
 }
 
-requireIncludes(home, "metricTestsValue: '174'", 'Homepage evidence');
+requireIncludes(home, "metricTestsValue: '180'", 'Homepage evidence');
 requireIncludes(
   home,
   `metricTokenValue: '${report.gates.ason_vs_record_json_cl100k_percent}%'`,
@@ -184,15 +184,16 @@ if (!report.formula_algebra.gates.passed) {
   throw new Error('The checked formula algebra gate must pass.');
 }
 if (
-  report.schema !== 4 ||
+  report.schema !== 5 ||
   !report.repeated_line_reduction?.gates?.passed ||
-  !report.repeated_block_reduction?.gates?.passed
+  !report.repeated_block_reduction?.gates?.passed ||
+  !report.error_focus_reduction?.gates?.passed
 ) {
-  throw new Error('The checked repetition token gates must pass.');
+  throw new Error('The checked output-reduction token gates must pass.');
 }
 
 for (const marker of [
-  'schema: 11',
+  'schema: 12',
   '"list-recursive"',
   '"search-literal"',
   '"search-regex"',
@@ -201,6 +202,7 @@ for (const marker of [
   'reducer::measure_structured_projection_scenario(',
   'reducer::measure_repeated_line_scenario(&config)',
   'reducer::measure_repeated_block_scenario(&config)',
+  'reducer::measure_error_focus_scenario(&config)',
   'primitives::measure_path_dictionary_scenario(&config)',
   'primitives::measure_dag_scenario(nodes, id, &config)',
 ]) {
@@ -210,12 +212,15 @@ for (const marker of [
   '"ref-project-structured"',
   '"reduce-repeated-lines"',
   '"reduce-repeated-blocks"',
+  '"reduce-error-focused"',
   'const ROWS_PER_FIXTURE_FILE: usize = 64',
   'const REPEATED_LINES_PER_FIXTURE_FILE: usize = 512',
   'const REPEATED_BLOCK_LINES: usize = 8',
   'const REPEATED_BLOCK_REPETITIONS: usize = 64',
+  'const ERROR_FOCUS_LINES_PER_GROUP: usize = 512',
   'pool.install(|| collapse_repeated_lines(&workload.input))',
   'pool.install(|| collapse_repeated_blocks(&workload.input))',
+  'pool.install(|| focus_error_output(&workload.input))',
   'validate_response(&response, workload, reference)',
   'runtime_run(',
 ]) {
@@ -239,14 +244,24 @@ for (const marker of [
   'candidate_is_exact(layout, start, candidate)',
   '(1..repetitions).into_par_iter().all(matches)',
   'format!("{REPEAT_SYMBOL}{repetitions}#{block_lines}\\n")',
+  "const OMISSION_SYMBOL: char = '⋯';",
+  'const ERROR_CONTEXT_BEFORE: usize = 2',
+  'const ERROR_CONTEXT_AFTER: usize = 6',
+  'pub fn focus_error_output(text: &str)',
+  '.map(|line| is_diagnostic_anchor(layout.line(line)))',
+  'if omission_marker_len(lines) < source_bytes',
+  'format!("{OMISSION_SYMBOL}{lines}\\n")',
 ]) {
-  requireIncludes(repetitionReducer, marker, 'Repetition reducer');
+  requireIncludes(repetitionReducer, marker, 'Output reducer');
 }
 for (const marker of [
   'let line_reduction = collapse_repeated_lines(&normalized_text);',
   'let block_reduction = collapse_repeated_blocks(line_reduction.text());',
+  'let error_reduction = focus_error_output(block_reduction.text());',
+  'success: false',
   'let finalizing = matches!(stop, Stop::TimedOut | Stop::Cancelled);',
-  '.run(move || project_captures(',
+  '.run(move || {',
+  'project_captures(',
 ]) {
   requireIncludes(execOperation, marker, 'Exec compute-plane projection');
 }
@@ -262,10 +277,14 @@ for (const marker of [
   requireIncludes(runtimePrimitives, marker, 'Runtime primitive benchmark');
 }
 for (const [document, markers, label] of [
-  [benchmarkZh, ['schema 11', '十七个场景'], 'Chinese benchmark documentation'],
+  [
+    benchmarkZh,
+    ['schema 12', '十八个场景', '⋯N'],
+    'Chinese benchmark documentation',
+  ],
   [
     benchmarkEn,
-    ['Schema 11', 'seventeen scenarios'],
+    ['Schema 12', 'eighteen scenarios', '⋯N'],
     'English benchmark documentation',
   ],
 ]) {
@@ -273,10 +292,12 @@ for (const [document, markers, label] of [
 }
 for (const marker of [
   '×64#2',
+  '⋯18',
+  'e{c,q,p,x,a}:',
   'z:11',
-  "tags: ['o:x', 'argv', '×N#K', 'retained']",
+  "tags: ['o:x', 'argv', '×N#K', '⋯N', 'retained']",
 ]) {
-  requireIncludes(commandWalkthrough, marker, 'Repeated-block command tour');
+  requireIncludes(commandWalkthrough, marker, 'Output-reduction command tour');
 }
 
 for (const marker of [

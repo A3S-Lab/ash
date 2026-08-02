@@ -263,8 +263,8 @@ const steps: WalkthroughStep[] = [
       en: 'Program, arguments, working directory, and environment are encoded separately. There is no quoting ambiguity or accidental second command.',
     },
     shellComment: {
-      zh: '执行 cargo test --locked；重复诊断块先投影为 ×N#K',
-      en: 'Run cargo test --locked; repeated diagnostic blocks project to ×N#K',
+      zh: '执行 cargo test --locked；失败日志只返回错误窗口与数学省略标记',
+      en: 'Run cargo test --locked; a failure returns error windows and math omission markers',
     },
     annotations: [
       {
@@ -280,11 +280,15 @@ const steps: WalkthroughStep[] = [
         en: '`×64#2` means the preceding two-line block occurred 64 times; only one copy remains inline.',
       },
       {
-        zh: '完整 stdout 保留为 `@12`；投影只减少模型上下文，不丢失原始测试证据。',
-        en: 'Complete stdout remains at `@12`; projection reduces model context without losing test evidence.',
+        zh: '`⋯18` 表示省略 18 行非诊断输出；错误前两行、后六行和流首尾固定保留。',
+        en: '`⋯18` omits 18 non-diagnostic lines; two lines before, six after, and both stream edges stay inline.',
+      },
+      {
+        zh: '完整 stderr 保留为 `@12`；`⋯N` 只减少模型上下文，不丢失原始测试证据。',
+        en: 'Complete stderr remains at `@12`; `⋯N` reduces model context without losing original test evidence.',
       },
     ],
-    tags: ['o:x', 'argv', '×N#K', 'retained'],
+    tags: ['o:x', 'argv', '×N#K', '⋯N', 'retained'],
     request: [
       't:1',
       'i:18',
@@ -298,13 +302,15 @@ const steps: WalkthroughStep[] = [
     result: [
       't:3',
       'i:18',
-      's:0',
+      's:5',
       'd{k,c,ms,o,e,ro,re}:',
-      '0,0,842,"compile crate-a\\nlink crate-a\\n×64#2\\ntest result: ok",~,@12,~',
+      '0,101,842,~,"cargo test --locked\\nrunning 180 tests\\n⋯18\\nerror[E0609]: no field `missing`\\n --> src/lib.rs:42:9\\ncompile crate-a\\nlink crate-a\\n×64#2\\ndetail: field unavailable\\nhelp: inspect schema\\n⋯24\\ntest result: FAILED\\nfinished",~,@12',
+      'e{c,q,p,x,a}:',
+      '401,0,4,~,~',
       'z:11',
       'r:~',
     ],
-    resultFocus: [3, 4, 5],
+    resultFocus: [2, 3, 4, 5, 6, 7],
   },
   {
     id: 'snapshot',

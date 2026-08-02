@@ -70,6 +70,16 @@ checks enter Rayon, but every omitted block is finally byte-equal to the retaine
 block. Hash collisions and worker count cannot alter the result, and the exact
 source reference remains authoritative.
 
+For an unsuccessful native exit (nonzero code or signal), a third pass focuses complete UTF-8 stdout and stderr on
+diagnostics. It keeps the first and last two lines plus two lines before and six
+after every stable error anchor. Each remaining byte-saving gap becomes `⋯N`,
+where `N` is its logical-line count. ASCII diagnostic terms are matched as whole
+terms; identifiers such as `TypeError` and `IOException` use exact `Error` or
+`Exception` suffixes. Classification may enter Rayon, but window union and
+encoding remain source-ordered. No anchor means no reduction. Successful exits,
+timeouts, cancellations, opaque bytes, and disk-backed samples keep the existing
+path, while every reduced failure stream retains its exact source reference.
+
 Every spool carries a versioned owner marker and a lifetime lock. A later
 process reclaims it only after one hour, only when no active lock remains, and
 only when every entry is recognized; uncertain roots are never modified.

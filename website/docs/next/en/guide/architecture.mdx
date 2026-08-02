@@ -77,10 +77,12 @@ request.
 
 After process pipes drain, UTF-8 projection also enters this fixed pool:
 consecutive repeated lines collapse into `×N`, and repeated `K`-line blocks into
-`×N#K`, before the output budget is applied. Candidate and verification results
-merge in stable source order. Timeout or cancellation finalization uses the same
-bounded pool without letting an already-cancelled request permit suppress typed
-termination evidence.
+`×N#K`. Unsuccessful native exits then retain fixed diagnostic windows and replace only
+byte-saving gaps with `⋯N` before the output budget is applied. Classification,
+candidate, and verification work may run concurrently; results merge in stable
+source order. Timeout or cancellation finalization uses the same bounded pool
+without letting an already-cancelled request permit suppress typed termination
+evidence.
 
 ### Hierarchical governor
 
