@@ -22,6 +22,7 @@ use tempfile::TempDir;
 mod cold;
 mod dispatch;
 mod primitives;
+mod reducer;
 
 const DEFAULT_FILES: usize = 256;
 const DEFAULT_BYTES_PER_FILE: usize = 32 * 1024;
@@ -405,7 +406,7 @@ async fn runtime_report_with_config(
     let workspace_text = fixture.directory.path().to_string_lossy().into_owned();
     let process_fixture = prepare_process_fixture()?;
     let cold_fixture = cold::prepare_fixture(ash_binary, &process_fixture)?;
-    let mut scenarios = Vec::with_capacity(Scenario::ALL.len() + 10);
+    let mut scenarios = Vec::with_capacity(Scenario::ALL.len() + 11);
     for scenario in Scenario::ALL {
         scenarios.push(
             measure_scenario(
@@ -426,12 +427,16 @@ async fn runtime_report_with_config(
     scenarios.push(measure_process_capture_scenario(&process_fixture, &config).await?);
     scenarios.push(measure_process_cancel_scenario(&process_fixture, &config).await?);
     scenarios.push(dispatch::measure_rpc_dispatch_scenario(&workspace_text, &config).await?);
+    scenarios.push(
+        reducer::measure_structured_projection_scenario(&operations, &workspace_text, &config)
+            .await?,
+    );
     scenarios.push(primitives::measure_path_dictionary_scenario(&config)?);
     for (nodes, id) in primitives::DAG_SCENARIOS {
         scenarios.push(primitives::measure_dag_scenario(nodes, id, &config).await?);
     }
     Ok(RuntimeReport {
-        schema: 8,
+        schema: 9,
         host: HostReport {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
@@ -1303,11 +1308,11 @@ mod tests {
         .await
         .expect("runtime report");
 
-        assert_eq!(report.schema, 8);
+        assert_eq!(report.schema, 9);
         assert_eq!(report.fixture.files, 8);
         assert_eq!(report.fixture.bytes, 8 * 4 * 1024);
         assert_eq!(report.samples, 2);
-        assert_eq!(report.scenarios.len(), 14);
+        assert_eq!(report.scenarios.len(), 15);
         for scenario in &report.scenarios {
             assert!(scenario.output_bytes > 0);
             for run in &scenario.runs {
@@ -1322,7 +1327,7 @@ mod tests {
             .iter()
             .filter(|scenario| scenario.runs[0].speedup_basis_points.is_some())
             .collect::<Vec<_>>();
-        assert_eq!(scaled.len(), 9);
+        assert_eq!(scaled.len(), 10);
         for scenario in scaled {
             assert_eq!(scenario.runs.len(), 2);
             assert_eq!(scenario.runs[0].compute_workers, 1);
@@ -1405,7 +1410,13 @@ mod tests {
         assert_eq!(dispatch.work_items, 1);
         assert!(dispatch.work_bytes > 0);
 
-        let primitives = &report.scenarios[10..];
+        let reducer = &report.scenarios[10];
+        assert_eq!(reducer.id, "ref-project-structured");
+        assert_eq!(reducer.work_items, 8 * 64);
+        assert!(reducer.work_bytes > 0);
+        assert_eq!(reducer.runs.len(), 2);
+
+        let primitives = &report.scenarios[11..];
         assert_eq!(
             primitives
                 .iter()

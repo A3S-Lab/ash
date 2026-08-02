@@ -13,6 +13,7 @@ use ash_protocol::response::{
     Status,
 };
 use ash_store::ResultLease;
+use rayon::prelude::*;
 use regex::{Regex, RegexBuilder};
 
 use crate::OperationError;
@@ -167,13 +168,16 @@ fn project_ason(
         .min(source.rows().len());
     let requested = usize::try_from(length).unwrap_or(usize::MAX);
     let end = start.saturating_add(requested).min(source.rows().len());
-    let mut rows = Vec::with_capacity(end.saturating_sub(start));
-    for (index, row) in source.rows()[start..end].iter().enumerate() {
-        if index % 4096 == 0 && cancellation.is_cancelled() {
-            return Err(OperationError::Cancelled);
-        }
-        rows.push(indexes.iter().map(|index| row[*index].clone()).collect());
-    }
+    let rows = source.rows()[start..end]
+        .par_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if index % 4096 == 0 && cancellation.is_cancelled() {
+                return Err(OperationError::Cancelled);
+            }
+            Ok(indexes.iter().map(|index| row[*index].clone()).collect())
+        })
+        .collect::<Result<Vec<_>, OperationError>>()?;
     Ok(Table::new(columns, rows)?)
 }
 
