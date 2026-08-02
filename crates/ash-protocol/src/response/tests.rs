@@ -74,7 +74,6 @@ fn every_core_result_shape_encodes_as_canonical_ason() {
             path: 1,
             kind: FileKind::File,
             size: 4,
-            modified_millis: None,
         }]),
         ResultData::Search(vec![]),
         ResultData::Patch(vec![PatchResult {

@@ -808,7 +808,7 @@ async fn read_list_and_search_execute_through_one_session() {
         .encode();
     assert!(!response.contains("src/a.rs"));
     assert!(response.contains("p[1]{i,v}:\n2,src/b.rs\n"));
-    assert!(response.contains("d[2]{p,k,z,m}:"));
+    assert!(response.contains("d[2]{p,k,z}:"));
     drop(program);
 
     let search = Request::new(

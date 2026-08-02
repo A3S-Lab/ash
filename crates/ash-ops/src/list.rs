@@ -132,7 +132,6 @@ fn result_entry(entry: &NativeEntry, path: u64) -> ListEntry {
             EntryKind::Other => FileKind::Other,
         },
         size: entry.size,
-        modified_millis: entry.modified_millis,
     }
 }
 
@@ -154,10 +153,6 @@ fn encode_evidence(entries: &[NativeEntry]) -> Result<Vec<u8>, OperationError> {
                 Cell::Atom(Atom::text(&entry.logical)),
                 Cell::Atom(Atom::text((result_entry(entry, 1).kind as u8).to_string())),
                 Cell::Atom(Atom::text(entry.size.to_string())),
-                entry.modified_millis.map_or_else(
-                    || Cell::Atom(Atom::Null),
-                    |value| Cell::Atom(Atom::text(value.to_string())),
-                ),
             ]
         })
         .collect();
@@ -166,7 +161,7 @@ fn encode_evidence(entries: &[NativeEntry]) -> Result<Vec<u8>, OperationError> {
         Field::new(
             Key::new("d")?,
             Value::Table(Table::new(
-                ["p", "k", "z", "m"]
+                ["p", "k", "z"]
                     .into_iter()
                     .map(Key::new)
                     .collect::<Result<_, _>>()?,

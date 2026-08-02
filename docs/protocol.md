@@ -358,7 +358,7 @@ Core result data uses these schemas; reference projection intentionally substitu
 | --- | --- | --- |
 | `x` | `d{k,c,ms,o,e,ro,re}:` | termination kind, code, elapsed ms, stdout/stderr projections, stdout/stderr references |
 | `r` | `d[N]{p,o,n,h,t,r}:` | path ID, actual offset and length, BLAKE3 digest, text projection, retained reference |
-| `l` | `d[N]{p,k,z,m}:` | path ID, file kind, byte size, optional modified Unix milliseconds |
+| `l` | `d[N]{p,k,z}:` | path ID, file kind, byte size |
 | `g` | `d[N]{p,l,c,t}:` | path ID, one-based line and column, matching line projection |
 | `p` | `d[N]{p,s,h}:` | path ID, mutation state, resulting or observed BLAKE3 digest when known |
 | `f` | `d[N]{i,k,p,q,s,h}:` | action ID, action kind, path ID, optional destination path ID, action state, resulting or observed digest |
@@ -366,6 +366,8 @@ Core result data uses these schemas; reference projection intentionally substitu
 | `s` | `d[N]{p,c,k,z,h}:` | path ID, change kind, file kind, byte size, optional BLAKE3 digest |
 | `/ # ? - \| >` | `d{o,n,p,h,t,b}:`, `d[N]{o,l,c,t}:`, `d[N]{C...}:`, `d{p,s,z,h}:`, or `d{r,z}:` | byte/line slice, search, release, projection, or materialization selected directly by the request symbol |
 | `k` | `d{i,z}:` | target request identifier and cancellation state |
+
+List results deliberately exclude host modification timestamps. They are not content identity, vary when an identical locked fixture is copied, and would spend model context on non-replayable evidence; snapshots and digests carry deterministic change identity instead.
 
 Null (`~`) omits an unavailable projection, code, timestamp, or reference. Result flag bits are 0 truncated, 1 reduced, 2 normalized text, 3 retained evidence, 4 partial completion, and 5 redacted. Unknown bits are invalid. Any truncated, repetition-reduced, or normalized process result must retain inspectable source evidence, and the retained flag must agree with the references actually present.
 

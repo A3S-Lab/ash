@@ -1478,12 +1478,46 @@ mod tests {
         DriverMetadata, INVALID_REQUEST_RESULT, ModelMetadata, NativeProcessOutput, PrimerSet,
         ProviderUsage, build_agent_report, native_tool_result, normalize_agent_stream,
         parse_agent_request, ratio_percent_u64, replay_ash_task, replay_native_task,
-        valid_timestamp, validate_trace,
+        run_native_agent_command, valid_timestamp, validate_trace,
     };
     use crate::tasks::{
-        LOCK_BYTES, MANIFEST_BYTES, execute_ash_task, execute_native_task, load_lock,
-        load_manifest, sha256_hex,
+        LOCK_BYTES, MANIFEST_BYTES, TaskDefinition, copy_workspace, execute_ash_task, fixture_path,
+        load_lock, load_manifest, sha256_hex,
     };
+
+    async fn capture_native_result(task: &TaskDefinition) -> String {
+        let fixture = fixture_path(&task.workspace).expect("native fixture");
+        let directory = tempfile::TempDir::new().expect("native capture workspace");
+        copy_workspace(&fixture, directory.path()).expect("copy native fixture");
+        let baseline = task.baselines.current().expect("platform baseline");
+        let output = run_native_agent_command(
+            directory.path(),
+            &baseline.script,
+            task.limits.output_bytes,
+            task.limits.millis,
+        )
+        .await
+        .expect("isolated native capture");
+        let stdout = normalize_agent_stream(&output.stdout);
+        let stderr = normalize_agent_stream(&output.stderr);
+        assert!(
+            !output.timed_out && !output.output_exceeded && output.exit_code == Some(0),
+            "isolated native capture failed for {}: exit={:?}, stdout={stdout:?}, stderr={stderr:?}",
+            task.id,
+            output.exit_code
+        );
+        assert_eq!(
+            stdout, task.expected.stdout,
+            "native stdout for {}",
+            task.id
+        );
+        assert_eq!(
+            stderr, task.expected.stderr,
+            "native stderr for {}",
+            task.id
+        );
+        native_tool_result(&output)
+    }
 
     fn usage() -> ProviderUsage {
         ProviderUsage {
@@ -1609,9 +1643,7 @@ mod tests {
         let ash = execute_ash_task(task)
             .await
             .expect("deterministic ASH plan");
-        let native = execute_native_task(task)
-            .await
-            .expect("deterministic native plan");
+        let native_result = capture_native_result(task).await;
         let ash_trace = AgentTaskTrace {
             id: task.id.clone(),
             attempts: vec![
@@ -1633,14 +1665,6 @@ mod tests {
             finish_elapsed_millis: 1,
             usage: usage(),
         };
-        let native_result = native_tool_result(&NativeProcessOutput {
-            exit_code: Some(0),
-            stdout: native.stdout,
-            stderr: native.stderr,
-            timed_out: false,
-            output_exceeded: false,
-            elapsed_ns: 1,
-        });
         let native_trace = AgentTaskTrace {
             id: task.id.clone(),
             attempts: vec![AgentAttemptTrace {
@@ -1700,17 +1724,7 @@ mod tests {
                 finish_elapsed_millis: 1,
                 usage: usage(),
             });
-            let native = execute_native_task(task)
-                .await
-                .expect("native fixture trace");
-            let result = native_tool_result(&NativeProcessOutput {
-                exit_code: Some(0),
-                stdout: native.stdout,
-                stderr: native.stderr,
-                timed_out: false,
-                output_exceeded: false,
-                elapsed_ns: 1,
-            });
+            let result = capture_native_result(task).await;
             native_tasks.push(AgentTaskTrace {
                 id: task.id.clone(),
                 attempts: vec![AgentAttemptTrace {

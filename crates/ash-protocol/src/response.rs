@@ -19,7 +19,7 @@ pub const ALL_RESULT_FLAGS: u32 = (1 << 6) - 1;
 const PATH_COLUMNS: &[&str] = &["i", "v"];
 const EXEC_COLUMNS: &[&str] = &["k", "c", "ms", "o", "e", "ro", "re"];
 const READ_COLUMNS: &[&str] = &["p", "o", "n", "h", "t", "r"];
-const LIST_COLUMNS: &[&str] = &["p", "k", "z", "m"];
+const LIST_COLUMNS: &[&str] = &["p", "k", "z"];
 const SEARCH_COLUMNS: &[&str] = &["p", "l", "c", "t"];
 const PATCH_COLUMNS: &[&str] = &["p", "s", "h"];
 const FS_COLUMNS: &[&str] = &["i", "k", "p", "q", "s", "h"];
@@ -802,7 +802,6 @@ pub struct ListEntry {
     pub path: u64,
     pub kind: FileKind,
     pub size: u64,
-    pub modified_millis: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -954,7 +953,6 @@ fn encode_list(entries: &[ListEntry]) -> Result<Value, BuildError> {
                 unsigned_cell(entry.path),
                 unsigned_cell(u64::from(entry.kind as u8)),
                 unsigned_cell(entry.size),
-                optional_signed(entry.modified_millis),
             ]
         })
         .collect();
