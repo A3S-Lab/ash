@@ -33,8 +33,13 @@ jobs:
           set -euo pipefail
           cargo fmt --all -- --check
           cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
-      - name: Check fuzz target compilation
-        run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
+      - name: Check and test fuzz harnesses
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --manifest-path fuzz/Cargo.toml --bins --locked
+          cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+          cargo test --manifest-path fuzz/Cargo.toml --locked
       - name: Check third-party license inventory
         shell: pwsh
         run: ./scripts/check-third-party-licenses.ps1

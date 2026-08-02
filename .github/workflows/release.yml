@@ -89,6 +89,8 @@ jobs:
         run: |
           cargo +1.97.1 fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.97.1 fmt --manifest-path fuzz/Cargo.toml --all -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/check-third-party-licenses.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo +1.97.1 run -p a3s-ash-bench --release --locked -- --check benches/reports/v0.1.0/format.json
@@ -99,17 +101,21 @@ jobs:
           set -euo pipefail
           cargo +1.97.1 clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo +1.97.1 test --workspace --all-targets --locked
+          cargo +1.97.1 clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+          cargo +1.97.1 test --manifest-path fuzz/Cargo.toml --locked
       - name: Run bounded protocol and metadata fuzz smoke
         shell: bash
         run: |
           set -euo pipefail
           cargo install cargo-fuzz --version 0.13.2 --locked
           cargo +nightly-2026-07-31 fuzz run ason_decode fuzz/corpus/ason_decode -- \
-            -runs=1000 -max_len=65536 -rss_limit_mb=2048
+            -runs=1000 -max_len=65536 -rss_limit_mb=2048 -timeout=5
           cargo +nightly-2026-07-31 fuzz run frame_decode fuzz/corpus/frame_decode -- \
-            -runs=1000 -max_len=65536 -rss_limit_mb=2048
+            -runs=1000 -max_len=65536 -rss_limit_mb=2048 -timeout=5
           cargo +nightly-2026-07-31 fuzz run update_metadata fuzz/corpus/update_metadata -- \
-            -runs=1000 -max_len=65536 -rss_limit_mb=2048
+            -runs=1000 -max_len=65536 -rss_limit_mb=2048 -timeout=5
+          cargo +nightly-2026-07-31 fuzz run signed_update_metadata fuzz/corpus/signed_update_metadata -- \
+            -runs=1000 -max_len=65536 -rss_limit_mb=2048 -timeout=5
 
   build:
     name: Build and sign ${{ matrix.target }}

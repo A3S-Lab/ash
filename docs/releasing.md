@@ -89,6 +89,8 @@ cargo clippy -p a3s-ash-release --all-targets --locked -- -D warnings
 
 Normal CI compiles and tests this tooling but never receives release secrets. The release workflow and every third-party action are pinned to exact commits.
 
+The release quality job runs 1,000 deterministic cases for each checked-in fuzz corpus: ASON decoding, framed typed decoding, arbitrary update metadata, and validly signed update semantics. This is independent of the twice-weekly sustained workflow, whose evolving corpora and 90-day evidence bundles are documented in [`fuzz/README.md`](../fuzz/README.md). A release reviewer must inspect the accumulated run summaries and every retained finding; a green 1,000-case tag gate does not replace soak evidence.
+
 ## 5. Failure and recovery
 
 - Failure before draft creation leaves only short-lived workflow artifacts. Fix code or credentials, delete no source tag, and use controlled dispatch against the same tag only when the source commit is unchanged.

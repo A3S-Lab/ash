@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 ash-protocol = { package = "a3s-ash-protocol", path = "../crates/ash-protocol" }
 ash-update = { package = "a3s-ash-update", path = "../crates/ash-update" }
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["fast", "zeroize"] }
 libfuzzer-sys = "0.4.13"
 
 [[bin]]
@@ -22,6 +23,13 @@ bench = false
 [[bin]]
 name = "update_metadata"
 path = "fuzz_targets/update_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signed_update_metadata"
+path = "fuzz_targets/signed_update_metadata.rs"
 test = false
 doc = false
 bench = false

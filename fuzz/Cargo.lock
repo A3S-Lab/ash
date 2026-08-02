@@ -45,6 +45,7 @@ version = "0.0.0"
 dependencies = [
  "a3s-ash-protocol",
  "a3s-ash-update",
+ "ed25519-dalek",
  "libfuzzer-sys",
 ]
 

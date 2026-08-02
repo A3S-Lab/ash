@@ -2,8 +2,15 @@ name: Fuzz
 
 on:
   schedule:
-    - cron: "17 3 * * 1"
+    - cron: "17 3 * * 1,4"
   workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target
+        required: true
+        type: choice
+        default: "60"
+        options: ["60", "600", "1800"]
 
 permissions:
   contents: read
@@ -19,21 +26,89 @@ env:
 jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        target: [ason_decode, frame_decode, update_metadata]
+        target: [ason_decode, frame_decode, update_metadata, signed_update_metadata]
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore evolving fuzz corpus
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ runner.temp }}/ash-fuzz-corpus/${{ matrix.target }}
+          key: ash-fuzz-corpus-v1-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ash-fuzz-corpus-v1-${{ matrix.target }}-
+      - name: Merge checked-in regression seeds
+        shell: bash
+        env:
+          FUZZ_CORPUS: ${{ runner.temp }}/ash-fuzz-corpus/${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$FUZZ_CORPUS"
+          cp -a "fuzz/corpus/${{ matrix.target }}/." "$FUZZ_CORPUS/"
       - name: Install pinned nightly Rust
         run: rustup toolchain install nightly-2026-07-31 --profile minimal
       - name: Install pinned cargo-fuzz
         run: cargo install cargo-fuzz --version 0.13.2 --locked
-      - name: Run bounded fuzz target
+      - name: Run bounded fuzz target and bind evidence
+        shell: pwsh
+        env:
+          FUZZ_SECONDS: ${{ inputs.seconds || '600' }}
         run: >-
-          cargo +nightly-2026-07-31 fuzz run ${{ matrix.target }}
-          fuzz/corpus/${{ matrix.target }} --
-          -max_total_time=60 -max_len=65536 -rss_limit_mb=2048
+          ./scripts/run-fuzz-evidence.ps1
+          -Target '${{ matrix.target }}'
+          -MaxTotalTime $env:FUZZ_SECONDS
+          -CorpusSource '${{ runner.temp }}/ash-fuzz-corpus/${{ matrix.target }}'
+          -EvidenceRoot '${{ runner.temp }}/ash-fuzz'
+      - name: Stage evolved corpus for the next run
+        shell: bash
+        env:
+          FUZZ_CORPUS: ${{ runner.temp }}/ash-fuzz-corpus/${{ matrix.target }}
+          FUZZ_RESULT: ${{ runner.temp }}/ash-fuzz/${{ matrix.target }}/corpus
+        run: |
+          set -euo pipefail
+          cp -a "$FUZZ_RESULT/." "$FUZZ_CORPUS/"
+      - name: Summarize fuzz evidence
+        if: always()
+        shell: pwsh
+        env:
+          FUZZ_SUMMARY: ${{ runner.temp }}/ash-fuzz/${{ matrix.target }}/summary.json
+        run: |
+          if (-not (Test-Path -LiteralPath $env:FUZZ_SUMMARY)) {
+            "### ${{ matrix.target }}`n`nNo valid summary was produced." >> $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+          $evidence = Get-Content -LiteralPath $env:FUZZ_SUMMARY -Raw | ConvertFrom-Json
+          $units = $evidence.statistics.number_of_executed_units
+          $rate = $evidence.statistics.average_exec_per_sec
+          @(
+            "### ${{ matrix.target }}",
+            '',
+            '| status | seed | executions | average exec/s | corpus | findings | log SHA-256 |',
+            '| --- | ---: | ---: | ---: | ---: | ---: | --- |',
+            "| $($evidence.status) | $($evidence.seed) | $units | $rate | $($evidence.corpus.Count) | $($evidence.artifacts.Count) | ``$($evidence.log_sha256)`` |"
+          ) >> $env:GITHUB_STEP_SUMMARY
+      - name: Upload fuzz evidence
+        id: evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-${{ matrix.target }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ash-fuzz/${{ matrix.target }}
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 90
+      - name: Bind uploaded artifact digest
+        if: always() && steps.evidence.outcome == 'success'
+        shell: pwsh
+        run: |
+          @(
+            '',
+            "Artifact: [fuzz evidence](${{ steps.evidence.outputs.artifact-url }})",
+            '',
+            "Artifact SHA-256: ``${{ steps.evidence.outputs.artifact-digest }}``"
+          ) >> $env:GITHUB_STEP_SUMMARY
