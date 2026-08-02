@@ -1,130 +1,160 @@
 import { useEffect, useRef, useState } from 'react';
 
 type Locale = 'zh' | 'en';
-type WorkStatus = 'pending' | 'running' | 'complete';
 
-const phases = [
-  'request',
-  'govern',
-  'parallel',
-  'permit',
-  'evidence',
-  'recover',
-  'done',
-] as const;
-type Phase = (typeof phases)[number];
+type Phase = 'search' | 'read' | 'batch' | 'patch' | 'test' | 'project';
+
+type Localized = {
+  zh: string;
+  en: string;
+};
+
+type DemoTask = {
+  id: Phase;
+  opcode: string;
+  command: string;
+  title: Localized;
+  comment: Localized;
+  request: string[];
+  result: string;
+};
+
+const tasks: DemoTask[] = [
+  {
+    id: 'search',
+    opcode: 'g',
+    command: 'ash run < .ash/01-search.ason',
+    title: { zh: '搜索命中', en: 'Search hits' },
+    comment: {
+      zh: '只返回相关行；路径只编码一次',
+      en: 'Return matching lines; encode each path once',
+    },
+    request: ['o:g', 'a{q,p,f}:', 'TODO,[src],0'],
+    result: '2 hits · 1 path · 38 tok',
+  },
+  {
+    id: 'read',
+    opcode: 'r',
+    command: 'ash run < .ash/02-read.ason',
+    title: { zh: '读取行窗', en: 'Read window' },
+    comment: {
+      zh: '只读取决策所需的 80 行',
+      en: 'Read only the 80 lines needed for the decision',
+    },
+    request: ['o:r', 'a{p,m,o,n}:', '[src/lib.rs],1,1,80'],
+    result: '80 lines · digest=aaaaaaaa…',
+  },
+  {
+    id: 'batch',
+    opcode: 'b',
+    command: 'ash run < .ash/03-batch.ason',
+    title: { zh: '并行批处理', en: 'Parallel batch' },
+    comment: {
+      zh: '独立节点并发，结果按节点编号归并',
+      en: 'Run independent nodes concurrently; merge by node id',
+    },
+    request: ['o:b', 'a[2]{i,d,o,a}:', '1,[],g,…', '2,[1],r,…'],
+    result: 'node 1 → @4 · node 2 → @5',
+  },
+  {
+    id: 'patch',
+    opcode: 'p',
+    command: 'ash run < .ash/04-patch.ason',
+    title: { zh: '摘要保护补丁', en: 'Digest-guarded patch' },
+    comment: {
+      zh: '前置摘要不匹配就返回冲突',
+      en: 'Return a conflict when the preimage digest changed',
+    },
+    request: ['o:p', 'a{p,h,i,o,n,v,f}:', '[src/lib.rs],[aaaa…],…'],
+    result: 'committed · digest=bbbbbbbb…',
+  },
+  {
+    id: 'test',
+    opcode: 'x',
+    command: 'ash run < .ash/05-test.ason',
+    title: { zh: '运行回归测试', en: 'Run regression tests' },
+    comment: {
+      zh: 'argv 独立编码；取消传到整个进程树',
+      en: 'Encode argv separately; cancellation reaches the process tree',
+    },
+    request: ['o:x', 'a{x,v,c,e,in,f}:', 'cargo,[test,--locked],.,[],~,0'],
+    result: 'exit=0 · 842 ms · test result: ok',
+  },
+  {
+    id: 'project',
+    opcode: 'h',
+    command: 'ash run < .ash/07-project.ason',
+    title: { zh: '投影最终证据', en: 'Project final evidence' },
+    comment: {
+      zh: '完整数据留在 @7，只取 p/l/t 三列',
+      en: 'Keep full data at @7; retrieve only p/l/t',
+    },
+    request: ['o:h', 'a{p}:', '[@7,d,0,64,p,l,t]'],
+    result: '2 rows · retained=@7 · stable',
+  },
+];
 
 const durations: Record<Phase, number> = {
-  request: 1900,
-  govern: 1800,
-  parallel: 2600,
-  permit: 2200,
-  evidence: 2800,
-  recover: 2300,
-  done: 3800,
+  search: 2200,
+  read: 2200,
+  batch: 2500,
+  patch: 2300,
+  test: 2600,
+  project: 3600,
 };
 
 const copy = {
   zh: {
-    aria: 'ash 终端演示：请求、预算、并行执行、Permit、ASON 与恢复',
-    session: 'ash / workspace',
-    play: '播放',
+    aria: 'ash 终端演示：搜索、读取、并行批处理、补丁、测试与结果投影',
+    session: 'ash / coding task',
+    play: '继续',
     pause: '暂停',
     replay: '重播',
-    request: '请求',
-    govern: '预算',
-    parallel: '执行',
-    permit: 'Permit',
-    evidence: 'ASON',
-    recover: '恢复',
-    done: '完成',
-    handshake: 'ASH/1 会话就绪',
-    capabilities: 'caps=read,search,batch,patch',
-    budget: '预算已接受',
-    budgetDetail: 'host / session / request',
-    graph: '执行计划',
-    graphDetail: '3 nodes · bounded',
-    read: '读取 + 列表',
-    search: '工作区搜索',
-    reduce: '哈希 + Diff 归约',
-    io: 'Tokio I/O',
-    cpu: 'Rayon CPU',
-    pending: '等待',
+    request: '规范请求',
+    result: '结果',
+    pipeline: '任务队列',
     running: '运行',
     complete: '完成',
-    permitTitle: 'Permit 已校验',
-    permitDetail: 'cap.fs.patch · digest guard · 30s',
-    evidenceTitle: 'ASON 结果',
-    evidenceDetail: '完整结果可按引用取回',
-    recoveryTitle: '进程树已关闭，事务日志干净',
-    recoveryDetail: 'process-tree=reaped · journal=clean',
-    stable: 'stable merge',
-    efficiency: '0.62× JSON',
+    pending: '等待',
+    final: '任务完成',
+    finalDetail: '6 个操作 · 1 个紧凑证据包',
   },
   en: {
-    aria: 'ash terminal demo: request, budget, parallel execution, permit, ASON, and recovery',
-    session: 'ash / workspace',
-    play: 'Play',
+    aria: 'ash terminal demo: search, read, parallel batch, patch, test, and result projection',
+    session: 'ash / coding task',
+    play: 'Resume',
     pause: 'Pause',
     replay: 'Replay',
-    request: 'Request',
-    govern: 'Budget',
-    parallel: 'Execute',
-    permit: 'Permit',
-    evidence: 'ASON',
-    recover: 'Recover',
-    done: 'Done',
-    handshake: 'ASH/1 session ready',
-    capabilities: 'caps=read,search,batch,patch',
-    budget: 'Budget accepted',
-    budgetDetail: 'host / session / request',
-    graph: 'Execution plan',
-    graphDetail: '3 nodes · bounded',
-    read: 'Read + list',
-    search: 'Search workspace',
-    reduce: 'Hash + diff reduce',
-    io: 'Tokio I/O',
-    cpu: 'Rayon CPU',
-    pending: 'pending',
+    request: 'Canonical request',
+    result: 'Result',
+    pipeline: 'Task queue',
     running: 'running',
     complete: 'done',
-    permitTitle: 'Permit checked',
-    permitDetail: 'cap.fs.patch · digest guard · 30s',
-    evidenceTitle: 'ASON result',
-    evidenceDetail: 'Full result is available by reference',
-    recoveryTitle: 'Process tree closed; journal clean',
-    recoveryDetail: 'process-tree=reaped · journal=clean',
-    stable: 'stable merge',
-    efficiency: '0.62× JSON',
+    pending: 'pending',
+    final: 'Task complete',
+    finalDetail: '6 operations · 1 compact evidence pack',
   },
 };
 
-function statusFor(activeIndex: number, rowIndex: number): WorkStatus {
-  if (activeIndex < 2) return 'pending';
-  if (activeIndex === 2 && rowIndex > 0) return 'running';
-  return 'complete';
+function localized(value: Localized, locale: Locale) {
+  return value[locale];
 }
 
 export function AshTerminalDemo({ locale }: { locale: Locale }) {
   const labels = copy[locale];
   const terminalRef = useRef<HTMLDivElement>(null);
   const hasStartedRef = useRef(false);
-  const playOnceRef = useRef(false);
-  const [activeIndex, setActiveIndex] = useState(phases.length - 1);
+  const [activeIndex, setActiveIndex] = useState(tasks.length - 1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isVisible, setIsVisible] = useState(false);
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
-  const [typedCount, setTypedCount] = useState(0);
-  const phase = phases[activeIndex] ?? phases[0];
-  const command = 'ash rpc < task.ason';
-  const typedCommand =
-    activeIndex === 0 ? command.slice(0, typedCount) : command;
+  const [typedCount, setTypedCount] = useState(
+    tasks.at(-1)?.command.length ?? 0,
+  );
+  const active = tasks[activeIndex] ?? tasks[0];
+  const phase = active.id;
   const isRunning = isPlaying && isVisible;
-  const rows = [
-    { label: labels.read, plane: labels.io, detail: '2 ops' },
-    { label: labels.search, plane: labels.cpu, detail: '8 workers' },
-    { label: labels.reduce, plane: labels.cpu, detail: 'stable key' },
-  ];
+  const typedCommand = active.command.slice(0, typedCount);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -143,8 +173,8 @@ export function AshTerminalDemo({ locale }: { locale: Locale }) {
         if (visible && !hasStartedRef.current) {
           hasStartedRef.current = true;
           if (motionPreference.matches) {
-            setActiveIndex(phases.length - 1);
-            setTypedCount(command.length);
+            setActiveIndex(tasks.length - 1);
+            setTypedCount(tasks.at(-1)?.command.length ?? 0);
           } else {
             setActiveIndex(0);
             setTypedCount(0);
@@ -163,49 +193,44 @@ export function AshTerminalDemo({ locale }: { locale: Locale }) {
     if (!isRunning) return undefined;
 
     const timer = window.setTimeout(() => {
-      if (activeIndex === phases.length - 1) {
-        if (playOnceRef.current) {
-          playOnceRef.current = false;
-          setIsPlaying(false);
-        } else {
-          setActiveIndex(0);
-          setTypedCount(0);
-        }
-      } else {
-        setActiveIndex((index) => index + 1);
+      if (activeIndex === tasks.length - 1) {
+        setIsPlaying(false);
+        return;
       }
+      setActiveIndex((index) => index + 1);
+      setTypedCount(0);
     }, durations[phase]);
 
     return () => window.clearTimeout(timer);
   }, [activeIndex, isRunning, phase]);
 
   useEffect(() => {
-    if (!isRunning || activeIndex !== 0 || typedCount >= command.length) {
-      return undefined;
-    }
+    if (!isRunning || typedCount >= active.command.length) return undefined;
 
     const timer = window.setTimeout(
       () => setTypedCount((count) => count + 1),
-      54,
+      34,
     );
     return () => window.clearTimeout(timer);
-  }, [activeIndex, command.length, isRunning, typedCount]);
+  }, [active.command.length, isRunning, typedCount]);
 
   function togglePlayback() {
+    if (prefersReducedMotion) {
+      const nextIndex = activeIndex === tasks.length - 1 ? 0 : tasks.length - 1;
+      setActiveIndex(nextIndex);
+      setTypedCount(tasks[nextIndex]?.command.length ?? 0);
+      return;
+    }
     if (isPlaying) {
       setIsPlaying(false);
       return;
     }
-
-    playOnceRef.current = prefersReducedMotion;
-    if (activeIndex === phases.length - 1) {
+    if (activeIndex === tasks.length - 1) {
       setActiveIndex(0);
       setTypedCount(0);
     }
     setIsPlaying(true);
   }
-
-  const stageLabels = phases.map((item) => labels[item]);
 
   return (
     <div
@@ -221,74 +246,79 @@ export function AshTerminalDemo({ locale }: { locale: Locale }) {
           <i />
         </span>
         <strong>{labels.session}</strong>
-        <small>{labels[phase]}</small>
+        <small>
+          o:{active.opcode} / {active.id}
+        </small>
         <button aria-pressed={isPlaying} onClick={togglePlayback} type="button">
           <i aria-hidden="true">{isPlaying ? 'Ⅱ' : '▶'}</i>
           {isPlaying
             ? labels.pause
-            : activeIndex === phases.length - 1
+            : activeIndex === tasks.length - 1
               ? labels.replay
               : labels.play}
         </button>
       </header>
 
-      <div className="ash-terminal-screen">
+      <div className="ash-terminal-screen ash-terminal-workflow">
         <div className="ash-terminal-command">
-          <span aria-hidden="true">›</span>
+          <span aria-hidden="true">$</span>
           <code>{typedCommand}</code>
           <i aria-hidden="true" />
         </div>
 
-        <div
-          aria-hidden={activeIndex < 1}
-          className={`ash-terminal-line ${activeIndex >= 1 ? 'is-visible' : ''}`}
-        >
-          <i aria-hidden="true">✓</i>
-          <span>{labels.handshake}</span>
-          <code>{labels.capabilities}</code>
-        </div>
-
-        <div
-          aria-hidden={activeIndex < 1}
-          className={`ash-terminal-budget ${activeIndex >= 1 ? 'is-visible' : ''}`}
-        >
-          <span>GOV</span>
-          <div>
-            <strong>{labels.budget}</strong>
-            <small>{labels.budgetDetail}</small>
-          </div>
-          <i aria-hidden="true">
-            <b />
-            <b />
-            <b />
-          </i>
-        </div>
-
-        <section
-          aria-hidden={activeIndex < 2}
-          className={`ash-terminal-graph ${activeIndex >= 2 ? 'is-visible' : ''}`}
-        >
+        <section className="ash-terminal-live" key={active.id}>
           <header>
-            <span>{labels.graph}</span>
-            <small>{labels.graphDetail}</small>
+            <span>
+              {String(activeIndex + 1).padStart(2, '0')} /{' '}
+              {String(tasks.length).padStart(2, '0')}
+            </span>
+            <strong>{localized(active.title, locale)}</strong>
           </header>
+          <p>
+            <span aria-hidden="true">#</span>
+            {localized(active.comment, locale)}
+          </p>
           <div>
-            {rows.map((row, index) => {
-              const status = statusFor(activeIndex, index);
+            <small>{labels.request}</small>
+            <pre>{active.request.join('\n')}</pre>
+          </div>
+          <footer>
+            <span>✓ {labels.result}</span>
+            <code>{active.result}</code>
+          </footer>
+        </section>
+
+        <section className="ash-terminal-queue">
+          <header>{labels.pipeline}</header>
+          <div>
+            {tasks.map((task, index) => {
+              const status =
+                index < activeIndex
+                  ? labels.complete
+                  : index === activeIndex
+                    ? labels.running
+                    : labels.pending;
               return (
-                <p className={`is-${status}`} key={row.label}>
+                <p
+                  className={
+                    index < activeIndex
+                      ? 'is-complete'
+                      : index === activeIndex
+                        ? 'is-active'
+                        : undefined
+                  }
+                  key={task.id}
+                >
                   <i aria-hidden="true">
-                    {status === 'complete'
+                    {index < activeIndex
                       ? '✓'
-                      : status === 'running'
+                      : index === activeIndex
                         ? '●'
                         : '○'}
                   </i>
-                  <strong>{row.label}</strong>
-                  <code>{row.plane}</code>
-                  <small>
-                    {row.detail} · {labels[status]}
-                  </small>
+                  <code>o:{task.opcode}</code>
+                  <span>{localized(task.title, locale)}</span>
+                  <small>{status}</small>
                 </p>
               );
             })}
@@ -296,58 +326,20 @@ export function AshTerminalDemo({ locale }: { locale: Locale }) {
         </section>
 
         <div
-          aria-hidden={activeIndex < 3}
-          className={`ash-terminal-permit ${activeIndex >= 3 ? 'is-visible' : ''}`}
+          className={`ash-terminal-final ${activeIndex === tasks.length - 1 ? 'is-visible' : ''}`}
         >
           <span aria-hidden="true">◆</span>
           <div>
-            <strong>{labels.permitTitle}</strong>
-            <code>{labels.permitDetail}</code>
+            <strong>{labels.final}</strong>
+            <small>{labels.finalDetail}</small>
           </div>
-          <b>ALLOW ONCE</b>
-        </div>
-
-        <div
-          aria-hidden={activeIndex < 4}
-          className={`ash-terminal-evidence ${activeIndex >= 4 ? 'is-visible' : ''}`}
-        >
-          <div>
-            <header>
-              <strong>{labels.evidenceTitle}</strong>
-              <small>{labels.evidenceDetail}</small>
-            </header>
-            <pre>{`r{p,l,c}:\n0,42,governor\n0,88,stable_merge\nz{shown,total}:2,17\nref:@r-7f2a`}</pre>
-          </div>
-          <aside>
-            <strong>{labels.efficiency}</strong>
-            <small>CL100K / O200K</small>
-          </aside>
-        </div>
-
-        <div
-          aria-hidden={activeIndex < 5}
-          className={`ash-terminal-recovery ${activeIndex >= 5 ? 'is-visible' : ''}`}
-        >
-          <span aria-hidden="true">↺</span>
-          <div>
-            <strong>{labels.recoveryTitle}</strong>
-            <code>{labels.recoveryDetail}</code>
-          </div>
-        </div>
-
-        <div
-          aria-hidden={activeIndex < 6}
-          className={`ash-terminal-complete ${activeIndex >= 6 ? 'is-visible' : ''}`}
-        >
-          <span aria-hidden="true">●</span>
-          <strong>{labels.stable}</strong>
-          <code>42 ms · ok</code>
+          <code>s:0</code>
         </div>
       </div>
 
       <footer className="ash-terminal-footer">
         <div aria-hidden="true">
-          {stageLabels.map((label, index) => (
+          {tasks.map((task, index) => (
             <i
               className={
                 index === activeIndex
@@ -356,12 +348,12 @@ export function AshTerminalDemo({ locale }: { locale: Locale }) {
                     ? 'is-complete'
                     : undefined
               }
-              key={label}
-              title={label}
+              key={task.id}
+              title={task.id}
             />
           ))}
         </div>
-        <span>ASH/1 · ASON/1</span>
+        <span>ASH/1 · ASON/1 · {active.id.toUpperCase()}</span>
       </footer>
     </div>
   );

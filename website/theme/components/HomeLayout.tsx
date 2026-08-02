@@ -1,13 +1,9 @@
 import { useLang, useSite, useVersion, withBase } from '@rspress/core/runtime';
+import { AshCommandWalkthrough } from './AshCommandWalkthrough';
 import { AshTerminalDemo } from './AshTerminalDemo';
 import { InstallSwitcher } from './InstallSwitcher';
 
 type Locale = 'zh' | 'en';
-
-type Localized = {
-  zh: string;
-  en: string;
-};
 
 const copy = {
   zh: {
@@ -15,12 +11,12 @@ const copy = {
     titleLead: 'AI Native',
     titleAccent: 'Shell.',
     subtitle:
-      'ash 接收类型化请求，并发运行 I/O 与 CPU 任务，返回紧凑的 ASON 结果。',
+      '用一条类型化命令完成搜索、读取、并行执行、补丁、测试与证据提取。',
     start: '阅读文档',
-    architectureAction: '查看架构',
+    architectureAction: '观看命令漫游',
     github: 'GitHub',
-    commandLabel: 'ASH/1 请求',
-    command: 'ash rpc < task.ason',
+    commandLabel: '运行 ASH 任务',
+    command: 'ash run < .ash/task.ason',
     installLabel: '安装 ash',
     status: '预发布 · 暂无签名二进制',
     runtimeLabel: '执行拓扑',
@@ -36,14 +32,15 @@ const copy = {
     metricTestsValue: '135',
     metricTargets: '原生目标',
     metricTargetsValue: '6',
-    signalProtocol: 'ASH/1 类型化请求',
-    signalParallel: 'Tokio + Rayon',
-    signalAson: 'ASON 62% / JSON',
-    signalTargets: '6 个原生目标',
-    whyEyebrow: '核心接口',
-    whyTitle: '为程序调用设计',
+    signalProtocol: 'g · r · b · p · x · s · h',
+    signalParallel: '并行执行 · 稳定归并',
+    signalAson: 'ASON · 按需投影',
+    signalTargets: 'Linux · macOS · Windows',
+    whyEyebrow: '命令漫游',
+    whyTitle: '看 ASH 完成一次代码任务',
     whyBody:
-      'ASH/1 定义请求、权限、预算、结果和错误。调用方不必拼接命令字符串，也不必解析终端文本。',
+      '向下滚动，终端会跟随当前步骤切换。每一步都展示真实命令、规范请求、紧凑结果和字段注释。',
+    tourHint: '滚动选择步骤，也可以点击任一步直接查看。',
     architectureEyebrow: '运行时',
     architectureTitle: 'Tokio 与 Rayon，共用一套预算',
     architectureBody:
@@ -83,12 +80,12 @@ const copy = {
     titleLead: 'AI Native',
     titleAccent: 'Shell.',
     subtitle:
-      'ash accepts typed requests, runs I/O and CPU work in parallel, and returns compact ASON results.',
+      'One typed command for search, read, parallel work, patching, tests, and evidence retrieval.',
     start: 'Read the docs',
-    architectureAction: 'View architecture',
+    architectureAction: 'Watch the command tour',
     github: 'GitHub',
-    commandLabel: 'ASH/1 request',
-    command: 'ash rpc < task.ason',
+    commandLabel: 'Run an ASH task',
+    command: 'ash run < .ash/task.ason',
     installLabel: 'Install ash',
     status: 'PRE-RELEASE · NO SIGNED BINARY',
     runtimeLabel: 'Execution topology',
@@ -104,14 +101,16 @@ const copy = {
     metricTestsValue: '135',
     metricTargets: 'Native targets',
     metricTargetsValue: '6',
-    signalProtocol: 'ASH/1 typed requests',
-    signalParallel: 'Tokio + Rayon',
-    signalAson: 'ASON 62% / JSON',
-    signalTargets: '6 native targets',
-    whyEyebrow: 'CORE INTERFACE',
-    whyTitle: 'Designed for programmatic use',
+    signalProtocol: 'g · r · b · p · x · s · h',
+    signalParallel: 'PARALLEL RUN · STABLE MERGE',
+    signalAson: 'ASON · PROJECT ON DEMAND',
+    signalTargets: 'LINUX · MACOS · WINDOWS',
+    whyEyebrow: 'COMMAND WALKTHROUGH',
+    whyTitle: 'Watch ASH complete a coding task',
     whyBody:
-      'ASH/1 defines requests, permissions, budgets, results, and errors. Callers do not assemble shell strings or parse terminal text.',
+      'Scroll to move the terminal through each step. Every stage shows the real command, canonical request, compact result, and field-level notes.',
+    tourHint:
+      'Scroll to select a step, or click any step to inspect it directly.',
     architectureEyebrow: 'RUNTIME',
     architectureTitle: 'Tokio and Rayon share one budget',
     architectureBody:
@@ -148,54 +147,6 @@ const copy = {
     footerLicense: 'MIT licensed · Built in Rust',
   },
 };
-
-const features = [
-  {
-    index: '01',
-    title: { zh: '类型化请求', en: 'Typed requests' },
-    body: {
-      zh: 'exec、read、list、search、patch、snapshot 与 batch 使用固定 Schema。',
-      en: 'exec, read, list, search, patch, snapshot, and batch use fixed schemas.',
-    },
-    tags: ['ASH/1', 'schema', 'argv'],
-  },
-  {
-    index: '02',
-    title: { zh: '有界并行', en: 'Bounded parallelism' },
-    body: {
-      zh: 'Tokio 处理 I/O，Rayon 处理 CPU 任务；Governor 限制并发与资源。',
-      en: 'Tokio handles I/O, Rayon handles CPU work, and the governor bounds resources.',
-    },
-    tags: ['Tokio', 'Rayon', 'DAG'],
-  },
-  {
-    index: '03',
-    title: { zh: 'ASON 输出', en: 'ASON output' },
-    body: {
-      zh: '结果支持列编码、字段投影、截断和按引用取回。',
-      en: 'Results support column encoding, projection, truncation, and retrieval by reference.',
-    },
-    tags: ['ASON', 'ref', 'projection'],
-  },
-  {
-    index: '04',
-    title: { zh: '可恢复执行', en: 'Recoverable execution' },
-    body: {
-      zh: '取消传播到进程树；文件事务提供摘要校验、日志与回滚。',
-      en: 'Cancellation reaches process trees; file transactions provide digest checks, journaling, and rollback.',
-    },
-    tags: ['cancel', 'journal', 'rollback'],
-  },
-] satisfies Array<{
-  index: string;
-  title: Localized;
-  body: Localized;
-  tags: string[];
-}>;
-
-function value(localized: Localized, locale: Locale) {
-  return localized[locale];
-}
 
 function ArrowIcon() {
   return (
@@ -317,7 +268,7 @@ export function HomeLayout() {
                 {labels.start}
                 <ArrowIcon />
               </a>
-              <a className="ash-button" href="#architecture">
+              <a className="ash-button" href="#core">
                 {labels.architectureAction}
               </a>
             </div>
@@ -342,27 +293,20 @@ export function HomeLayout() {
         </div>
       </section>
 
-      <section className="ash-section ash-why" id="core">
-        <header className="ash-section-header">
-          <div>
-            <span>{labels.whyEyebrow}</span>
-            <h2>{labels.whyTitle}</h2>
+      <section className="ash-command-section" id="core">
+        <div className="ash-section ash-command-section-inner">
+          <header className="ash-section-header">
+            <div>
+              <span>{labels.whyEyebrow}</span>
+              <h2>{labels.whyTitle}</h2>
+            </div>
+            <p>{labels.whyBody}</p>
+          </header>
+          <div className="ash-command-tour-hint">
+            <span aria-hidden="true">↓</span>
+            {labels.tourHint}
           </div>
-          <p>{labels.whyBody}</p>
-        </header>
-        <div className="ash-feature-grid">
-          {features.map((feature) => (
-            <article key={feature.index}>
-              <span>{feature.index}</span>
-              <h3>{value(feature.title, locale)}</h3>
-              <p>{value(feature.body, locale)}</p>
-              <div>
-                {feature.tags.map((tag) => (
-                  <small key={tag}>{tag}</small>
-                ))}
-              </div>
-            </article>
-          ))}
+          <AshCommandWalkthrough locale={locale} />
         </div>
       </section>
 
