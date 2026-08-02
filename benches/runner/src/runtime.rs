@@ -21,6 +21,7 @@ use tempfile::TempDir;
 
 mod cold;
 mod dispatch;
+mod mixed;
 mod primitives;
 mod reducer;
 
@@ -301,6 +302,7 @@ pub(crate) struct RuntimeReport {
     host: HostReport,
     fixture: FixtureReport,
     process_capture: ProcessCaptureReport,
+    mixed_io: mixed::MixedIoReport,
     samples: usize,
     scenarios: Vec<ScenarioReport>,
 }
@@ -664,7 +666,7 @@ async fn runtime_report_with_config(
     let workspace_text = fixture.directory.path().to_string_lossy().into_owned();
     let process_fixture = prepare_process_fixture()?;
     let cold_fixture = cold::prepare_fixture(ash_binary, &process_fixture)?;
-    let mut scenarios = Vec::with_capacity(Scenario::ALL.len() + 16);
+    let mut scenarios = Vec::with_capacity(Scenario::ALL.len() + 18);
     for scenario in Scenario::ALL {
         scenarios.push(
             measure_scenario(
@@ -679,6 +681,11 @@ async fn runtime_report_with_config(
     }
     require_equivalent_output(&scenarios, "search-literal", "search-regex")?;
     scenarios.push(measure_store_scenario(&workspace_text, &config).await?);
+    let mixed::MixedIoMeasurement {
+        report: mixed_io,
+        scenarios: mixed_scenarios,
+    } = mixed::measure(&workspace_text, &config).await?;
+    scenarios.extend(mixed_scenarios);
     scenarios
         .push(cold::measure_cold_startup_scenario(&cold_fixture, &workspace_text, &config).await?);
     scenarios.push(measure_process_spawn_scenario(&process_fixture, &config).await?);
@@ -699,7 +706,7 @@ async fn runtime_report_with_config(
         scenarios.push(primitives::measure_dag_scenario(nodes, id, &config).await?);
     }
     Ok(RuntimeReport {
-        schema: 13,
+        schema: 14,
         host: HostReport {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
@@ -713,6 +720,7 @@ async fn runtime_report_with_config(
             profile_descriptor_sha256: sha256_hex(capture_profile_descriptor().as_bytes()),
             profiles: CaptureProfile::ALL.map(CaptureProfile::report),
         },
+        mixed_io,
         samples: config.samples,
         scenarios,
     })
@@ -1593,7 +1601,7 @@ mod tests {
         .await
         .expect("runtime report");
 
-        assert_eq!(report.schema, 13);
+        assert_eq!(report.schema, 14);
         assert_eq!(report.fixture.files, 8);
         assert_eq!(report.fixture.bytes, 8 * 4 * 1024);
         assert_eq!(report.process_capture.streams, 2);
@@ -1624,8 +1632,27 @@ mod tests {
         assert_eq!(report.process_capture.profiles[1].flush_policy, "chunk");
         assert_eq!(report.process_capture.profiles[2].burst_bytes, 256 * 1024);
         assert_eq!(report.process_capture.profiles[2].pause_micros, 2_000);
+        assert_eq!(report.mixed_io.idle_scenario_id, "io-spill-idle-compute");
+        assert_eq!(
+            report.mixed_io.saturated_scenario_id,
+            "io-spill-saturated-compute"
+        );
+        assert_eq!(report.mixed_io.capture_bytes, 128 * 1024);
+        assert_eq!(report.mixed_io.fetched_tail_bytes, 4 * 1024);
+        assert_eq!(report.mixed_io.producer_chunk_bytes, 16 * 1024);
+        assert_eq!(report.mixed_io.memory_ceiling_bytes, 0);
+        assert_eq!(report.mixed_io.compute_load, "xorshift64-busy-loop");
+        assert_eq!(report.mixed_io.compute_block_iterations, 4_096);
+        assert_eq!(
+            report.mixed_io.saturation_proof,
+            "all-compute-workers-active-at-capture-finish"
+        );
+        assert_eq!(report.mixed_io.sample_order, "alternating-paired-order");
+        assert_eq!(report.mixed_io.ready_timeout_millis, 10_000);
+        assert_eq!(report.mixed_io.capture_timeout_millis, 30_000);
+        assert_eq!(report.mixed_io.stop_timeout_millis, 10_000);
         assert_eq!(report.samples, 2);
-        assert_eq!(report.scenarios.len(), 20);
+        assert_eq!(report.scenarios.len(), 22);
         for scenario in &report.scenarios {
             assert!(scenario.output_bytes > 0);
             for run in &scenario.runs {
@@ -1693,7 +1720,39 @@ mod tests {
         assert_ne!(&store.input_sha256, &report.fixture.sha256);
         assert_eq!(store.output_bytes, 4 * 1024);
 
-        let cold = &report.scenarios[5];
+        let mixed = &report.scenarios[5..7];
+        assert_eq!(
+            mixed.iter().map(|scenario| scenario.id).collect::<Vec<_>>(),
+            vec!["io-spill-idle-compute", "io-spill-saturated-compute"]
+        );
+        assert_eq!(mixed[0].work_items, 1);
+        assert_eq!(mixed[0].work_bytes, 128 * 1024);
+        assert_eq!(mixed[0].input_sha256, mixed[1].input_sha256);
+        assert_eq!(mixed[0].output_bytes, 4 * 1024);
+        assert_eq!(mixed[0].output_sha256, mixed[1].output_sha256);
+        for scenario in mixed {
+            assert_eq!(scenario.runs.len(), 2);
+            assert!(
+                scenario
+                    .runs
+                    .iter()
+                    .all(|run| run.speedup_basis_points.is_none()
+                        && run.parallel_efficiency_basis_points.is_none())
+            );
+        }
+        assert_eq!(report.mixed_io.comparisons.len(), 2);
+        for (index, comparison) in report.mixed_io.comparisons.iter().enumerate() {
+            assert_eq!(comparison.compute_workers, index + 1);
+            assert_eq!(comparison.io_workers, index + 1);
+            assert_eq!(comparison.idle_p50_ns, mixed[0].runs[index].p50_ns);
+            assert_eq!(comparison.saturated_p50_ns, mixed[1].runs[index].p50_ns);
+            assert_eq!(
+                comparison.saturated_vs_idle_basis_points,
+                super::ratio_basis_points(comparison.saturated_p50_ns, comparison.idle_p50_ns)
+            );
+        }
+
+        let cold = &report.scenarios[7];
         assert_eq!(cold.id, "cli-cold-startup");
         assert_eq!(cold.work_items, 1);
         assert!(cold.work_bytes > 0);
@@ -1702,12 +1761,12 @@ mod tests {
         assert_eq!(cold.runs[0].speedup_basis_points, None);
         assert_eq!(cold.runs[0].parallel_efficiency_basis_points, None);
 
-        let spawn = &report.scenarios[6];
+        let spawn = &report.scenarios[8];
         assert_eq!(spawn.id, "exec-spawn-empty");
         assert_eq!(spawn.work_items, 1);
         assert_eq!(spawn.work_bytes, 0);
 
-        let captures = &report.scenarios[7..10];
+        let captures = &report.scenarios[9..12];
         assert_eq!(
             captures
                 .iter()
@@ -1729,41 +1788,41 @@ mod tests {
         assert_ne!(captures[0].output_sha256, captures[1].output_sha256);
         assert_ne!(captures[1].output_sha256, captures[2].output_sha256);
 
-        let cancellation = &report.scenarios[10];
+        let cancellation = &report.scenarios[12];
         assert_eq!(cancellation.id, "exec-cancel-tree-empty");
         assert_eq!(cancellation.work_items, 1);
         assert_eq!(cancellation.work_bytes, 0);
 
-        let dispatch = &report.scenarios[11];
+        let dispatch = &report.scenarios[13];
         assert_eq!(dispatch.id, "rpc-warm-dispatch");
         assert_eq!(dispatch.work_items, 1);
         assert!(dispatch.work_bytes > 0);
 
-        let reducer = &report.scenarios[12];
+        let reducer = &report.scenarios[14];
         assert_eq!(reducer.id, "ref-project-structured");
         assert_eq!(reducer.work_items, 8 * 64);
         assert!(reducer.work_bytes > 0);
         assert_eq!(reducer.runs.len(), 2);
 
-        let repeated = &report.scenarios[13];
+        let repeated = &report.scenarios[15];
         assert_eq!(repeated.id, "reduce-repeated-lines");
         assert_eq!(repeated.work_items, 8 * 512);
         assert!(repeated.work_bytes > repeated.output_bytes as u64);
         assert_eq!(repeated.runs.len(), 2);
 
-        let repeated_blocks = &report.scenarios[14];
+        let repeated_blocks = &report.scenarios[16];
         assert_eq!(repeated_blocks.id, "reduce-repeated-blocks");
         assert_eq!(repeated_blocks.work_items, 8 * 512);
         assert!(repeated_blocks.work_bytes > repeated_blocks.output_bytes as u64);
         assert_eq!(repeated_blocks.runs.len(), 2);
 
-        let error_focus = &report.scenarios[15];
+        let error_focus = &report.scenarios[17];
         assert_eq!(error_focus.id, "reduce-error-focused");
         assert_eq!(error_focus.work_items, 8 * 512);
         assert!(error_focus.work_bytes > error_focus.output_bytes as u64);
         assert_eq!(error_focus.runs.len(), 2);
 
-        let primitives = &report.scenarios[16..];
+        let primitives = &report.scenarios[18..];
         assert_eq!(
             primitives
                 .iter()
