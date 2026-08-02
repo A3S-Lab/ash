@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "manifest_sha256": "ff02b6fae33ded86bd7a4f1e9f0b6d09865dfa7acf3dc357ff0930731c178f72",
+  "manifest_sha256": "d7e36a4a52d773fe36232f7052c334e2a9b9c1136cfeec6bcddcf417e41b11f1",
   "tasks": [
     {
       "id": "discover-fault-markers",

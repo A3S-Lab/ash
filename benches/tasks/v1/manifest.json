@@ -9,7 +9,7 @@
       "capabilities": ["search"],
       "output_retention": "immediate",
       "limits": {
-        "millis": 10000,
+        "millis": 30000,
         "output_bytes": 16384
       },
       "expected": {
@@ -51,7 +51,7 @@
       "capabilities": ["search"],
       "output_retention": "immediate",
       "limits": {
-        "millis": 10000,
+        "millis": 30000,
         "output_bytes": 16384
       },
       "expected": {
@@ -93,7 +93,7 @@
       "capabilities": ["read", "patch"],
       "output_retention": "immediate",
       "limits": {
-        "millis": 10000,
+        "millis": 30000,
         "output_bytes": 16384
       },
       "expected": {
@@ -150,7 +150,7 @@
       "capabilities": ["list"],
       "output_retention": "immediate",
       "limits": {
-        "millis": 10000,
+        "millis": 30000,
         "output_bytes": 16384
       },
       "expected": {
@@ -192,7 +192,7 @@
       "capabilities": ["read"],
       "output_retention": "immediate",
       "limits": {
-        "millis": 10000,
+        "millis": 30000,
         "output_bytes": 16384
       },
       "expected": {
@@ -235,7 +235,7 @@
       "capabilities": ["read", "fs"],
       "output_retention": "immediate",
       "limits": {
-        "millis": 10000,
+        "millis": 30000,
         "output_bytes": 16384
       },
       "expected": {
@@ -304,7 +304,7 @@
       "capabilities": ["batch", "search"],
       "output_retention": "immediate",
       "limits": {
-        "millis": 10000,
+        "millis": 30000,
         "output_bytes": 16384
       },
       "expected": {

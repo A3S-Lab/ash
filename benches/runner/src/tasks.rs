@@ -931,7 +931,14 @@ async fn execute_native_task(task: &TaskDefinition) -> Result<RawNativeRun, Box<
     copy_workspace(&fixture, directory.path())?;
     let initial_tree_sha256 = tree_sha256(directory.path())?;
     let baseline = task.baselines.current()?;
-    let process = run_baseline(directory.path(), baseline, task.limits).await?;
+    let process = run_baseline(directory.path(), baseline, task.limits)
+        .await
+        .map_err(|error| {
+            io::Error::other(format!(
+                "native-shell baseline failed for task {}: {error}",
+                task.id
+            ))
+        })?;
     if !process.success {
         return Err(io::Error::other(format!("baseline failed for task {}", task.id)).into());
     }
