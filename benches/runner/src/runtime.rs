@@ -8,8 +8,8 @@ use ash_engine::{Engine, Parallelism, SessionConfig};
 use ash_ops::PortableOperations;
 use ash_platform::Workspace;
 use ash_protocol::request::{
-    Arguments, Budget, ExecArgs, InputSource, MAX_REQUEST_RECORDS, MAX_REQUEST_TOKENS, Request,
-    SearchArgs, SnapshotArgs, SnapshotMode,
+    Arguments, Budget, ExecArgs, InputSource, LIST_FILES_ONLY, ListArgs, MAX_REQUEST_RECORDS,
+    MAX_REQUEST_TOKENS, Request, SEARCH_REGEX, SearchArgs, SnapshotArgs, SnapshotMode,
 };
 use ash_protocol::response::{
     RESULT_RETAINED, RESULT_TRUNCATED, ResultData, Status, TerminationKind,
@@ -35,6 +35,7 @@ const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 const PROCESS_RESPONSE_BYTES: u64 = 64 * 1024;
 const REQUEST_MILLIS: u64 = 120_000;
 const NEEDLE: &str = "ASH_NEEDLE";
+const REGEX_NEEDLE: &str = r"^ASH_NEEDLE file=[0-9]{6}$";
 const PROCESS_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_HELPER_SOURCE: &str = r#"
@@ -241,6 +242,13 @@ struct StoreWorkload {
     fetch_bytes: usize,
 }
 
+struct WorkspaceWorkload<'a> {
+    scenario: Scenario,
+    workspace: &'a str,
+    fixture: &'a FixtureReport,
+    request: Request,
+}
+
 impl RuntimeConfig {
     fn detected() -> Self {
         let available = available_cpus();
@@ -290,25 +298,46 @@ impl RuntimeConfig {
 
 #[derive(Clone, Copy)]
 enum Scenario {
-    Search,
+    List,
+    SearchLiteral,
+    SearchRegex,
     Snapshot,
 }
 
 impl Scenario {
-    const ALL: [Self; 2] = [Self::Search, Self::Snapshot];
+    const ALL: [Self; 4] = [
+        Self::List,
+        Self::SearchLiteral,
+        Self::SearchRegex,
+        Self::Snapshot,
+    ];
 
     const fn id(self) -> &'static str {
         match self {
-            Self::Search => "search-literal",
+            Self::List => "list-recursive",
+            Self::SearchLiteral => "search-literal",
+            Self::SearchRegex => "search-regex",
             Self::Snapshot => "snapshot-blake3",
         }
     }
 
-    fn request(self) -> Result<Request, Box<dyn Error>> {
+    const fn work_bytes(self, fixture_bytes: u64) -> u64 {
+        match self {
+            Self::List => 0,
+            Self::SearchLiteral | Self::SearchRegex | Self::Snapshot => fixture_bytes,
+        }
+    }
+
+    fn request(self, files: usize) -> Result<Request, Box<dyn Error>> {
+        let paths = fixture_roots(files);
         let arguments = match self {
-            Self::Search => Arguments::Search(SearchArgs::new(NEEDLE, vec![".".to_owned()], 0)?),
+            Self::List => Arguments::List(ListArgs::new(paths, 64, LIST_FILES_ONLY)?),
+            Self::SearchLiteral => Arguments::Search(SearchArgs::new(NEEDLE, paths, 0)?),
+            Self::SearchRegex => {
+                Arguments::Search(SearchArgs::new(REGEX_NEEDLE, paths, SEARCH_REGEX)?)
+            }
             Self::Snapshot => Arguments::Snapshot(SnapshotArgs::new(
-                vec![".".to_owned()],
+                paths,
                 64,
                 SnapshotMode::Capture,
                 None,
@@ -321,6 +350,41 @@ impl Scenario {
             Budget::new(MAX_REQUEST_TOKENS, MAX_REQUEST_RECORDS, REQUEST_MILLIS)?,
         )?)
     }
+
+    fn validate_response(
+        self,
+        response: &ash_protocol::response::FinalResponse,
+        files: usize,
+    ) -> Result<(), io::Error> {
+        let entries = match (self, response.data()) {
+            (Self::List, Some(ResultData::List(entries))) => entries.len(),
+            (Self::SearchLiteral | Self::SearchRegex, Some(ResultData::Search(matches))) => {
+                matches.len()
+            }
+            (Self::Snapshot, Some(ResultData::Snapshot(entries))) if !entries.is_empty() => {
+                return Ok(());
+            }
+            _ => {
+                return Err(io::Error::other(format!(
+                    "{} returned an unexpected result type",
+                    self.id()
+                )));
+            }
+        };
+        if entries != files {
+            return Err(io::Error::other(format!(
+                "{} returned {entries} records for {files} fixture files",
+                self.id()
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn fixture_roots(files: usize) -> Vec<String> {
+    (0..files.clamp(1, 16))
+        .map(|bucket| format!("src/d{bucket:02}"))
+        .collect()
 }
 
 pub(crate) async fn runtime_report(
@@ -353,6 +417,7 @@ async fn runtime_report_with_config(
             .await?,
         );
     }
+    require_equivalent_output(&scenarios, "search-literal", "search-regex")?;
     scenarios.push(measure_store_scenario(&workspace_text, &config).await?);
     scenarios
         .push(cold::measure_cold_startup_scenario(&cold_fixture, &workspace_text, &config).await?);
@@ -361,7 +426,7 @@ async fn runtime_report_with_config(
     scenarios.push(measure_process_cancel_scenario(&process_fixture, &config).await?);
     scenarios.push(dispatch::measure_rpc_dispatch_scenario(&workspace_text, &config).await?);
     Ok(RuntimeReport {
-        schema: 6,
+        schema: 7,
         host: HostReport {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
@@ -371,6 +436,25 @@ async fn runtime_report_with_config(
         samples: config.samples,
         scenarios,
     })
+}
+
+fn require_equivalent_output(
+    scenarios: &[ScenarioReport],
+    left_id: &str,
+    right_id: &str,
+) -> Result<(), io::Error> {
+    let find = |id| scenarios.iter().find(|scenario| scenario.id == id);
+    let (Some(left), Some(right)) = (find(left_id), find(right_id)) else {
+        return Err(io::Error::other(format!(
+            "missing equivalent runtime scenarios {left_id} and {right_id}"
+        )));
+    };
+    if left.output_bytes != right.output_bytes || left.output_sha256 != right.output_sha256 {
+        return Err(io::Error::other(format!(
+            "runtime scenarios {left_id} and {right_id} emitted different evidence"
+        )));
+    }
+    Ok(())
 }
 
 async fn measure_process_spawn_scenario(
@@ -474,7 +558,7 @@ async fn measure_store_scenario(
     workspace: &str,
     config: &RuntimeConfig,
 ) -> Result<ScenarioReport, Box<dyn Error>> {
-    let request = Scenario::Search.request()?;
+    let request = Scenario::SearchLiteral.request(1)?;
     let workload = StoreWorkload {
         input: fixture_bytes(0x5a17, config.store_bytes),
         memory_bytes: config.store_memory_bytes,
@@ -971,7 +1055,12 @@ async fn measure_scenario(
     fixture: &FixtureReport,
     config: &RuntimeConfig,
 ) -> Result<ScenarioReport, Box<dyn Error>> {
-    let request = scenario.request()?;
+    let workload = WorkspaceWorkload {
+        scenario,
+        workspace,
+        fixture,
+        request: scenario.request(fixture.files)?,
+    };
     let mut runs = Vec::with_capacity(config.worker_counts.len());
     let mut expected_output = None;
     let mut baseline = None;
@@ -979,56 +1068,36 @@ async fn measure_scenario(
     for &workers in &config.worker_counts {
         let parallelism = Parallelism::for_available_cpus(workers);
         let engine = Engine::new(parallelism)?;
-        let (warm_output, _) =
-            execute_once(&engine, operations, workspace, parallelism, &request, 1).await?;
+        let (warm_output, _) = execute_once(&workload, &engine, operations, parallelism, 1).await?;
         require_stable_output(&mut expected_output, &warm_output)?;
 
         let mut observations = Vec::with_capacity(config.samples);
         for sample in 0..config.samples {
             let session_id = u64::try_from(sample)?.saturating_add(2);
-            let (output, elapsed) = execute_once(
-                &engine,
-                operations,
-                workspace,
-                parallelism,
-                &request,
-                session_id,
-            )
-            .await?;
+            let (output, elapsed) =
+                execute_once(&workload, &engine, operations, parallelism, session_id).await?;
             require_stable_output(&mut expected_output, &output)?;
             observations.push(elapsed);
         }
 
-        let mut ordered = observations.clone();
-        ordered.sort_unstable();
-        let p50 = percentile(&ordered, 50);
-        let p95 = percentile(&ordered, 95);
-        let p99 = percentile(&ordered, 99);
-        let baseline = *baseline.get_or_insert(p50);
-        let speedup = ratio_basis_points(baseline, p50);
         let output = expected_output
             .as_ref()
             .ok_or_else(|| io::Error::other("runtime benchmark emitted no output"))?;
-        runs.push(RuntimeRun {
-            compute_workers: workers,
-            io_workers: parallelism.io_workers().get(),
-            observations_ns: observations,
-            p50_ns: p50,
-            p95_ns: p95,
-            p99_ns: p99,
-            items_per_second: throughput(fixture.files as u128, p50),
-            bytes_per_second: throughput(u128::from(fixture.bytes), p50),
-            speedup_basis_points: Some(speedup),
-            parallel_efficiency_basis_points: Some(speedup / workers as u128),
-            output_sha256: sha256_hex(output),
-        });
+        runs.push(runtime_run(
+            parallelism,
+            observations,
+            &mut baseline,
+            fixture.files as u128,
+            u128::from(scenario.work_bytes(fixture.bytes)),
+            output,
+        ));
     }
 
     let output = expected_output.ok_or_else(|| io::Error::other("missing runtime output"))?;
     Ok(ScenarioReport {
         id: scenario.id(),
         work_items: fixture.files,
-        work_bytes: fixture.bytes,
+        work_bytes: scenario.work_bytes(fixture.bytes),
         input_sha256: fixture.sha256.clone(),
         output_bytes: output.len(),
         output_sha256: sha256_hex(&output),
@@ -1037,22 +1106,21 @@ async fn measure_scenario(
 }
 
 async fn execute_once(
+    workload: &WorkspaceWorkload<'_>,
     engine: &Engine,
     operations: &PortableOperations,
-    workspace: &str,
     parallelism: Parallelism,
-    request: &Request,
     session_id: u64,
 ) -> Result<(Vec<u8>, u128), Box<dyn Error>> {
     let session = engine.open_session(SessionConfig::new(
         session_id,
-        workspace,
+        workload.workspace,
         MAX_RESPONSE_BYTES,
         parallelism,
     ))?;
     let started = Instant::now();
-    let program = session.begin(request).await?;
-    let response = operations.execute(request, &program).await?;
+    let program = session.begin(&workload.request).await?;
+    let response = operations.execute(&workload.request, &program).await?;
     if response.status() != Status::Success {
         return Err(io::Error::other(format!(
             "runtime scenario returned status {}",
@@ -1060,6 +1128,9 @@ async fn execute_once(
         ))
         .into());
     }
+    workload
+        .scenario
+        .validate_response(&response, workload.fixture.files)?;
     let output = response.encode()?.encode().into_bytes();
     let elapsed = started.elapsed().as_nanos().max(1);
     drop(program);
@@ -1227,11 +1298,11 @@ mod tests {
         .await
         .expect("runtime report");
 
-        assert_eq!(report.schema, 6);
+        assert_eq!(report.schema, 7);
         assert_eq!(report.fixture.files, 8);
         assert_eq!(report.fixture.bytes, 8 * 4 * 1024);
         assert_eq!(report.samples, 2);
-        assert_eq!(report.scenarios.len(), 8);
+        assert_eq!(report.scenarios.len(), 10);
         for scenario in &report.scenarios {
             assert!(scenario.output_bytes > 0);
             for run in &scenario.runs {
@@ -1257,23 +1328,47 @@ mod tests {
                 Some(10_000)
             );
         }
-        for scenario in &report.scenarios[..2] {
+        let matrix = &report.scenarios[..4];
+        assert_eq!(
+            matrix
+                .iter()
+                .map(|scenario| scenario.id)
+                .collect::<Vec<_>>(),
+            vec![
+                "list-recursive",
+                "search-literal",
+                "search-regex",
+                "snapshot-blake3"
+            ]
+        );
+        for scenario in matrix {
             assert_eq!(scenario.work_items, 8);
-            assert_eq!(scenario.work_bytes, report.fixture.bytes);
             assert_eq!(&scenario.input_sha256, &report.fixture.sha256);
+        }
+        assert_eq!(matrix[0].work_bytes, 0);
+        for scenario in &matrix[1..] {
+            assert_eq!(scenario.work_bytes, report.fixture.bytes);
         }
         assert_ne!(
             report.scenarios[0].output_sha256,
             report.scenarios[1].output_sha256
         );
-        let store = &report.scenarios[2];
+        assert_eq!(
+            report.scenarios[1].output_sha256,
+            report.scenarios[2].output_sha256
+        );
+        assert_ne!(
+            report.scenarios[2].output_sha256,
+            report.scenarios[3].output_sha256
+        );
+        let store = &report.scenarios[4];
         assert_eq!(store.id, "result-store-spill-fetch");
         assert_eq!(store.work_items, 1);
         assert_eq!(store.work_bytes, 128 * 1024);
         assert_ne!(&store.input_sha256, &report.fixture.sha256);
         assert_eq!(store.output_bytes, 4 * 1024);
 
-        let cold = &report.scenarios[3];
+        let cold = &report.scenarios[5];
         assert_eq!(cold.id, "cli-cold-startup");
         assert_eq!(cold.work_items, 1);
         assert!(cold.work_bytes > 0);
@@ -1282,23 +1377,23 @@ mod tests {
         assert_eq!(cold.runs[0].speedup_basis_points, None);
         assert_eq!(cold.runs[0].parallel_efficiency_basis_points, None);
 
-        let spawn = &report.scenarios[4];
+        let spawn = &report.scenarios[6];
         assert_eq!(spawn.id, "exec-spawn-empty");
         assert_eq!(spawn.work_items, 1);
         assert_eq!(spawn.work_bytes, 0);
 
-        let capture = &report.scenarios[5];
+        let capture = &report.scenarios[7];
         assert_eq!(capture.id, "exec-capture-pressure");
         assert_eq!(capture.work_items, 2);
         assert_eq!(capture.work_bytes, 2 * 5 * 1024 * 1024);
         assert_eq!(capture.output_bytes, 2 * 4 * 1024);
 
-        let cancellation = &report.scenarios[6];
+        let cancellation = &report.scenarios[8];
         assert_eq!(cancellation.id, "exec-cancel-tree-empty");
         assert_eq!(cancellation.work_items, 1);
         assert_eq!(cancellation.work_bytes, 0);
 
-        let dispatch = &report.scenarios[7];
+        let dispatch = &report.scenarios[9];
         assert_eq!(dispatch.id, "rpc-warm-dispatch");
         assert_eq!(dispatch.work_items, 1);
         assert!(dispatch.work_bytes > 0);
