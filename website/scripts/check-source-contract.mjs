@@ -47,7 +47,9 @@ const [
   switcher,
   alignedStyles,
   runtimeHarness,
+  runtimeReducer,
   runtimePrimitives,
+  referenceOperation,
   benchmarkZh,
   benchmarkEn,
 ] = await Promise.all([
@@ -61,7 +63,9 @@ const [
   text('website/theme/components/InstallSwitcher.tsx'),
   text('website/theme/a3s-aligned.css'),
   text('benches/runner/src/runtime.rs'),
+  text('benches/runner/src/runtime/reducer.rs'),
   text('benches/runner/src/runtime/primitives.rs'),
+  text('crates/ash-ops/src/reference.rs'),
   text('website/docs/next/zh/guide/benchmarks.mdx'),
   text('website/docs/next/en/guide/benchmarks.mdx'),
 ]);
@@ -175,16 +179,31 @@ if (!report.formula_algebra.gates.passed) {
 }
 
 for (const marker of [
-  'schema: 8',
+  'schema: 9',
   '"list-recursive"',
   '"search-literal"',
   '"search-regex"',
   '"snapshot-blake3"',
   'require_equivalent_output(&scenarios, "search-literal", "search-regex")',
+  'reducer::measure_structured_projection_scenario(',
   'primitives::measure_path_dictionary_scenario(&config)',
   'primitives::measure_dag_scenario(nodes, id, &config)',
 ]) {
   requireIncludes(runtimeHarness, marker, 'Runtime benchmark schema');
+}
+for (const marker of [
+  '"ref-project-structured"',
+  'const ROWS_PER_FIXTURE_FILE: usize = 64',
+  'validate_response(&response, workload, reference)',
+  'runtime_run(',
+]) {
+  requireIncludes(runtimeReducer, marker, 'Runtime reducer benchmark');
+}
+for (const marker of [
+  '.par_iter()',
+  '.collect::<Result<Vec<_>, OperationError>>()?',
+]) {
+  requireIncludes(referenceOperation, marker, 'Ordered parallel projection');
 }
 for (const marker of [
   '"path-dictionary-hot"',
@@ -198,10 +217,10 @@ for (const marker of [
   requireIncludes(runtimePrimitives, marker, 'Runtime primitive benchmark');
 }
 for (const [document, markers, label] of [
-  [benchmarkZh, ['schema 8', '十四个场景'], 'Chinese benchmark documentation'],
+  [benchmarkZh, ['schema 9', '十五个场景'], 'Chinese benchmark documentation'],
   [
     benchmarkEn,
-    ['Schema 8', 'fourteen scenarios'],
+    ['Schema 9', 'fifteen scenarios'],
     'English benchmark documentation',
   ],
 ]) {
