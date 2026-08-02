@@ -112,6 +112,37 @@ structured metadata and digest safety are visible overhead. The embedded
 session handshake is not tokenized; a future model report must add amortized
 primer and format-instruction cost.
 
+## Real Agent traces
+
+The repository now defines a strict paired trace format. Every repetition must
+run ASH and the native shell with the same model, seed, and task order while
+recording the driver digest, model revision, primers, sampling settings,
+provider usage, and SHA-256 of every tool result.
+
+```bash
+cargo run -p a3s-ash-bench --locked -- \
+  --validate-agent-trace ./trace.json
+cargo run -p a3s-ash-bench --release --locked -- \
+  --agent-trace ./trace.json --allow-native-agent-exec > report.json
+```
+
+Replay starts from isolated copies of the locked fixtures. Model-selected ASON
+requests enter the production `ExecutionSession`; native scripts execute only
+after explicit operator authorization. Every result digest is checked before
+the semantic answer, expected files, and complete visible tree are verified.
+The primary total is provider input plus visible output: cached input remains
+charged, hidden reasoning is reported separately and excluded. Two pinned
+tokenizers also count primers, objectives, requests, tool results, and final
+answers. Failed tasks remain in the report.
+
+Replay proves internal consistency, not provider identity. Reports therefore
+carry `provenance: external-self-attested-trace` and
+`provider_attestation_verified: false`; published results must also include the
+adapter digest and any available provider-side audit evidence.
+
+This is trace-validation and replay infrastructure. The repository does not yet
+publish a real-model score and never relabels a deterministic plan as one.
+
 ## Current automation
 
 - Rust unit and integration suites across every workspace crate.
@@ -119,12 +150,13 @@ primer and format-instruction cost.
 - Real release builds exercised by all three platform installers.
 - Fifteen end-to-end runtime paths, three multicore output reducers, hot path-dictionary lookup, and three-size DAG scheduling evidence.
 - Seven locked tasks with production ASH traces and Linux, macOS, and Windows native-shell baselines.
+- Strict paired model-trace schema, provider Token accounting, result-digest checks, and final-tree replay.
 - Fuzz targets for ASON, bounded ASH/1 frames, typed requests, and update metadata.
 - File-transaction crash cutpoints, update activation/recovery, and cancellation race tests.
 - A locked third-party license inventory.
 
 ## Evidence still required for release
 
-The first supported version still needs real agent-task benchmarks, sustained
+The first supported version still needs captured and published real Agent-task results, sustained
 fuzz-duration records, hardware-labelled latency and throughput reports, and a
 six-target install/update/rollback run with production credentials.

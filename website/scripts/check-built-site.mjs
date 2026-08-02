@@ -124,6 +124,8 @@ const homepages = {
     'bursty',
     '×N#K',
     '⋯N',
+    '真实 Agent 轨迹',
+    '--allow-native-agent-exec',
   ],
   'en/guide/benchmarks.html': [
     'Schema 14',
@@ -133,6 +135,8 @@ const homepages = {
     'bursty',
     '×N#K',
     '⋯N',
+    'Real Agent traces',
+    '--allow-native-agent-exec',
   ],
 };
 

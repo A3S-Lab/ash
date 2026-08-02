@@ -1,6 +1,6 @@
 # Token-efficiency benchmark contract
 
-Status: deterministic format corpus, two-tokenizer representation plus repeated-line/block/error-focus reduction evidence, retained-formula regression gate, a locked seven-task cross-platform ASH/native-shell tool-plan corpus, and a twenty-two-scenario host-local runtime harness; Coding Agent results and published hardware reports remain open
+Status: deterministic format corpus, two-tokenizer representation plus repeated-line/block/error-focus reduction evidence, retained-formula regression gate, a locked seven-task cross-platform ASH/native-shell tool-plan corpus, a strict paired model-trace validator/replayer, and a twenty-two-scenario host-local runtime harness; captured Coding Agent results and published hardware reports remain open
 
 Token reduction is the primary performance objective of `ash`. This document defines how it is measured without trading away task correctness or hiding protocol overhead.
 
@@ -47,6 +47,19 @@ cargo run -p a3s-ash-bench --locked -- --tasks
 The runner makes two isolated copies of the same fixture. One executes the current platform's native-shell baseline with bounded pipe drain and process cleanup. The other opens the production `ExecutionSession`, builds each typed request, canonicalizes it to ASON, decodes that document through the protocol validator, and executes it through the normal engine and portable operations. Read-derived BLAKE3 digests feed guarded `patch` and `fs` requests without benchmark-side file access. Both paths must match the declared semantic output, expected files, and locked final visible tree; ASH's reserved `.ash` state is excluded by the same visibility rule used by production listing and snapshots.
 
 The native-shell total is objective + command + stdout + stderr. The ASH total is the same objective + every canonical request + every canonical response; each step and each length-delimited transcript is separately hashed. The embedded session handshake is not LLM-facing and is not tokenized here; a future Agent report must add amortized primer and format-instruction cost. ASH elapsed time does include engine/session construction, canonical encode/decode, execution, response encoding, and session close. Request budgets are fixed by the manifest, so repeated runs produce stable transcripts. The report labels itself `deterministic-tool-plan` and sets `agent_results` to false: a human-authored plan is useful for protocol accounting and correctness, but it does not execute a model, measure retries caused by a model, or establish an Agent-task Token reduction claim. These tiny tasks currently expose structured metadata and digest overhead; no comparative Token gate is applied. Host-local elapsed time is printed by `--tasks` but not committed.
+
+The provider-neutral [paired Agent trace contract](../benches/agents/v1/README.md) is the next evidence layer. A strict trace binds the corpus and lock, exact driver digest, provider and model revision, sampling configuration, shared and arm-specific primers, platform, architecture, per-task provider usage, and the provider's raw usage object digest. Every repetition contains an ASH arm and a native-shell arm with the same seed and randomized task order. The runner replays canonical model-selected ASH requests through `ExecutionSession`, replays native scripts only after an explicit operator opt-in, verifies the exact tool-result hash returned to the model, and checks semantic output, expected files, and the complete visible tree. Invalid ASON and requests outside the exposed task policy remain charged failed attempts with deterministic adapter results; a retry is counted only when another model action follows a failure. Failed tasks remain in the report rather than disappearing from averages.
+
+Agent reports expose two accounting planes. Provider input plus visible model output is the primary model-specific total; cached input remains charged while separately reported hidden reasoning is excluded. A normalized cross-provider payload independently counts shared/arm primers, objectives, tool results, model requests, and final output under pinned `cl100k_base` and `o200k_base`. Comparisons are emitted only when the two arms differ by no more than one success-rate percentage point. The implemented validator/replayer is infrastructure, not evidence that a real model ran: `agent_results: true` is emitted only while replaying a strict external `model-selected-trace`, and no synthetic Agent report is checked in. Replay establishes internal consistency but cannot authenticate a provider, so reports explicitly carry `provenance: external-self-attested-trace` and `provider_attestation_verified: false` until separately published audit evidence says otherwise.
+
+Validate a trace without executing it, then explicitly authorize paired replay:
+
+```sh
+cargo run -p a3s-ash-bench --locked -- \
+  --validate-agent-trace ./trace.json
+cargo run -p a3s-ash-bench --release --locked -- \
+  --agent-trace ./trace.json --allow-native-agent-exec > report.json
+```
 
 ## 1. Optimization target
 
@@ -304,6 +317,9 @@ A gate is promoted from target to requirement only after the benchmark runner pr
 
 ```text
 benches/
+|-- agents/v1/
+|   |-- README.md
+|   `-- schema.json
 |-- corpus/v1.json
 |-- runner/
 |-- tasks/v1/

@@ -78,6 +78,30 @@ schema 2 报告同时校验语义输出与最终状态。原生侧统计目标�
 不是模型成绩，也不是 Token 节省结论；在这些极小任务上，结构化元数据与安全摘要会表现为额外开销。
 嵌入式会话握手不计入 Token；未来的真实模型报告必须补上摊销后的 primer 与格式说明成本。
 
+## 真实 Agent 轨迹
+
+仓库已经定义严格的成对轨迹格式。每一轮必须用同一模型、同一种子和同一任务顺序分别跑 ASH 与
+原生 Shell，并记录驱动摘要、模型修订、primer、采样参数、供应商用量及每个工具结果的 SHA-256。
+
+```bash
+cargo run -p a3s-ash-bench --locked -- \
+  --validate-agent-trace ./trace.json
+cargo run -p a3s-ash-bench --release --locked -- \
+  --agent-trace ./trace.json --allow-native-agent-exec > report.json
+```
+
+重放从锁定夹具的隔离副本开始。模型选择的 ASON 请求会进入生产 `ExecutionSession`；原生脚本只有在
+操作者显式授权后才执行。每一步都核对模型实际收到的结果摘要，最后再核对语义输出、预期文件和完整
+可见树。主指标采用供应商输入 Token 加可见输出 Token，缓存输入仍计费，隐藏推理单独报告且不计入；
+另用两种固定 tokenizer 统计 primer、目标、请求、工具结果与最终回答。失败任务不会从报告中删掉。
+
+重放只能证明轨迹内部一致，不能替供应商证明身份。因此报告固定标注
+`provenance: external-self-attested-trace` 与 `provider_attestation_verified: false`；发布结果时还要附上
+适配器摘要及可获得的供应商侧审计证据。
+
+这套能力只是轨迹校验和重放基础设施。仓库目前没有发布真实模型成绩，也不会把确定性计划改名成
+Agent 结果。
+
 ## 当前自动化
 
 - 覆盖所有 workspace crate 的 Rust 单元与集成测试。
@@ -85,11 +109,12 @@ schema 2 报告同时校验语义输出与最终状态。原生侧统计目标�
 - 三平台安装器的真实发行构建 Smoke。
 - 十五条端到端运行时路径、三条多核输出 reducer、热路径字典与三种节点规模的 DAG 调度证据。
 - 七个锁定任务、生产 ASH 轨迹及 Linux、macOS、Windows 原生 Shell 基线。
+- 成对模型轨迹的严格 schema、供应商 Token 记账、结果摘要与最终树重放校验。
 - ASON、受限 ASH/1 帧、类型化请求与更新元数据 fuzz target。
 - 文件事务 crash cutpoint、更新激活/恢复和取消竞态测试。
 - 锁定的第三方许可证清单。
 
 ## 仍需发布的证据
 
-首个受支持版本还需要真实 Agent 任务基准、持续 Fuzz 时长记录、硬件标注的延迟/吞吐
+首个受支持版本还需要采集并发布真实 Agent 任务结果、持续 Fuzz 时长记录、硬件标注的延迟/吞吐
 报告，以及使用正式凭据完成的六目标安装、升级和回滚结果。

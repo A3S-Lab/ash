@@ -52,6 +52,8 @@ const [
   runtimeReducer,
   runtimePrimitives,
   taskRunner,
+  agentRunner,
+  agentSchemaSource,
   taskManifestSource,
   referenceOperation,
   repetitionReducer,
@@ -74,6 +76,8 @@ const [
   text('benches/runner/src/runtime/reducer.rs'),
   text('benches/runner/src/runtime/primitives.rs'),
   text('benches/runner/src/tasks.rs'),
+  text('benches/runner/src/tasks/agent.rs'),
+  text('benches/agents/v1/schema.json'),
   text('benches/tasks/v1/manifest.json'),
   text('crates/ash-ops/src/reference.rs'),
   text('crates/ash-ops/src/reducer.rs'),
@@ -84,6 +88,7 @@ const [
 const snapshots = JSON.parse(await text('website/version-snapshots.json'));
 const report = JSON.parse(await text('benches/reports/v0.1.0/format.json'));
 const taskManifest = JSON.parse(taskManifestSource);
+const agentSchema = JSON.parse(agentSchemaSource);
 const workspaceVersion = cargo.match(
   /\[workspace\.package\][\s\S]*?\nversion = "([^"]+)"/,
 )?.[1];
@@ -211,6 +216,39 @@ for (const marker of [
   'transcript_sha256(',
 ]) {
   requireIncludes(taskRunner, marker, 'Task benchmark schema');
+}
+
+if (
+  agentSchema.properties?.schema?.const !== 1 ||
+  agentSchema.properties?.evidence_kind?.const !== 'model-selected-trace'
+) {
+  throw new Error('The paired Agent trace schema must remain strict schema 1.');
+}
+for (const marker of [
+  'model-selected-trace-replay',
+  'external-self-attested-trace',
+  'provider_attestation_verified',
+  'provider-input+visible-model-output',
+  'tool_result_hashes_match',
+  '.env_clear()',
+  'replay_ash_task(',
+  'replay_native_task(',
+]) {
+  requireIncludes(agentRunner, marker, 'Paired Agent trace replay');
+}
+for (const marker of [
+  '--validate-agent-trace',
+  '--allow-native-agent-exec',
+  '真实 Agent 轨迹',
+]) {
+  requireIncludes(benchmarkZh, marker, 'Chinese Agent evidence docs');
+}
+for (const marker of [
+  '--validate-agent-trace',
+  '--allow-native-agent-exec',
+  'Real Agent traces',
+]) {
+  requireIncludes(benchmarkEn, marker, 'English Agent evidence docs');
 }
 
 for (const marker of [

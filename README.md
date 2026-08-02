@@ -140,6 +140,8 @@ Fresh-start measurements launch the same-profile `ash run` binary for every obse
 
 The locked task corpus now contains seven cross-platform contracts covering search, diagnostic aggregation, exact patching, recursive listing, multi-file reading, a guarded copy/remove transaction, and an independent batch graph. Every task runs twice from the same locked tree: once through the current platform's native shell and once through declarative typed requests on the production ASH engine. The schema-2 report verifies semantic output and the complete visible final tree, then counts the objective plus every canonical ASON request/response under both pinned tokenizers. It labels this evidence `deterministic-tool-plan`: no model selected the operations, so it is neither a Coding Agent score nor a Token-reduction claim.
 
+The next evidence layer now has a strict provider-neutral [paired Agent trace contract](./benches/agents/v1/README.md). It validates the exact model/driver revision, primers, sampling settings, provider usage, paired seeds and task order before replaying every model-selected ASH request and native script from isolated locked fixtures. Tool-result hashes, final semantic output, expected files, and the complete visible tree must all match. Native-script replay requires an explicit opt-in; no synthetic trace is published as an Agent result.
+
 ## Release contract
 
 The first usable release must ship as one native `ash` binary and include:
