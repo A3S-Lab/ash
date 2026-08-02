@@ -28,7 +28,13 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+      - name: Check fuzz target compilation
+        run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
       - name: Check third-party license inventory
         shell: pwsh
         run: ./scripts/check-third-party-licenses.ps1

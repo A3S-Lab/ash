@@ -1,6 +1,6 @@
 # Token-efficiency benchmark contract
 
-Status: deterministic format corpus, two-tokenizer representation evidence, and retained-formula regression gate implemented; agent-task and published runtime reports remain open
+Status: deterministic format corpus, two-tokenizer representation evidence, retained-formula regression gate, and real-operation host-local runtime harness implemented; agent-task and published hardware reports remain open
 
 Token reduction is the primary performance objective of `ash`. This document defines how it is measured without trading away task correctness or hiding protocol overhead.
 
@@ -15,13 +15,13 @@ cargo run -p a3s-ash-bench --release --locked -- \
   --check benches/reports/v0.1.0/format.json
 ```
 
-The same runner can emit host-local ordered compute-plane measurements at 1, 2, 4, 8, and host-available worker counts:
+The same runner creates a deterministic 256-file, 8 MiB workspace and executes the public literal-search and BLAKE3 snapshot paths at 1, 2, 4, 8, and host-available worker counts:
 
 ```sh
 cargo run -p a3s-ash-bench --release --locked -- --runtime
 ```
 
-That report includes every raw observation, median nanoseconds, integer throughput, speedup in basis points, worker count, available CPU count, and a common output digest. It is not checked in or gated because shared-runner timing is not portable; differing output digests fail immediately.
+The schema-2 report includes every observation, p50/p95/p99 nanoseconds, item and byte throughput, speedup and parallel efficiency in basis points, worker count, host OS/architecture/available CPU count, fixture digest, and canonical response digest. Search and snapshot use the normal `Engine`, governor, `PortableOperations`, workspace backend, reducer, path dictionary, result store, and ASON encoder. Output is compared byte for byte across warm-up, samples, and worker counts; a difference fails before timing is printed. Host timings are not checked in or gated because shared-runner performance is not portable.
 
 ## 1. Optimization target
 
@@ -212,6 +212,15 @@ cargo test -p a3s-ash-bench reference_formulas_beat_the_sparse_union
 ```
 
 ## 9. Runtime benchmarks
+
+The implemented host-local slice exercises two real operations over the same deterministic fixture:
+
+- `search-literal` walks the workspace, reads files on bounded workers, scans text, performs stable merge and path interning, and encodes the final ASON response;
+- `snapshot-blake3` walks the same workspace, hashes files in the Rayon pool, builds and retains the canonical manifest, and encodes the final ASON response.
+
+Every sample uses a fresh session so reference aliases and path dictionaries start from the same state. Fixture construction and session creation are outside the timed interval; governor acquisition, operation execution, reduction, retention, and canonical response encoding are inside it. The benchmark has no fixed speedup threshold: it proves determinism everywhere and reports scaling only for the current host.
+
+The remaining runtime corpus expands this implemented slice to:
 
 Runtime measurements isolate `ash` overhead from the executed tool:
 

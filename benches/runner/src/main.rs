@@ -2,20 +2,18 @@
 
 use std::error::Error;
 use std::fs;
-use std::hint::black_box;
-use std::time::Instant;
 
-use ash_engine::{ComputePool, Parallelism};
 use ash_protocol::ason::{Atom, Cell, Document, Field, Key, Record, Table, Value, decode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use tiktoken_rs::{cl100k_base, o200k_base};
 
+mod runtime;
+
 const CORPUS_BYTES: &[u8] = include_bytes!("../../corpus/v1.json");
 const CORPUS_TEXT: &str = include_str!("../../corpus/v1.json");
 const WORKSPACE_LOCK: &[u8] = include_bytes!("../../../Cargo.lock");
-const RUNTIME_ROUNDS: usize = 20_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,30 +73,11 @@ struct Gates {
     passed: bool,
 }
 
-#[derive(Debug, Serialize)]
-struct RuntimeReport {
-    schema: u8,
-    available_cpus: usize,
-    work_items: usize,
-    rounds_per_item: usize,
-    samples: usize,
-    runs: Vec<RuntimeRun>,
-}
-
-#[derive(Debug, Serialize)]
-struct RuntimeRun {
-    workers: usize,
-    observations_ns: Vec<u128>,
-    median_ns: u128,
-    items_per_second: u128,
-    speedup_basis_points: u128,
-    output_sha256: String,
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     if matches!(arguments.as_slice(), [command] if command == "--runtime") {
-        let mut encoded = serde_json::to_vec_pretty(&runtime_report()?)?;
+        let mut encoded = serde_json::to_vec_pretty(&runtime::runtime_report().await?)?;
         encoded.push(b'\n');
         print!("{}", std::str::from_utf8(&encoded)?);
         return Ok(());
@@ -119,96 +98,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
-}
-
-fn runtime_report() -> Result<RuntimeReport, Box<dyn Error>> {
-    const WORK_ITEMS: usize = 2048;
-    const SAMPLES: usize = 5;
-    let available = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
-    let mut worker_counts = vec![1, 2, 4, 8, available];
-    worker_counts.retain(|workers| *workers <= available);
-    worker_counts.sort_unstable();
-    worker_counts.dedup();
-    let input: Vec<u64> = (0..WORK_ITEMS as u64).collect();
-    let mut runs = Vec::with_capacity(worker_counts.len());
-    let mut baseline = None;
-    let mut expected_digest = None;
-    for workers in worker_counts {
-        let pool = ComputePool::new(Parallelism::for_available_cpus(workers))?;
-        let _ = pool.map_ordered(&input[..64], cpu_work);
-        let mut observations = Vec::with_capacity(SAMPLES);
-        let mut digest = None;
-        for _ in 0..SAMPLES {
-            let started = Instant::now();
-            let output = pool.map_ordered(&input, cpu_work);
-            let elapsed = started.elapsed().as_nanos().max(1);
-            observations.push(elapsed);
-            let current_digest = digest_u64(&output);
-            if digest
-                .as_ref()
-                .is_some_and(|value| value != &current_digest)
-            {
-                return Err("runtime benchmark produced unstable output".into());
-            }
-            digest = Some(current_digest);
-        }
-        observations.sort_unstable();
-        let median = observations[observations.len() / 2];
-        let baseline = *baseline.get_or_insert(median);
-        let digest = digest.expect("at least one runtime sample");
-        if expected_digest
-            .as_ref()
-            .is_some_and(|value| value != &digest)
-        {
-            return Err("worker counts produced different output".into());
-        }
-        expected_digest = Some(digest.clone());
-        runs.push(RuntimeRun {
-            workers,
-            observations_ns: observations,
-            median_ns: median,
-            items_per_second: (WORK_ITEMS as u128)
-                .saturating_mul(1_000_000_000)
-                .checked_div(median)
-                .unwrap_or(0),
-            speedup_basis_points: baseline
-                .saturating_mul(10_000)
-                .checked_div(median)
-                .unwrap_or(0),
-            output_sha256: digest,
-        });
-    }
-    Ok(RuntimeReport {
-        schema: 1,
-        available_cpus: available,
-        work_items: WORK_ITEMS,
-        rounds_per_item: RUNTIME_ROUNDS,
-        samples: SAMPLES,
-        runs,
-    })
-}
-
-fn cpu_work(seed: &u64) -> u64 {
-    let mut value = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    for round in 0..RUNTIME_ROUNDS as u64 {
-        value ^= value >> 12;
-        value ^= value << 25;
-        value ^= value >> 27;
-        value = value
-            .wrapping_mul(0x2545_f491_4f6c_dd1d)
-            .wrapping_add(round);
-    }
-    black_box(value)
-}
-
-fn digest_u64(values: &[u64]) -> String {
-    let mut digest = Sha256::new();
-    for value in values {
-        digest.update(value.to_le_bytes());
-    }
-    hex(&digest.finalize())
 }
 
 fn build_report() -> Result<Report, Box<dyn Error>> {

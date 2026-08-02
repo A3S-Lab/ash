@@ -12,8 +12,12 @@ publish = false
 
 [dependencies]
 ash-engine.workspace = true
+ash-ops.workspace = true
+ash-platform.workspace = true
 ash-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 tiktoken-rs.workspace = true
+tokio.workspace = true

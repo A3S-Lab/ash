@@ -6,10 +6,8 @@ use ash_update::{TrustStore, verify_release};
 use libfuzzer_sys::fuzz_target;
 
 static TRUST: LazyLock<TrustStore> = LazyLock::new(|| {
-    TrustStore::parse(
-        "fuzz-1=d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
-    )
-    .expect("fixed fuzz trust root")
+    TrustStore::parse("fuzz-1=d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+        .expect("fixed fuzz trust root")
 });
 
 fuzz_target!(|data: &[u8]| {

@@ -20,17 +20,23 @@ cargo run -p a3s-ash-bench --locked -- \
 
 ## 多核确定性
 
-`ComputePool` 验证多个 Worker 配置得到相同输出摘要；DAG 测试证明就绪节点可以重叠，
-失败只跳过后代，最终节点顺序稳定。该测试证明确定性与并发结构，不冒充硬件吞吐结论。
+```bash
+cargo run -p a3s-ash-bench --release --locked -- --runtime
+```
+
+运行时基准创建确定性的 256 文件、8 MiB 工作区，用 1、2、4、8 和主机可用 Worker
+执行公开的字面量搜索与 BLAKE3 快照路径。只有各配置的规范 ASON 逐字节一致，才会输出
+p50/p95/p99、吞吐、加速比和并行效率。时序仅代表当前主机，不作为跨硬件承诺。
 
 ## 当前自动化
 
-- 135 项 Rust 单元与集成测试。
+- 覆盖所有 workspace crate 的 Rust 单元与集成测试。
 - Linux、macOS、Windows 的 `cargo check` 与测试。
 - 三平台安装器的真实发行构建 Smoke。
-- ASON parser 与更新元数据 fuzz target。
+- 真实搜索与快照扩展曲线，并校验输出完全一致。
+- ASON、受限 ASH/1 帧、类型化请求与更新元数据 fuzz target。
 - 文件事务 crash cutpoint、更新激活/恢复和取消竞态测试。
-- 237 条锁定第三方许可证清单。
+- 锁定的第三方许可证清单。
 
 ## 仍需发布的证据
 

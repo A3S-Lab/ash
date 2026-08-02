@@ -22,19 +22,25 @@ regression ceiling is 65%.
 
 ## Multicore determinism
 
-`ComputePool` verifies identical output digests across worker configurations.
-DAG tests prove ready nodes overlap, failures skip only descendants, and final
-node order stays stable. This proves deterministic concurrency structure, not a
-hardware throughput claim.
+```bash
+cargo run -p a3s-ash-bench --release --locked -- --runtime
+```
+
+The runtime harness creates one deterministic 256-file, 8 MiB workspace and
+executes the public literal-search and BLAKE3 snapshot paths at 1, 2, 4, 8, and
+host-available worker counts. Canonical ASON must remain byte-identical before
+the report can print p50/p95/p99, throughput, speedup, and parallel efficiency.
+Timing is host-local evidence, not a portable hardware claim.
 
 ## Current automation
 
-- 135 Rust unit and integration tests.
+- Rust unit and integration suites across every workspace crate.
 - `cargo check` and tests on Linux, macOS, and Windows.
 - Real release builds exercised by all three platform installers.
-- Fuzz targets for the ASON parser and update metadata.
+- Real-operation search and snapshot scaling with exact-output validation.
+- Fuzz targets for ASON, bounded ASH/1 frames, typed requests, and update metadata.
 - File-transaction crash cutpoints, update activation/recovery, and cancellation race tests.
-- A locked inventory of 237 third-party license records.
+- A locked third-party license inventory.
 
 ## Evidence still required for release
 

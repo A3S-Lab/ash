@@ -99,12 +99,14 @@ jobs:
           set -euo pipefail
           cargo +1.97.1 clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo +1.97.1 test --workspace --all-targets --locked
-      - name: Run bounded parser and metadata fuzz smoke
+      - name: Run bounded protocol and metadata fuzz smoke
         shell: bash
         run: |
           set -euo pipefail
           cargo install cargo-fuzz --version 0.13.2 --locked
           cargo +nightly-2026-07-31 fuzz run ason_decode fuzz/corpus/ason_decode -- \
+            -runs=1000 -max_len=65536 -rss_limit_mb=2048
+          cargo +nightly-2026-07-31 fuzz run frame_decode fuzz/corpus/frame_decode -- \
             -runs=1000 -max_len=65536 -rss_limit_mb=2048
           cargo +nightly-2026-07-31 fuzz run update_metadata fuzz/corpus/update_metadata -- \
             -runs=1000 -max_len=65536 -rss_limit_mb=2048

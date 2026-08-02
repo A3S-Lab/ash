@@ -12,7 +12,7 @@
 </p>
 
 > [!IMPORTANT]
-> `ash` is pre-release. Source builds now execute typed `exec`, `read`, `list`, `search`, compare-and-swap `patch`, durable file-only `fs` transactions, workspace `snapshot/delta`, and bounded dependency-graph `batch` requests; they also negotiate least-privilege capabilities, enforce session/action-bound one-time approval permits, evaluate retained-result data formulas, cancel active work, and verify, activate, recover, or roll back signed releases. Cross-platform installers and a fail-closed six-target release workflow are implemented; release credentials are not provisioned and no supported signed binary release is published yet.
+> `ash` is pre-release. Source builds now execute typed `exec`, `read`, `list`, `search`, compare-and-swap `patch`, durable file-only `fs` transactions, workspace `snapshot/delta`, and bounded dependency-graph `batch` requests; they also negotiate least-privilege capabilities, enforce session/action-bound one-time approval permits, evaluate retained-result data formulas, cancel active work, measure real search and snapshot paths across the Rayon worker matrix, and verify, activate, recover, or roll back signed releases. Cross-platform installers and a fail-closed six-target release workflow are implemented; release credentials are not provisioned and no supported signed binary release is published yet.
 
 `ash` is a greenfield shell designed around coding agents rather than terminal users. It turns shell work into typed programs, executes independent work across bounded I/O and CPU planes, and returns only the evidence worth placing in an LLM context.
 
@@ -116,6 +116,7 @@ cd ash
 cargo test --workspace --all-targets
 cargo run -p a3s-ash-bench --release --locked -- \
   --check benches/reports/v0.1.0/format.json
+cargo run -p a3s-ash-bench --release --locked -- --runtime
 npm --prefix website ci
 npm --prefix website run check
 ```
@@ -126,7 +127,7 @@ Run one canonical request from the repository root:
 cargo run -p a3s-ash -- run < spec/fixtures/ason/search-request.ason
 ```
 
-The pinned Rust workspace currently verifies typed ASH/1 schemas, canonical framed handshakes, negotiated capability masks, action/session/policy/expiry-bound approval permits, replay rejection, concurrent `exec/read/list/search/patch/fs/snapshot`, acyclic batch graphs, dependency-failure skipping, stable child-response references, retained-result byte/line slicing, search, table projection, safe materialization, and release, chained workspace deltas, preemptive cancellation, atomic budgets, hierarchical permits, workspace-confined paths, direct argv launch with timeout-safe process-tree cleanup, deterministic multi-core preparation, and multi-file rollback. File-only create, copy, move, and remove transactions add digest guards, no-overwrite semantics, a checksummed on-disk journal, cross-process serialization, reverse rollback, and restart recovery. Signed-release tests cover strict Ed25519 verification, sequence rollback/equivocation, the complete six-target manifest, exact archive shape, extraction ceilings, embedded binary identity, transactional activation, health-gated recovery, and reversible rollback. `ash self status|check|update|rollback|recover` uses canonical ASON, and network update input is HTTPS-only and byte-bounded. `ash rpc` executes independent requests concurrently while emitting final frames in stable input order. Offline installer smoke tests cover installation, integrity rejection, idempotent and forced reinstall, lock ownership, PATH ownership, rollback, and uninstall. This is still a development checkpoint, not a supported installation path.
+The pinned Rust workspace currently verifies typed ASH/1 schemas, canonical framed handshakes, negotiated capability masks, action/session/policy/expiry-bound approval permits, replay rejection, concurrent `exec/read/list/search/patch/fs/snapshot`, acyclic batch graphs, dependency-failure skipping, stable child-response references, retained-result byte/line slicing, search, table projection, safe materialization, and release, chained workspace deltas, preemptive cancellation, atomic budgets, hierarchical permits, workspace-confined paths, direct argv launch with timeout-safe process-tree cleanup, deterministic multi-core preparation, and multi-file rollback. The runtime harness executes the public search and snapshot operations over one deterministic 8 MiB workspace at 1, 2, 4, 8, and host-available worker counts; different canonical ASON bytes fail the run before any timing is reported. File-only create, copy, move, and remove transactions add digest guards, no-overwrite semantics, a checksummed on-disk journal, cross-process serialization, reverse rollback, and restart recovery. Signed-release tests cover strict Ed25519 verification, sequence rollback/equivocation, the complete six-target manifest, exact archive shape, extraction ceilings, embedded binary identity, transactional activation, health-gated recovery, and reversible rollback. `ash self status|check|update|rollback|recover` uses canonical ASON, and network update input is HTTPS-only and byte-bounded. `ash rpc` executes independent requests concurrently while emitting final frames in stable input order. Offline installer smoke tests cover installation, integrity rejection, idempotent and forced reinstall, lock ownership, PATH ownership, rollback, and uninstall. Scheduled fuzzing covers canonical ASON, bounded ASH/1 framing, typed request decoding, and signed update metadata. This is still a development checkpoint, not a supported installation path.
 
 ## Release contract
 
@@ -155,11 +156,11 @@ It is a local execution boundary for coding agents. Workspace capabilities, reso
 
 1. Stabilize the implemented vertical slice and its formula fixtures across Linux, macOS, and Windows.
 2. Integrate the implemented capability-scoped permit API with trusted harness policy providers and freeze the protocol only when the first supported release is cut.
-3. Harden parser, recovery, and scheduling paths with fuzzing and fault injection.
+3. Accumulate sustained ASON/frame/update fuzz evidence and exhaust transaction, recovery, and scheduling crash points.
 4. Provision protected release credentials and execute the implemented six-target signing, notarization, attestation, clean-host upgrade/rollback, and installer gates.
 5. Gate release promotion on correctness, token cost, latency, cancellation, installer, upgrade, and benchmark evidence, and keep every proven integration revision pinned in the A3S submodule.
 
-The first checked-in evidence is intentionally format-only: on its deterministic corpus, canonical ASON uses 62% of compact row-object JSON tokens under both pinned tokenizer profiles, while the closer columnar JSON baseline is reported alongside it. This is a regression datum, not an agent-task or runtime-performance claim. The report, reproduction command, remaining acceptance criteria, and accounting rules are defined in [docs/benchmarks.md](./docs/benchmarks.md).
+The first checked-in evidence is intentionally format-only: on its deterministic corpus, canonical ASON uses 62% of compact row-object JSON tokens under both pinned tokenizer profiles, while the closer columnar JSON baseline is reported alongside it. The real-operation runtime harness is reproducible locally but deliberately does not check host timing into source. Neither result is an agent-task claim. The report rules, runtime schema, remaining acceptance criteria, and accounting rules are defined in [docs/benchmarks.md](./docs/benchmarks.md).
 
 ## Contributing and support
 

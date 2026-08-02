@@ -4,7 +4,7 @@ Status: architecture baseline plus implementation checkpoint
 
 This document defines the intended architecture of `ash` and is normative for component ownership and runtime boundaries. Statements explicitly labeled as the current source checkpoint describe implemented behavior; the remaining contracts are design targets rather than release claims.
 
-The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution, bounded read/list/search, compare-and-swap patching with live rollback, durable file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, scheduled parser/update-metadata fuzz targets, deterministic six-target packaging, and a fail-closed native release workflow. Release-key and platform-signing credential provisioning, the first published release, sustained fuzz evidence, agent-task benchmarks, and published runtime measurements remain open.
+The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution, bounded read/list/search, compare-and-swap patching with live rollback, durable file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, real-operation search/snapshot scaling measurements, scheduled ASON/frame/update-metadata fuzz targets, deterministic six-target packaging, and a fail-closed native release workflow. Release-key and platform-signing credential provisioning, the first published release, sustained fuzz evidence, agent-task benchmarks, and published hardware-labelled runtime measurements remain open.
 
 ## 1. Product definition
 
@@ -462,6 +462,8 @@ Final graph results identify every node as succeeded, failed, skipped, or cancel
 
 ## 13. Versioning and compatibility
 
+No supported release exists. Before the first supported tag, `main` may replace protocol fields, formulas, fixtures, and report schemas directly when the replacement is safer or cheaper. CI enforces one current canonical contract; it does not carry migration code for unreleased revisions. The rules below become a compatibility commitment only when the first release is published.
+
 - The executable follows Semantic Versioning.
 - The protocol uses an independent integer major and minor level.
 - A major protocol change may alter message meaning or remove fields.
@@ -516,7 +518,7 @@ The repository remains independently buildable and releasable at `A3S-Lab/ash`. 
 - malformed and oversized frame rejection;
 - property tests for encode/decode stability;
 - one-shot and framed ASON semantic equality;
-- fuzzing for parser depth, quoting, columns, and references.
+- fuzzing for frame length/truncation/canonicality plus parser depth, quoting, columns, and references.
 
 ### 15.2 Engine
 
@@ -557,7 +559,7 @@ The benchmark contract in [benchmarks.md](./benchmarks.md) measures correctness,
 
 ### M0: contracts and evidence harness
 
-- freeze ASH/1 core types and ASON canonical rules;
+- define the current ASH/1 core types and ASON canonical rules; freeze them only with the first supported release;
 - build protocol fixtures and parser fuzz targets;
 - define the multi-platform task corpus and baseline recorder;
 - establish release artifact names and installer contracts.
@@ -584,7 +586,7 @@ The benchmark contract in [benchmarks.md](./benchmarks.md) measures correctness,
 - signed update manifests and rollback;
 - soak, fault-injection, leak, and parser fuzz gates;
 - benchmark publication with reproducible raw evidence;
-- compatibility policy enforced in CI.
+- one canonical pre-release fixture set in CI, followed by an explicit compatibility policy at the first supported tag.
 
 ## 17. Fixed decisions
 
@@ -610,4 +612,4 @@ The benchmark contract in [benchmarks.md](./benchmarks.md) measures correctness,
 | Embedded LLM | Out of scope |
 | PTY in version one | Out of scope |
 
-These decisions may be changed only through an explicit architecture decision that updates the protocol, benchmarks, and affected compatibility fixtures together.
+Before the first supported release, these decisions may be changed through an explicit architecture decision that updates the protocol, benchmarks, and current fixtures together. A published release adds the compatibility obligations defined in section 13.

@@ -27,11 +27,15 @@ name = "a3s-ash-bench"
 version = "0.1.0"
 dependencies = [
  "a3s-ash-engine",
+ "a3s-ash-ops",
+ "a3s-ash-platform",
  "a3s-ash-protocol",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tiktoken-rs",
+ "tokio",
 ]
 
 [[package]]
