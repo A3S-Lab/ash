@@ -11,6 +11,7 @@ mod list;
 mod patch;
 mod projection;
 mod read;
+mod reducer;
 mod reference;
 mod search;
 mod snapshot;
@@ -23,6 +24,7 @@ use ash_protocol::response::FinalResponse;
 
 pub use authorization::{AuthorizationError, AuthorizationPolicy, PermitAuthority};
 pub use error::OperationError;
+pub use reducer::{RepeatedLineReduction, collapse_repeated_lines};
 
 /// Portable operations bound to one native workspace capability.
 #[derive(Clone, Debug)]

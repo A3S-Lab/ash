@@ -12,7 +12,8 @@ use ash_protocol::request::{
     SNAPSHOT_INCLUDE_HIDDEN, SearchArgs, SnapshotArgs, SnapshotMode,
 };
 use ash_protocol::response::{
-    ErrorCode, RESULT_PARTIAL, RESULT_REDUCED, RESULT_RETAINED, RESULT_TRUNCATED, Status,
+    ErrorCode, RESULT_PARTIAL, RESULT_REDUCED, RESULT_RETAINED, RESULT_TRUNCATED, ResultData,
+    Status,
 };
 use ash_protocol::{ApprovalChallenge, Capability};
 use ash_store::{StoreLimits, StoreResidency};
@@ -204,6 +205,15 @@ fn main() {
                 .write_all(b"ASH_CAPTURE_TAIL")
                 .expect("write flood tail");
             output.flush().expect("flush flood output");
+        }
+        Some("repeat") => {
+            let mut output = io::BufWriter::new(io::stdout().lock());
+            for _ in 0..4_096 {
+                output
+                    .write_all(b"same diagnostic\n")
+                    .expect("write repeated line");
+            }
+            output.flush().expect("flush repeated output");
         }
         Some("rendezvous") => {
             let own = arguments.next().expect("own marker");
@@ -484,6 +494,59 @@ async fn exec_retained_reference_preserves_bytes_beyond_the_projection_window() 
         .await
         .expect("read complete stdout");
     assert!(retained.ends_with(b"ASH_CAPTURE_TAIL"));
+}
+
+#[tokio::test]
+async fn exec_collapses_repeated_lines_and_retains_exact_source() {
+    let directory = TestDirectory::new();
+    let executable = compile_helper(&directory);
+    let (session, operations) = runtime(&directory);
+    let request = Request::new(
+        55,
+        Arguments::Exec(
+            ExecArgs::new(
+                executable,
+                vec!["repeat".to_owned()],
+                ".",
+                vec![],
+                InputSource::None,
+                0,
+            )
+            .expect("exec"),
+        ),
+        budget(1_024, 8),
+    )
+    .expect("request");
+    let program = session.begin(&request).await.expect("program");
+    let response = operations
+        .execute(&request, &program)
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), Status::Success);
+    assert_eq!(
+        response.flags(),
+        RESULT_TRUNCATED | RESULT_REDUCED | RESULT_RETAINED
+    );
+    let Some(ResultData::Exec(result)) = response.data() else {
+        panic!("expected exec result");
+    };
+    assert_eq!(
+        result.stdout.projection.as_deref(),
+        Some("same diagnostic\n×4096\n")
+    );
+    assert_eq!(result.stdout.reference, Some(1));
+    let retained = program
+        .store()
+        .get(1)
+        .expect("retained stdout")
+        .read_all(128 * 1024)
+        .await
+        .expect("read retained stdout");
+    assert_eq!(
+        retained.as_ref(),
+        "same diagnostic\n".repeat(4_096).as_bytes()
+    );
 }
 
 #[tokio::test]

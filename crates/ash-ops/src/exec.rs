@@ -16,8 +16,8 @@ use ash_store::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
-use crate::OperationError;
 use crate::projection::{charge, presentation_limit};
+use crate::{OperationError, collapse_repeated_lines};
 
 const MAX_STDIN_BYTES: usize = 64 * 1024 * 1024;
 
@@ -163,8 +163,22 @@ async fn build_response(
     } else {
         (limit / 2, limit / 8)
     };
-    let stdout_projection = stdout.project(stdout_budget)?;
-    let stderr_projection = stderr.project(stderr_budget)?;
+    let finalizing = matches!(stop, Stop::TimedOut | Stop::Cancelled);
+    let (stdout, stderr, stdout_projection, stderr_projection) = if finalizing {
+        // Cancellation and deadline finalization must still produce typed
+        // termination evidence. The fixed compute pool bounds this cleanup;
+        // acquiring through the cancelled program would reject it outright.
+        program
+            .compute_pool()
+            .run(move || project_captures(stdout, stderr, stdout_budget, stderr_budget))
+            .await??
+    } else {
+        let _compute = program.acquire(PermitKind::Compute).await?;
+        program
+            .compute_pool()
+            .run(move || project_captures(stdout, stderr, stdout_budget, stderr_budget))
+            .await??
+    };
     let stdout_retained = stdout_projection.reduced
         || stdout_projection.normalized
         || stdout_projection.text.is_none() && !stdout.content()?.is_empty();
@@ -231,6 +245,17 @@ async fn build_response(
     )?;
     charge(program, &response, 1)?;
     Ok(response)
+}
+
+fn project_captures(
+    stdout: Capture,
+    stderr: Capture,
+    stdout_budget: usize,
+    stderr_budget: usize,
+) -> Result<(Capture, Capture, Projection, Projection), StoreError> {
+    let stdout_projection = stdout.project(stdout_budget)?;
+    let stderr_projection = stderr.project(stderr_budget)?;
+    Ok((stdout, stderr, stdout_projection, stderr_projection))
 }
 
 fn response(
@@ -319,10 +344,13 @@ fn project(bytes: &[u8], limit: usize) -> Projection {
     } else {
         text.to_owned()
     };
+    let reduction = collapse_repeated_lines(&normalized_text);
+    let reduced = reduction.reduced();
+    let normalized_text = reduction.into_text();
     if normalized_text.len() <= limit {
         return Projection {
             text: (!normalized_text.is_empty()).then_some(normalized_text),
-            reduced: false,
+            reduced,
             normalized,
         };
     }
@@ -592,6 +620,23 @@ mod tests {
         assert!(std::str::from_utf8(text.as_bytes()).is_ok());
         assert!(floor_boundary("中", 1) == 0);
         assert!(ceil_boundary("中", 1) == "中".len());
+    }
+
+    #[test]
+    fn projection_collapses_only_byte_saving_repeated_lines() {
+        let repeated = project("alpha\n".repeat(5).as_bytes(), 1_024);
+        assert_eq!(repeated.text.as_deref(), Some("alpha\n×5\n"));
+        assert!(repeated.reduced);
+        assert!(!repeated.normalized);
+
+        let too_short_to_save = project(b"x\nx\n", 1_024);
+        assert_eq!(too_short_to_save.text.as_deref(), Some("x\nx\n"));
+        assert!(!too_short_to_save.reduced);
+
+        let normalized = project("same\r\n".repeat(4).as_bytes(), 1_024);
+        assert_eq!(normalized.text.as_deref(), Some("same\n×4\n"));
+        assert!(normalized.reduced);
+        assert!(normalized.normalized);
     }
 
     #[test]
