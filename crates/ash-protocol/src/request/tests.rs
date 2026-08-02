@@ -51,9 +51,9 @@ fn all_core_request_fixtures_are_canonical_typed_messages() {
         (FS_REQUEST, Operation::Fs),
         (BATCH_REQUEST, Operation::Batch),
         (SNAPSHOT_REQUEST, Operation::Snapshot),
-        (REF_REQUEST, Operation::Ref),
-        (REF_PROJECT_REQUEST, Operation::Ref),
-        (REF_MATERIALIZE_REQUEST, Operation::Ref),
+        (REF_REQUEST, Operation::RefSearch),
+        (REF_PROJECT_REQUEST, Operation::RefProject),
+        (REF_MATERIALIZE_REQUEST, Operation::RefMaterialize),
         (CANCEL_REQUEST, Operation::Cancel),
     ];
     for (fixture, operation) in expected {
@@ -173,20 +173,20 @@ fn reference_data_formulas_are_typed_compact_and_capability_bound() {
 #[test]
 fn every_reference_formula_operator_round_trips_exactly() {
     let formulas = [
-        (RefArgs::bytes(9, 0, 8).expect("bytes"), "a{b}:\n[@9,0,8]\n"),
-        (RefArgs::lines(9, 2, 3).expect("lines"), "a{l}:\n[@9,2,3]\n"),
+        (RefArgs::bytes(9, 0, 8).expect("bytes"), "o:/\na:[@9,0,8]\n"),
+        (RefArgs::lines(9, 2, 3).expect("lines"), "o:#\na:[@9,2,3]\n"),
         (
             RefArgs::search(9, 0, 1024, "TODO", REF_CASE_INSENSITIVE).expect("search"),
-            "a{g}:\n[@9,0,1024,TODO,2]\n",
+            "o:?\na:[@9,0,1024,TODO,2]\n",
         ),
-        (RefArgs::release(9).expect("release"), "a{d}:\n[@9]\n"),
+        (RefArgs::release(9).expect("release"), "o:-\na:[@9]\n"),
         (
             RefArgs::project(9, "d", 4, 16, vec!["p".to_owned(), "t".to_owned()]).expect("project"),
-            "a{p}:\n[@9,d,4,16,p,t]\n",
+            "o:|\na:[@9,d,4,16,p,t]\n",
         ),
         (
             RefArgs::materialize(9, "artifacts/out.bin").expect("materialize"),
-            "a{w}:\n[@9,artifacts/out.bin]\n",
+            "o:>\na:[@9,artifacts/out.bin]\n",
         ),
     ];
     for (index, (formula, fragment)) in formulas.into_iter().enumerate() {
@@ -203,15 +203,16 @@ fn every_reference_formula_operator_round_trips_exactly() {
 
 #[test]
 fn reference_formula_arity_and_operator_are_fail_closed() {
-    for arguments in [
-        "a{b}:\n[@7,0]\n",
-        "a{d}:\n[@7,0]\n",
-        "a{p}:\n[@7,d,0,1]\n",
-        "a{w}:\n[@7]\n",
-        "a{x}:\n[@7]\n",
-        "a{b}:\n@7\n",
+    for (operator, arguments) in [
+        ("/", "a:[@7,0]\n"),
+        ("-", "a:[@7,0]\n"),
+        ("|", "a:[@7,d,0,1]\n"),
+        (">", "a:[@7]\n"),
+        ("~", "a:[@7]\n"),
+        ("/", "a{b}:\n@7\n"),
+        ("h", "a{b}:\n[@7,0,1]\n"),
     ] {
-        let input = format!("t:1\ni:90\no:h\n{arguments}u{{tok,rec,ms}}:\n64,4,30000\n");
+        let input = format!("t:1\ni:90\no:{operator}\n{arguments}u{{tok,rec,ms}}:\n64,4,30000\n");
         assert!(
             Request::decode(&decode(&input).expect("ASON syntax")).is_err(),
             "accepted {arguments:?}"

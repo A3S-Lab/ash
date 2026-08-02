@@ -95,6 +95,13 @@ mod tests {
             canonicalize(input, &Limits::default()).expect("valid input"),
             "v:safe\n"
         );
+        for symbol in ["/", "#", "?", "-", "|", ">"] {
+            let input = format!("o:\"{symbol}\"\n");
+            assert_eq!(
+                canonicalize(&input, &Limits::default()).expect("valid operator"),
+                format!("o:{symbol}\n")
+            );
+        }
     }
 
     #[test]

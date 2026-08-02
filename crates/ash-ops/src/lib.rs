@@ -65,7 +65,7 @@ impl PortableOperations {
             | Operation::Patch.mask()
             | Operation::Fs.mask()
             | Operation::Batch.mask()
-            | Operation::Ref.mask()
+            | Operation::RefBytes.mask()
             | Operation::Snapshot.mask()
     }
 

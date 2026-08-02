@@ -38,6 +38,9 @@ q:ref-7
 4. The parser enforces document, collection, string, and depth limits before full model construction.
 5. Decode followed by encode must yield one unique byte sequence.
 
+Bare atoms additionally reserve `# ? | >`; together with `/ -` they form ASH's
+single-byte formula operators. Other punctuation remains quoted.
+
 ## Token evidence
 
 The fixed format corpus produces the same ratio under pinned `cl100k_base` and

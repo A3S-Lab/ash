@@ -281,7 +281,7 @@ impl Arguments {
             Self::Fs(_) => Operation::Fs,
             Self::Batch(_) => Operation::Batch,
             Self::Snapshot(_) => Operation::Snapshot,
-            Self::Ref(_) => Operation::Ref,
+            Self::Ref(arguments) => arguments.operation(),
             Self::Cancel(_) => Operation::Cancel,
         }
     }
@@ -312,6 +312,12 @@ impl Arguments {
     }
 
     fn decode(operation: Operation, value: &Value) -> Result<Self, RequestError> {
+        if operation.is_reference_formula() {
+            let Value::Vector(values) = value else {
+                return Err(RequestError::ExpectedVector("a"));
+            };
+            return RefArgs::decode(operation, values).map(Self::Ref);
+        }
         if matches!(operation, Operation::Fs | Operation::Batch) {
             let Value::Table(table) = value else {
                 return Err(RequestError::ExpectedTable("a"));
@@ -336,7 +342,6 @@ impl Arguments {
             Operation::Search => SearchArgs::decode(record).map(Self::Search),
             Operation::Patch => PatchArgs::decode(record).map(Self::Patch),
             Operation::Snapshot => SnapshotArgs::decode(record).map(Self::Snapshot),
-            Operation::Ref => RefArgs::decode(record).map(Self::Ref),
             Operation::Cancel => CancelArgs::decode(record).map(Self::Cancel),
             _ => Err(RequestError::UnsupportedOperation),
         }
@@ -1623,31 +1628,25 @@ impl RefArgs {
         Self::new(reference, RefFormula::Materialize { path: path.into() })
     }
 
-    fn decode(record: &Record) -> Result<Self, RequestError> {
-        if record.columns().len() != 1 || record.values().len() != 1 {
-            return Err(RequestError::Columns);
-        }
-        let Cell::Vector(values) = &record.values()[0] else {
-            return Err(RequestError::ExpectedVector("a"));
-        };
+    fn decode(operation: Operation, values: &[Atom]) -> Result<Self, RequestError> {
         let reference =
             reference_formula_atom(values.first().ok_or(RequestError::UnexpectedValue("a"))?)?;
-        let formula = match record.columns()[0].as_str() {
-            "b" => {
+        let formula = match operation {
+            Operation::RefBytes => {
                 expect_formula_width(values, 3)?;
                 RefFormula::Bytes {
                     offset: unsigned_atom(&values[1], "o")?,
                     length: unsigned_atom(&values[2], "n")?,
                 }
             }
-            "l" => {
+            Operation::RefLines => {
                 expect_formula_width(values, 3)?;
                 RefFormula::Lines {
                     offset: unsigned_atom(&values[1], "o")?,
                     length: unsigned_atom(&values[2], "n")?,
                 }
             }
-            "g" => {
+            Operation::RefSearch => {
                 expect_formula_width(values, 5)?;
                 RefFormula::Search {
                     offset: unsigned_atom(&values[1], "o")?,
@@ -1656,11 +1655,11 @@ impl RefArgs {
                     flags: narrow_u32(unsigned_atom(&values[4], "f")?, "f")?,
                 }
             }
-            "d" => {
+            Operation::RefRelease => {
                 expect_formula_width(values, 1)?;
                 RefFormula::Release
             }
-            "p" => {
+            Operation::RefProject => {
                 if values.len() < 5 {
                     return Err(RequestError::UnexpectedValue("a"));
                 }
@@ -1674,48 +1673,45 @@ impl RefArgs {
                         .collect::<Result<_, _>>()?,
                 }
             }
-            "w" => {
+            Operation::RefMaterialize => {
                 expect_formula_width(values, 2)?;
                 RefFormula::Materialize {
                     path: text_formula_atom(&values[1], "p")?.to_owned(),
                 }
             }
-            _ => return Err(RequestError::UnexpectedValue("a")),
+            _ => return Err(RequestError::UnsupportedOperation),
         };
         Self::new(reference, formula)
     }
 
     fn encode(&self) -> Result<Value, BuildError> {
-        let (operator, mut values) = match &self.formula {
-            RefFormula::Bytes { offset, length } => (
-                "b",
+        let mut values = match &self.formula {
+            RefFormula::Bytes { offset, length } => {
                 vec![
                     Atom::text(offset.to_string()),
                     Atom::text(length.to_string()),
-                ],
-            ),
-            RefFormula::Lines { offset, length } => (
-                "l",
+                ]
+            }
+            RefFormula::Lines { offset, length } => {
                 vec![
                     Atom::text(offset.to_string()),
                     Atom::text(length.to_string()),
-                ],
-            ),
+                ]
+            }
             RefFormula::Search {
                 offset,
                 length,
                 query,
                 flags,
-            } => (
-                "g",
+            } => {
                 vec![
                     Atom::text(offset.to_string()),
                     Atom::text(length.to_string()),
                     Atom::text(query),
                     Atom::text(flags.to_string()),
-                ],
-            ),
-            RefFormula::Release => ("d", vec![]),
+                ]
+            }
+            RefFormula::Release => vec![],
             RefFormula::Project {
                 table,
                 offset,
@@ -1727,15 +1723,12 @@ impl RefArgs {
                 values.push(Atom::text(offset.to_string()));
                 values.push(Atom::text(length.to_string()));
                 values.extend(columns.iter().map(Atom::text));
-                ("p", values)
+                values
             }
-            RefFormula::Materialize { path } => ("w", vec![Atom::text(path)]),
+            RefFormula::Materialize { path } => vec![Atom::text(path)],
         };
         values.insert(0, Atom::reference(self.reference));
-        Ok(Value::Record(Record::new(
-            vec![Key::new(operator)?],
-            vec![Cell::Vector(values)],
-        )?))
+        Ok(Value::Vector(values))
     }
 
     fn validate(&self) -> Result<(), RequestError> {
@@ -1805,6 +1798,18 @@ impl RefArgs {
     #[must_use]
     pub const fn formula(&self) -> &RefFormula {
         &self.formula
+    }
+
+    #[must_use]
+    pub const fn operation(&self) -> Operation {
+        match self.formula {
+            RefFormula::Bytes { .. } => Operation::RefBytes,
+            RefFormula::Lines { .. } => Operation::RefLines,
+            RefFormula::Search { .. } => Operation::RefSearch,
+            RefFormula::Release => Operation::RefRelease,
+            RefFormula::Project { .. } => Operation::RefProject,
+            RefFormula::Materialize { .. } => Operation::RefMaterialize,
+        }
     }
 }
 

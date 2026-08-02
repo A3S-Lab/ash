@@ -1,7 +1,6 @@
 t:1
 i:45
-o:h
-a{w}:
-[@8,artifacts/out.bin]
+o:>
+a:[@8,artifacts/out.bin]
 u{tok,rec,ms}:
 256,64,30000

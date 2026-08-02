@@ -362,7 +362,7 @@ const steps: WalkthroughStep[] = [
   },
   {
     id: 'project',
-    opcode: 'h',
+    opcode: '|',
     operation: 'PROJECT',
     filename: '.ash/07-project.ason',
     command: 'ash run < .ash/07-project.ason',
@@ -380,8 +380,8 @@ const steps: WalkthroughStep[] = [
     },
     annotations: [
       {
-        zh: '`a{p}` 是一个数据公式：source → selector → range → columns。',
-        en: '`a{p}` is a data formula: source → selector → range → columns.',
+        zh: '`o:|` 直接表示列投影，`a` 只保留 source → table → range → columns。',
+        en: '`o:|` is column projection directly; `a` keeps only source → table → range → columns.',
       },
       {
         zh: '请求本身只有一行，不需要重新执行原任务，也不重传完整结果。',
@@ -392,17 +392,16 @@ const steps: WalkthroughStep[] = [
         en: '`z:10` marks reduced + retained; the remaining data can still be projected again.',
       },
     ],
-    tags: ['o:h', 'formula', 'projection'],
+    tags: ['o:|', 'formula', 'projection'],
     request: [
       't:1',
       'i:44',
-      'o:h',
-      'a{p}:',
-      '[@7,d,0,64,p,l,t]',
+      'o:|',
+      'a:[@7,d,0,64,p,l,t]',
       'u{tok,rec,ms}:',
       '256,64,30000',
     ],
-    requestFocus: [3, 4, 5],
+    requestFocus: [3, 4],
     result: [
       't:3',
       'i:44',

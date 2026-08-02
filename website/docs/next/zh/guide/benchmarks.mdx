@@ -18,6 +18,8 @@ cargo run -p a3s-ash-bench --locked -- \
 报告固定语料 SHA-256、tokenizer、原始字节、Token 数、相对比例和门槛。当前 ASON
 在两种 tokenizer 上都使用紧凑行式 JSON 约 62% 的 Token，回归上限为 65%。
 
+同一份报告还比较六种保留结果公式。规范的 `/ # ? - | >` 语法在两种 tokenizer 中均为 80 Token，与直接 ASCII 字母的最低值相同；希腊字形为 86/86，旧包装结构为 97/98。规范语法占旧结构字节数的 84%，Token 分别为 83% 和 82%。
+
 ## 多核确定性
 
 ```bash

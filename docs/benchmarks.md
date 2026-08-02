@@ -4,9 +4,11 @@ Status: deterministic format corpus, two-tokenizer representation evidence, reta
 
 Token reduction is the primary performance objective of `ash`. This document defines how it is measured without trading away task correctness or hiding protocol overhead.
 
-The checked-in [v0.1.0 format report](../benches/reports/v0.1.0/format.json) is generated from a versioned synthetic corpus and pinned `cl100k_base` and `o200k_base` vocabularies. It compares canonical ASON with semantically equivalent compact row-object and columnar JSON. It is deliberately limited to representation cost: no agent success, native-shell task, latency, or multi-core claim is inferred from it.
+The checked-in [v0.1.0 format report](../benches/reports/v0.1.0/format.json) is generated from a versioned synthetic corpus and pinned `cl100k_base` and `o200k_base` vocabularies. It compares canonical ASON with semantically equivalent compact row-object and columnar JSON, and separately compares four equivalent retained-formula syntaxes. It is deliberately limited to representation cost: no agent success, native-shell task, latency, or multi-core claim is inferred from it.
 
 The current corpus records 6,313 `cl100k_base` tokens and 6,312 `o200k_base` tokens for ASON, versus 10,192 and 10,198 for compact row-object JSON. That rounds up to 62% in both profiles. The checked gate is a 65% regression ceiling; the proposed 50% release target below remains unachieved and unchanged. Columnar JSON is also reported rather than hidden, and is closer at 6,807 and 6,909 tokens.
+
+For retained formulas, the report measures the former ASCII wrapper (`o:h` plus an inner discriminator), direct Greek glyphs, direct ASCII letters, and the canonical keyboard-math operators `/ # ? - | >`. Across byte slice, line slice, search, release, projection, and materialization, the canonical form is 126 bytes and 80 tokens in both tokenizers. It matches the direct-letter token floor, improves on Greek's 132 bytes and 86/86 tokens, and uses 84% of the wrapper bytes plus 83%/82% of its tokens. The checked ceiling is 85% in every profile.
 
 Reproduce the byte-identical report with:
 
@@ -205,10 +207,11 @@ Measured values:
 
 Canonical ASON rules may change before ASH/1 freezes if a shorter representation increases retries or reconstruction errors.
 
-The runner also gates all six retained-result formulas against the earlier sparse-union shape. The formula corpus contains byte slice, line slice, search, release, projection, and materialization requests; its aggregate UTF-8 bytes and token counts must each be strictly lower under both pinned tokenizers. Reproduce that focused gate with:
+The runner gates all six retained-result formulas twice: the earlier direct ASCII formula beats the sparse-union shape, and the current direct mathematical operator form beats the former wrapper while matching the direct-ASCII token floor. The corpus contains byte slice, line slice, search, release, projection, and materialization requests. Reproduce the focused gates with:
 
 ```sh
 cargo test -p a3s-ash-bench reference_formulas_beat_the_sparse_union
+cargo test -p a3s-ash-bench direct_math_symbols_beat_wrappers_and_match_the_ascii_token_floor
 ```
 
 ## 9. Runtime benchmarks

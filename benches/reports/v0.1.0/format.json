@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "corpus": "benches/corpus/v1.json",
   "corpus_sha256": "a8f043656e10a1b72af64648bf111fce27024670e27b591657c853707c23bd70",
   "workspace_lock_sha256": "ade225648b61c05e3ca771c1a53f1881480f7a671a1d43b66f25fccd3ae0d09c",
@@ -108,6 +108,124 @@
       "bytes": 22402,
       "cl100k_tokens": 6807,
       "o200k_tokens": 6909
+    }
+  },
+  "formula_algebra": {
+    "operators": [
+      {
+        "id": "bytes",
+        "symbol": "/",
+        "legacy_ascii_wrapper": {
+          "bytes": 22,
+          "cl100k_tokens": 16,
+          "o200k_tokens": 16
+        },
+        "canonical_symbol": {
+          "bytes": 18,
+          "cl100k_tokens": 13,
+          "o200k_tokens": 13
+        }
+      },
+      {
+        "id": "lines",
+        "symbol": "#",
+        "legacy_ascii_wrapper": {
+          "bytes": 20,
+          "cl100k_tokens": 14,
+          "o200k_tokens": 15
+        },
+        "canonical_symbol": {
+          "bytes": 16,
+          "cl100k_tokens": 12,
+          "o200k_tokens": 12
+        }
+      },
+      {
+        "id": "search",
+        "symbol": "?",
+        "legacy_ascii_wrapper": {
+          "bytes": 32,
+          "cl100k_tokens": 21,
+          "o200k_tokens": 21
+        },
+        "canonical_symbol": {
+          "bytes": 28,
+          "cl100k_tokens": 18,
+          "o200k_tokens": 18
+        }
+      },
+      {
+        "id": "release",
+        "symbol": "-",
+        "legacy_ascii_wrapper": {
+          "bytes": 15,
+          "cl100k_tokens": 11,
+          "o200k_tokens": 11
+        },
+        "canonical_symbol": {
+          "bytes": 11,
+          "cl100k_tokens": 8,
+          "o200k_tokens": 8
+        }
+      },
+      {
+        "id": "project",
+        "symbol": "|",
+        "legacy_ascii_wrapper": {
+          "bytes": 28,
+          "cl100k_tokens": 19,
+          "o200k_tokens": 19
+        },
+        "canonical_symbol": {
+          "bytes": 24,
+          "cl100k_tokens": 16,
+          "o200k_tokens": 16
+        }
+      },
+      {
+        "id": "materialize",
+        "symbol": ">",
+        "legacy_ascii_wrapper": {
+          "bytes": 33,
+          "cl100k_tokens": 16,
+          "o200k_tokens": 16
+        },
+        "canonical_symbol": {
+          "bytes": 29,
+          "cl100k_tokens": 13,
+          "o200k_tokens": 13
+        }
+      }
+    ],
+    "candidates": {
+      "legacy_ascii_wrapper": {
+        "bytes": 150,
+        "cl100k_tokens": 97,
+        "o200k_tokens": 98
+      },
+      "direct_greek": {
+        "bytes": 132,
+        "cl100k_tokens": 86,
+        "o200k_tokens": 86
+      },
+      "direct_ascii_letters": {
+        "bytes": 126,
+        "cl100k_tokens": 80,
+        "o200k_tokens": 80
+      },
+      "canonical_symbols": {
+        "bytes": 126,
+        "cl100k_tokens": 80,
+        "o200k_tokens": 80
+      }
+    },
+    "gates": {
+      "canonical_vs_legacy_bytes_percent": 84,
+      "canonical_vs_legacy_cl100k_percent": 83,
+      "canonical_vs_legacy_o200k_percent": 82,
+      "required_max_percent": 85,
+      "matches_direct_ascii_token_floor": true,
+      "passed": true
     }
   },
   "gates": {

@@ -82,14 +82,14 @@ const tasks: DemoTask[] = [
   },
   {
     id: 'project',
-    opcode: 'h',
+    opcode: '|',
     command: 'ash run < .ash/07-project.ason',
     title: { zh: '投影最终证据', en: 'Project final evidence' },
     comment: {
       zh: '完整数据留在 @7，只取 p/l/t 三列',
       en: 'Keep full data at @7; retrieve only p/l/t',
     },
-    request: ['o:h', 'a{p}:', '[@7,d,0,64,p,l,t]'],
+    request: ['o:|', 'a:[@7,d,0,64,p,l,t]'],
     result: '2 rows · retained=@7 · stable',
   },
 ];

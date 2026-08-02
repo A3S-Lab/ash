@@ -43,6 +43,7 @@ const [
   releaseWorkflow,
   config,
   home,
+  symbolAlgebra,
   switcher,
   alignedStyles,
 ] = await Promise.all([
@@ -52,6 +53,7 @@ const [
   text('.github/workflows/release.yml'),
   text('website/rspress.config.ts'),
   text('website/theme/components/HomeLayout.tsx'),
+  text('website/theme/components/AshSymbolAlgebra.tsx'),
   text('website/theme/components/InstallSwitcher.tsx'),
   text('website/theme/a3s-aligned.css'),
 ]);
@@ -130,6 +132,26 @@ requireIncludes(
   'Homepage evidence',
 );
 requireIncludes(home, "metricTargetsValue: '6'", 'Homepage evidence');
+requireIncludes(
+  home,
+  '<AshSymbolAlgebra locale={locale} />',
+  'Homepage algebra',
+);
+for (const operator of report.formula_algebra.operators) {
+  requireIncludes(
+    symbolAlgebra,
+    `symbol: '${operator.symbol}'`,
+    `Formula operator ${operator.id}`,
+  );
+}
+requireIncludes(
+  symbolAlgebra,
+  `${report.formula_algebra.candidates.canonical_symbols.cl100k_tokens} / ${report.formula_algebra.candidates.canonical_symbols.o200k_tokens} TOKEN`,
+  'Formula benchmark evidence',
+);
+if (!report.formula_algebra.gates.passed) {
+  throw new Error('The checked formula algebra gate must pass.');
+}
 
 for (const marker of [
   '--ash-type-caption: 10px',

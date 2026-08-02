@@ -34,12 +34,18 @@ pub(super) fn decode(
 
 fn bare(source: &str, line: usize, column: usize, max_bytes: usize) -> Result<Atom, DecodeError> {
     enforce_bytes(source.len(), max_bytes, line)?;
-    if !source.bytes().all(|byte| {
-        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'/' | b'@' | b'+' | b'-')
-    }) {
+    if !source.bytes().all(is_bare_byte) {
         return Err(syntax(line, column, "invalid bare scalar character"));
     }
     Ok(Atom::Text(source.to_owned()))
+}
+
+pub(super) const fn is_bare_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'_' | b'.' | b'/' | b'@' | b'+' | b'-' | b'#' | b'?' | b'|' | b'>'
+        )
 }
 
 fn quoted(

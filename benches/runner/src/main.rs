@@ -40,7 +40,41 @@ struct Report {
     tokenizers: [&'static str; 2],
     datasets: Vec<DatasetReport>,
     aggregate: EncodingSet,
+    formula_algebra: FormulaAlgebraReport,
     gates: Gates,
+}
+
+#[derive(Debug, Serialize)]
+struct FormulaAlgebraReport {
+    operators: Vec<FormulaOperatorReport>,
+    candidates: FormulaCandidates,
+    gates: FormulaGates,
+}
+
+#[derive(Debug, Serialize)]
+struct FormulaOperatorReport {
+    id: &'static str,
+    symbol: &'static str,
+    legacy_ascii_wrapper: Measurement,
+    canonical_symbol: Measurement,
+}
+
+#[derive(Debug, Serialize)]
+struct FormulaCandidates {
+    legacy_ascii_wrapper: Measurement,
+    direct_greek: Measurement,
+    direct_ascii_letters: Measurement,
+    canonical_symbols: Measurement,
+}
+
+#[derive(Debug, Serialize)]
+struct FormulaGates {
+    canonical_vs_legacy_bytes_percent: usize,
+    canonical_vs_legacy_cl100k_percent: usize,
+    canonical_vs_legacy_o200k_percent: usize,
+    required_max_percent: usize,
+    matches_direct_ascii_token_floor: bool,
+    passed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,7 +91,7 @@ struct EncodingSet {
     json_columns: Measurement,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 struct Measurement {
     bytes: usize,
     cl100k_tokens: usize,
@@ -107,6 +141,7 @@ fn build_report() -> Result<Report, Box<dyn Error>> {
     }
     let cl100k = cl100k_base()?;
     let o200k = o200k_base()?;
+    let formula_algebra = build_formula_algebra(&cl100k, &o200k)?;
     let mut datasets = Vec::with_capacity(corpus.datasets.len());
     let mut aggregate = EncodingSet::default();
     for dataset in corpus.datasets {
@@ -149,7 +184,7 @@ fn build_report() -> Result<Report, Box<dyn Error>> {
         return Err("ASON token-efficiency release gate failed".into());
     }
     Ok(Report {
-        schema: 1,
+        schema: 2,
         corpus: "benches/corpus/v1.json".to_owned(),
         corpus_sha256: hex(&Sha256::digest(CORPUS_BYTES)),
         workspace_lock_sha256: hex(&Sha256::digest(WORKSPACE_LOCK)),
@@ -159,11 +194,140 @@ fn build_report() -> Result<Report, Box<dyn Error>> {
         ],
         datasets,
         aggregate,
+        formula_algebra,
         gates: Gates {
             semantic_round_trip: true,
             ason_vs_record_json_cl100k_percent: cl100k_percent,
             ason_vs_record_json_o200k_percent: o200k_percent,
             required_max_percent: REQUIRED_MAX_PERCENT,
+            passed,
+        },
+    })
+}
+
+fn build_formula_algebra(
+    cl100k: &tiktoken_rs::CoreBPE,
+    o200k: &tiktoken_rs::CoreBPE,
+) -> Result<FormulaAlgebraReport, Box<dyn Error>> {
+    struct FormulaCase {
+        id: &'static str,
+        symbol: &'static str,
+        legacy: &'static str,
+        greek: &'static str,
+        ascii: &'static str,
+        canonical: &'static str,
+    }
+
+    let cases = [
+        FormulaCase {
+            id: "bytes",
+            symbol: "/",
+            legacy: "o:h\na{b}:\n[@7,0,4096]\n",
+            greek: "o:β\na:[@7,0,4096]\n",
+            ascii: "o:b\na:[@7,0,4096]\n",
+            canonical: "o:/\na:[@7,0,4096]\n",
+        },
+        FormulaCase {
+            id: "lines",
+            symbol: "#",
+            legacy: "o:h\na{l}:\n[@7,2,32]\n",
+            greek: "o:λ\na:[@7,2,32]\n",
+            ascii: "o:l\na:[@7,2,32]\n",
+            canonical: "o:#\na:[@7,2,32]\n",
+        },
+        FormulaCase {
+            id: "search",
+            symbol: "?",
+            legacy: "o:h\na{g}:\n[@7,0,1048576,TODO,0]\n",
+            greek: "o:σ\na:[@7,0,1048576,TODO,0]\n",
+            ascii: "o:g\na:[@7,0,1048576,TODO,0]\n",
+            canonical: "o:?\na:[@7,0,1048576,TODO,0]\n",
+        },
+        FormulaCase {
+            id: "release",
+            symbol: "-",
+            legacy: "o:h\na{d}:\n[@7]\n",
+            greek: "o:δ\na:[@7]\n",
+            ascii: "o:d\na:[@7]\n",
+            canonical: "o:-\na:[@7]\n",
+        },
+        FormulaCase {
+            id: "project",
+            symbol: "|",
+            legacy: "o:h\na{p}:\n[@7,d,0,64,p,l,t]\n",
+            greek: "o:π\na:[@7,d,0,64,p,l,t]\n",
+            ascii: "o:p\na:[@7,d,0,64,p,l,t]\n",
+            canonical: "o:|\na:[@7,d,0,64,p,l,t]\n",
+        },
+        FormulaCase {
+            id: "materialize",
+            symbol: ">",
+            legacy: "o:h\na{w}:\n[@8,artifacts/out.bin]\n",
+            greek: "o:μ\na:[@8,artifacts/out.bin]\n",
+            ascii: "o:w\na:[@8,artifacts/out.bin]\n",
+            canonical: "o:>\na:[@8,artifacts/out.bin]\n",
+        },
+    ];
+
+    let mut legacy = String::new();
+    let mut greek = String::new();
+    let mut ascii = String::new();
+    let mut canonical = String::new();
+    let mut operators = Vec::with_capacity(cases.len());
+    for case in cases {
+        legacy.push_str(case.legacy);
+        greek.push_str(case.greek);
+        ascii.push_str(case.ascii);
+        canonical.push_str(case.canonical);
+        operators.push(FormulaOperatorReport {
+            id: case.id,
+            symbol: case.symbol,
+            legacy_ascii_wrapper: measure(case.legacy, cl100k, o200k),
+            canonical_symbol: measure(case.canonical, cl100k, o200k),
+        });
+    }
+    let candidates = FormulaCandidates {
+        legacy_ascii_wrapper: measure(&legacy, cl100k, o200k),
+        direct_greek: measure(&greek, cl100k, o200k),
+        direct_ascii_letters: measure(&ascii, cl100k, o200k),
+        canonical_symbols: measure(&canonical, cl100k, o200k),
+    };
+    let bytes_percent = percentage(
+        candidates.canonical_symbols.bytes,
+        candidates.legacy_ascii_wrapper.bytes,
+    );
+    let cl100k_percent = percentage(
+        candidates.canonical_symbols.cl100k_tokens,
+        candidates.legacy_ascii_wrapper.cl100k_tokens,
+    );
+    let o200k_percent = percentage(
+        candidates.canonical_symbols.o200k_tokens,
+        candidates.legacy_ascii_wrapper.o200k_tokens,
+    );
+    const REQUIRED_MAX_PERCENT: usize = 85;
+    let matches_direct_ascii_token_floor = candidates.canonical_symbols.cl100k_tokens
+        == candidates.direct_ascii_letters.cl100k_tokens
+        && candidates.canonical_symbols.o200k_tokens
+            == candidates.direct_ascii_letters.o200k_tokens;
+    let passed = bytes_percent <= REQUIRED_MAX_PERCENT
+        && cl100k_percent <= REQUIRED_MAX_PERCENT
+        && o200k_percent <= REQUIRED_MAX_PERCENT
+        && matches_direct_ascii_token_floor
+        && candidates.canonical_symbols.bytes < candidates.direct_greek.bytes
+        && candidates.canonical_symbols.cl100k_tokens < candidates.direct_greek.cl100k_tokens
+        && candidates.canonical_symbols.o200k_tokens < candidates.direct_greek.o200k_tokens;
+    if !passed {
+        return Err("symbol formula token-efficiency gate failed".into());
+    }
+    Ok(FormulaAlgebraReport {
+        operators,
+        candidates,
+        gates: FormulaGates {
+            canonical_vs_legacy_bytes_percent: bytes_percent,
+            canonical_vs_legacy_cl100k_percent: cl100k_percent,
+            canonical_vs_legacy_o200k_percent: o200k_percent,
+            required_max_percent: REQUIRED_MAX_PERCENT,
+            matches_direct_ascii_token_floor,
             passed,
         },
     })
@@ -411,7 +575,7 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_report, measure};
+    use super::{build_formula_algebra, build_report, measure};
 
     #[test]
     fn corpus_round_trips_and_passes_the_token_gate() {
@@ -455,5 +619,18 @@ mod tests {
             formulas.o200k_tokens < sparse.o200k_tokens,
             "{formulas:?} vs {sparse:?}"
         );
+    }
+
+    #[test]
+    fn direct_math_symbols_beat_wrappers_and_match_the_ascii_token_floor() {
+        let cl100k = tiktoken_rs::cl100k_base().expect("cl100k tokenizer");
+        let o200k = tiktoken_rs::o200k_base().expect("o200k tokenizer");
+        let report = build_formula_algebra(&cl100k, &o200k).expect("formula report");
+        assert!(report.gates.passed);
+        assert!(report.gates.matches_direct_ascii_token_floor);
+        assert_eq!(report.candidates.canonical_symbols.cl100k_tokens, 80);
+        assert_eq!(report.candidates.canonical_symbols.o200k_tokens, 80);
+        assert_eq!(report.candidates.direct_greek.cl100k_tokens, 86);
+        assert_eq!(report.candidates.direct_greek.o200k_tokens, 86);
     }
 }

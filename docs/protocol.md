@@ -1,6 +1,6 @@
 # ASH/1 protocol and ASON
 
-Status: canonical ASON, framing, capability negotiation, action-bound approval permits, typed exec/read/list/search/patch/fs/batch/ref/snapshot/cancel schemas, durable file transactions, bounded DAG execution, retained-result inspection, and runtime paths are implemented
+Status: canonical ASON, framing, capability negotiation, action-bound approval permits, typed exec/read/list/search/patch/fs/batch/snapshot/cancel schemas, direct retained-result formula operators, durable file transactions, bounded DAG execution, retained-result inspection, and runtime paths are implemented
 
 ASH/1 is the typed session protocol of `ash`. ASON is its native LLM-facing serialization. Both are specified and implemented inside this project; ASON is not an adapter around another data format.
 
@@ -86,7 +86,7 @@ result:@7
 A string may be bare only when every byte is valid UTF-8 and every character is in this set:
 
 ```text
-A-Z a-z 0-9 _ . / @ + -
+A-Z a-z 0-9 _ . / @ + - # ? | >
 ```
 
 All other strings use double quotes with `\\`, `\"`, `\n`, `\r`, `\t`, and `\u{...}` escapes. The encoder quotes a string whenever a bare representation could conflict with a reserved scalar in its schema position.
@@ -169,7 +169,7 @@ d{ap,av,zp,zv,frm,out,ops,cap,os,arch,sid,n}:
 1,0,1,0,1048576,65536,1023,15,linux,x86_64,1,nonce-7
 ```
 
-The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises operation mask `0x3ff`, exactly all ten ASH/1.0 operation bits: `exec`, `read`, `list`, `search`, `patch`, `fs`, `batch`, `ref`, `snapshot`, and `cancel`. Its capability mask is `0x0f`: bit 0 workspace read, bit 1 workspace write, bit 2 direct host-process execution, and bit 3 retained-result access. Unknown response capability bits are invalid. A client that requests no capability receives a structurally valid session in which only capability-free control operations can run.
+The response echoes the nonce and request identifier. Limits and masks are intersections, never expansions, of client requests and server capabilities. The current source checkpoint advertises operation mask `0x3ff`, exactly all ten ASH/1 operation-family bits: `exec`, `read`, `list`, `search`, `patch`, `fs`, `batch`, retained formulas, `snapshot`, and `cancel`. The six retained-formula symbols share bit 7. Its capability mask is `0x0f`: bit 0 workspace read, bit 1 workspace write, bit 2 direct host-process execution, and bit 3 retained-result access. Unknown response capability bits are invalid. A client that requests no capability receives a structurally valid session in which only capability-free control operations can run.
 
 The handshake is retained by the adapter and is not repeated in each model-visible result.
 
@@ -246,11 +246,16 @@ The first protocol level reserves single-character presentation identifiers:
 | `p` | 4 | compare-and-swap patch | per-file commit or conflict records |
 | `f` | 5 | filesystem mutation | journaled mutation outcomes |
 | `b` | 6 | batch or dependency graph | node-status table and selected outputs |
-| `h` | 7 | retained result operation | slice, search, project, or materialize |
+| `/` | 7 | retained byte slice | bounded zero-based byte range |
+| `#` | 7 | retained line slice | bounded one-based line range |
+| `?` | 7 | retained search | bounded literal or regex matches |
+| `-` | 7 | retained release | drop one session reference |
+| `\|` | 7 | retained projection | row window plus ordered columns |
+| `>` | 7 | retained materialization | write immutable bytes without overwrite |
 | `s` | 8 | workspace snapshot or delta | versioned file-change records |
 | `k` | 9 | cancellation | acknowledged target and final cancellation state |
 
-These identifiers are stable within ASH/1. Internal Rust enum ordering is not part of the protocol.
+These are the only canonical identifiers in the current pre-release source. No legacy formula identifier or alias is accepted. Internal Rust enum ordering is not part of the protocol.
 
 ### 9.1 Core request schemas
 
@@ -275,7 +280,7 @@ Operation argument records are positional only after their declared columns, so 
 | `f` | `a[N]{i,k,p,q,h,v}:` | action ID, action kind, source or create path, optional destination, optional preimage digest, optional content |
 | `b` | `a[N]{i,d,o,a}:` | node ID, dependency-ID vector, leaf operation ID, canonical nested argument document |
 | `s` | `a{p,d,m,r,f}:` | sorted roots, maximum depth, capture mode, optional baseline reference, flags |
-| `h` | `a{op}:[...]` | one prefix data formula; `op` is `b`, `l`, `g`, `d`, `p`, or `w` |
+| `/ # ? - \| >` | `a:[...]` | one retained-result formula; the operation symbol fixes the exact operand schema |
 | `k` | `a{i}:` | active target request identifier |
 
 `exec` invokes `x` directly. Environment entries use `NAME=value` to set and `-NAME` to remove; duplicate names are invalid. `in` is `~`, inline text, or a retained `@reference`. Exec flag bit 0 clears the inherited environment before applying deltas.
@@ -298,22 +303,22 @@ Snapshot mode `0` captures current state and requires `r:~`; mode `1` emits a de
 
 Reference work is encoded as prefix data formulas, not as a sparse union with a numeric mode and unused nullable slots. The operator names the type and its single vector contains only that operator's operands:
 
-| Algebra | Canonical ASON argument | Meaning |
+| Algebra | Opcode and canonical operand vector | Meaning |
 | --- | --- | --- |
-| `β(@r,o,n)` | `a{b}:` then `[@r,o,n]` | zero-based byte slice |
-| `λ(@r,o,n)` | `a{l}:` then `[@r,o,n]` | one-based line slice |
-| `σ(q,@r[o:o+n],f)` | `a{g}:` then `[@r,o,n,q,f]` | bounded literal or regex search |
-| `drop(@r)` | `a{d}:` then `[@r]` | release the retained value |
-| `π_C(T[o:o+n])` | `a{p}:` then `[@r,T,o,n,C...]` | project ordered columns `C` from table field `T` |
-| `μ(path,@r)` | `a{w}:` then `[@r,path]` | materialize the bytes as a workspace file |
+| `β(@r,o,n)` | `o:/` and `a:[@r,o,n]` | zero-based byte slice |
+| `λ(@r,o,n)` | `o:#` and `a:[@r,o,n]` | one-based line slice |
+| `σ(q,@r[o:o+n],f)` | `o:?` and `a:[@r,o,n,q,f]` | bounded literal or regex search |
+| `drop(@r)` | `o:-` and `a:[@r]` | release the retained value |
+| `π_C(T[o:o+n])` | `o:|` and `a:[@r,T,o,n,C...]` | project ordered columns `C` from table field `T` |
+| `μ(path,@r)` | `o:>` and `a:[@r,path]` | materialize the bytes as a workspace file |
 
-The Greek notation defines semantics; the ASCII wire operators are canonical because their token cost is stable across model vocabularies. Formula arity is exact, so surplus operands fail before dispatch. Projection preserves source row order, accepts at most 128 unique ASON column keys, and applies the response record/output budget after the requested row window. Byte and search offsets are zero-based; line offsets are one-based. Search flag bits are 0 regular expression and 1 case-insensitive. Slice projections return UTF-8 when valid and lowercase hexadecimal otherwise; the full selected range remains identified by its digest and source reference.
+The keyboard symbols are the mathematical syntax, not display aliases. The report compares the former ASCII wrapper, direct Greek glyphs, direct ASCII letters, and this canonical set under pinned `cl100k_base` and `o200k_base`: `/ # ? - | >` matches the direct-letter floor at 80/80 tokens and 126 bytes, while Greek costs 86/86 tokens and 132 bytes and the wrapper costs 97/98 tokens and 150 bytes. Formula arity is exact, so surplus operands fail before dispatch. Projection preserves source row order, accepts at most 128 unique ASON column keys, and applies the response record/output budget after the requested row window. Byte and search offsets are zero-based; line offsets are one-based. Search flag bits are 0 regular expression and 1 case-insensitive. Slice projections return UTF-8 when valid and lowercase hexadecimal otherwise; the full selected range remains identified by its digest and source reference.
 
 `cancel` is a control-plane request. Its own request identifier must differ from the target. State `1` means cancellation was signaled to queued or running work; state `0` means the target was no longer active. Both are successful, idempotent outcomes.
 
 ### 9.2 Capability and approval binding
 
-Required capabilities are derived from typed arguments rather than supplied by the caller: `exec` requires host process; `read`, `list`, `search`, and `snapshot` require workspace read; `patch` and `fs` require workspace write; reference formulas require retained-result access, and `w` additionally requires workspace write; a batch requires the union of its leaves. Cancellation deliberately requires no capability so gated or queued work can always be stopped. Workspace write authorizes the reads necessary to validate a guarded mutation. Host-process execution is a stronger boundary: the child inherits the operating-system access of `ash`, so it is not constrained by the workspace read/write bits.
+Required capabilities are derived from typed arguments rather than supplied by the caller: `exec` requires host process; `read`, `list`, `search`, and `snapshot` require workspace read; `patch` and `fs` require workspace write; reference formulas require retained-result access, and `>` additionally requires workspace write; a batch requires the union of its leaves. Cancellation deliberately requires no capability so gated or queued work can always be stopped. Workspace write authorizes the reads necessary to validate a guarded mutation. Host-process execution is a stronger boundary: the child inherits the operating-system access of `ash`, so it is not constrained by the workspace read/write bits.
 
 A session policy splits the negotiated mask into direct grants and capabilities that require per-action approval. A missing permit returns status `3`, error `301`, retry class `3`, authorization stage `3`, and a retained evidence reference. Invalid, expired, mismatched, or replayed permits return error `302` and a fresh challenge. A capability outside the policy returns error `300` with retry class `0` and no side effect.
 
@@ -347,14 +352,14 @@ Core result data uses these schemas; reference projection intentionally substitu
 | `f` | `d[N]{i,k,p,q,s,h}:` | action ID, action kind, path ID, optional destination path ID, action state, resulting or observed digest |
 | `b` | `d[N]{i,o,s,c,r}:` | node ID, operation, node state, child final status, retained child-response reference |
 | `s` | `d[N]{p,c,k,z,h}:` | path ID, change kind, file kind, byte size, optional BLAKE3 digest |
-| `h` | `d{o,n,p,h,t,b}:`, `d[N]{o,l,c,t}:`, `d[N]{C...}:`, `d{p,s,z,h}:`, or `d{r,z}:` | slice, search, projection, materialization, or release selected by `b/l/g/p/w/d` |
+| `/ # ? - \| >` | `d{o,n,p,h,t,b}:`, `d[N]{o,l,c,t}:`, `d[N]{C...}:`, `d{p,s,z,h}:`, or `d{r,z}:` | byte/line slice, search, release, projection, or materialization selected directly by the request symbol |
 | `k` | `d{i,z}:` | target request identifier and cancellation state |
 
 Null (`~`) omits an unavailable projection, code, timestamp, or reference. Result flag bits are 0 truncated, 1 reduced, 2 normalized text, 3 retained evidence, 4 partial completion, and 5 redacted. Unknown bits are invalid. Any truncated result must retain inspectable evidence, and the retained flag must agree with the references actually present.
 
 Patch and filesystem action state values are `0` committed, `1` conflict, `2` rolled back, `3` recovery required, and `4` skipped. A clean stale-preimage or no-overwrite conflict uses status `8` and error `501`. If an atomic outcome is indeterminate, a durable journal is ambiguous, or rollback cannot restore a preimage, error `502` and result flag bit 4 make the partial state explicit; retry class `3` requires external inspection or approval rather than an automatic retry.
 
-Batch node states are `0` succeeded, `1` failed, `2` skipped, and `3` cancelled. Field `c` is the child's final status; a skipped node has `c:~` and `r:~` because it never ran. Every executed child response is retained atomically in node-ID order, so `r` remains stable even when workers finish in a different order. An all-success graph returns final status `0` with retained flag bit 3. Any failed or cancelled node produces program status `5`, error `800`, and both retained and partial flag bits; only its transitive descendants are skipped, while independent branches finish normally. The compact table is the immediate model context, and `ref` retrieves any full child response on demand.
+Batch node states are `0` succeeded, `1` failed, `2` skipped, and `3` cancelled. Field `c` is the child's final status; a skipped node has `c:~` and `r:~` because it never ran. Every executed child response is retained atomically in node-ID order, so `r` remains stable even when workers finish in a different order. An all-success graph returns final status `0` with retained flag bit 3. Any failed or cancelled node produces program status `5`, error `800`, and both retained and partial flag bits; only its transitive descendants are skipped, while independent branches finish normally. The compact table is the immediate model context, and the formula operators retrieve any full child response on demand.
 
 Snapshot change values are `0` present in a full capture, `1` added, `2` modified, and `3` removed. File kinds reuse the list schema. Every snapshot response sets the retained flag and returns the new manifest reference, even when a delta is empty; truncation therefore never loses the full state transition.
 
@@ -394,7 +399,7 @@ The dictionary maps a logical workspace path, not an unchecked native path. Opaq
 
 Result references identify immutable retained content or structured record sets. The store tracks full content digests internally; the short ASON identifier is only an alias.
 
-The `h` operation family is designed to:
+The `/ # ? - | >` operation family is designed to:
 
 - fetch byte, line, or record ranges;
 - search within a retained value;
@@ -403,7 +408,7 @@ The `h` operation family is designed to:
 - materialize binary content as a workspace artifact;
 - release retained content early.
 
-The current source implements all six formulas. `p` decodes bounded UTF-8 ASON, selects one top-level table, slices its rows, and emits only the ordered requested columns; malformed structured content, a non-table field, or an unknown column fails explicitly. `w` holds a source lease, reserves its complete response before mutation, and routes the immutable bytes through the same workspace-confined, journaled, no-overwrite transaction used by `fs create`. Its result record is path ID, transaction state, source byte size, and resulting or observed digest. Slice field `p` is the number of projected source bytes, while `n` is the full selected byte length. A busy reference cannot be released until active readers drop their leases.
+The current source implements all six formulas. `|` decodes bounded UTF-8 ASON, selects one top-level table, slices its rows, and emits only the ordered requested columns; malformed structured content, a non-table field, or an unknown column fails explicitly. `>` holds a source lease, reserves its complete response before mutation, and routes the immutable bytes through the same workspace-confined, journaled, no-overwrite transaction used by `fs create`. Its result record is path ID, transaction state, source byte size, and resulting or observed digest. Slice field `p` is the number of projected source bytes, while `n` is the full selected byte length. A busy reference cannot be released until active readers drop their leases.
 
 References are immutable and session-local. The current store enforces byte and entry quotas, never reuses a retired alias, and supports explicit release; TTL metadata is reserved for a later negotiated extension. Unknown, retired, or foreign-session identifiers return a stable reference error.
 

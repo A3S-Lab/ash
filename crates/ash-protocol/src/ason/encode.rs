@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
 use super::model::{Atom, Cell, Document, Field, Value};
+use super::scalar::is_bare_byte;
 
 #[must_use]
 pub fn encode(document: &Document) -> String {
@@ -88,11 +89,7 @@ fn write_atom(output: &mut String, atom: &Atom) {
 }
 
 fn is_bare_text(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'/' | b'@' | b'+' | b'-')
-        })
-        && !is_reference_syntax(value)
+    !value.is_empty() && value.bytes().all(is_bare_byte) && !is_reference_syntax(value)
 }
 
 fn is_reference_syntax(value: &str) -> bool {

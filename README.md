@@ -42,11 +42,11 @@ The schema for these short fields is negotiated once. Full output remains availa
 Reference work is a typed prefix formula, not a mode plus unused options. This request computes `π_{p,l,t}(d[0:64])` over retained result `@7`:
 
 ```ason
-a{p}:
-[@7,d,0,64,p,l,t]
+o:|
+a:[@7,d,0,64,p,l,t]
 ```
 
-The same algebra uses `b/l/g/d/p/w` for byte slice, line slice, search, release, table projection, and workspace materialization. Each operator carries only its operands. `w` is capability-gated and uses the journaled, no-overwrite file transaction path.
+The same algebra uses `/ # ? - | >` for byte slice, line slice, search, release, table projection, and workspace materialization. The operator is the request opcode and `a` is only its operand vector, so there is no generic reference wrapper or second discriminator. `>` is capability-gated and uses the journaled, no-overwrite file transaction path. On the checked six-formula corpus this canonical symbol form is 80 tokens in both pinned tokenizers, matching the direct ASCII-letter floor, versus 86/86 for direct Greek glyphs and 97/98 for the former wrapped form.
 
 ## Why ash is different
 

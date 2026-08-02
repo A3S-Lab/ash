@@ -1,5 +1,6 @@
 import { useLang, useSite, useVersion, withBase } from '@rspress/core/runtime';
 import { AshCommandWalkthrough } from './AshCommandWalkthrough';
+import { AshSymbolAlgebra } from './AshSymbolAlgebra';
 import { AshTerminalDemo } from './AshTerminalDemo';
 import { InstallSwitcher } from './InstallSwitcher';
 
@@ -32,7 +33,7 @@ const copy = {
     metricTestsValue: '135',
     metricTargets: '原生目标',
     metricTargetsValue: '6',
-    signalProtocol: 'g · r · b · p · x · s · h',
+    signalProtocol: 'g · r · b · p · / · ? · | · >',
     signalParallel: '并行执行 · 稳定归并',
     signalAson: 'ASON · 按需投影',
     signalTargets: 'Linux · macOS · Windows',
@@ -101,7 +102,7 @@ const copy = {
     metricTestsValue: '135',
     metricTargets: 'Native targets',
     metricTargetsValue: '6',
-    signalProtocol: 'g · r · b · p · x · s · h',
+    signalProtocol: 'g · r · b · p · / · ? · | · >',
     signalParallel: 'PARALLEL RUN · STABLE MERGE',
     signalAson: 'ASON · PROJECT ON DEMAND',
     signalTargets: 'LINUX · MACOS · WINDOWS',
@@ -308,6 +309,10 @@ export function HomeLayout() {
           </div>
           <AshCommandWalkthrough locale={locale} />
         </div>
+      </section>
+
+      <section className="ash-symbol-section" id="algebra">
+        <AshSymbolAlgebra locale={locale} />
       </section>
 
       <section className="ash-architecture" id="architecture">

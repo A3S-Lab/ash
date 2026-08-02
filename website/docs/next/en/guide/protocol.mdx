@@ -20,29 +20,29 @@ fields fail before large allocation.
 
 ## Core operations
 
-| Operation  | Contract                                                                                    |
-| ---------- | ------------------------------------------------------------------------------------------- |
-| `exec`     | Direct executable + argv, environment delta, stdin, deadline, and process-tree cancellation |
-| `read`     | Bounded byte or line ranges and projection                                                  |
-| `list`     | Stable directory traversal and metadata                                                     |
-| `search`   | Bounded text search, match context, and complete-result reference                           |
-| `patch`    | Compare-and-swap multi-file patch with preimage digests                                     |
-| `fs`       | File-only create/copy/move/remove transaction                                               |
-| `snapshot` | Workspace manifest and reference-based delta                                                |
-| `batch`    | Acyclic dependency graph, ready-node concurrency, and failed-descendant skipping            |
-| `ref`      | Data formulas over retained evidence, including projection and safe materialization         |
-| `cancel`   | Cancel queued or active requests and descendants                                            |
+| Operation      | Contract                                                                                    |
+| -------------- | ------------------------------------------------------------------------------------------- |
+| `exec`         | Direct executable + argv, environment delta, stdin, deadline, and process-tree cancellation |
+| `read`         | Bounded byte or line ranges and projection                                                  |
+| `list`         | Stable directory traversal and metadata                                                     |
+| `search`       | Bounded text search, match context, and complete-result reference                           |
+| `patch`        | Compare-and-swap multi-file patch with preimage digests                                     |
+| `fs`           | File-only create/copy/move/remove transaction                                               |
+| `snapshot`     | Workspace manifest and reference-based delta                                                |
+| `batch`        | Acyclic dependency graph, ready-node concurrency, and failed-descendant skipping            |
+| `/ # ? - \| >` | Slice, search, release, project, or safely materialize retained evidence                    |
+| `cancel`       | Cancel queued or active requests and descendants                                            |
 
 ## Data formulas
 
-Reference work uses one typed prefix operator instead of a numeric mode with unused nullable fields:
+Reference work uses the mathematical symbol as the operation code, with no generic `ref` wrapper or second discriminator:
 
 ```ason
-a{p}:
-[@7,d,0,64,p,l,t]
+o:|
+a:[@7,d,0,64,p,l,t]
 ```
 
-This is the compact wire form of `π_{p,l,t}(d[0:64])` over `@7`. Operators `b/l/g/d/p/w` mean byte slice, line slice, search, release, table projection, and workspace materialization. Formula arity is exact. Materialization also requires workspace-write capability and follows the journaled no-overwrite transaction path.
+This is the compact wire form of `π_{p,l,t}(d[0:64])` over `@7`. Operators `/ # ? - | >` mean byte slice, line slice, search, release, table projection, and workspace materialization. Formula arity is exact. `>` also requires workspace-write capability and follows the journaled no-overwrite transaction path. The six formulas measure 80 tokens in both pinned tokenizers, matching the direct ASCII-letter floor and beating direct Greek at 86/86 plus the former wrapper at 97/98.
 
 ## Concurrency and order
 

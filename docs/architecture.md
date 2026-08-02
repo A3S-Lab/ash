@@ -67,7 +67,7 @@ Independent graph nodes and splittable operations use all available CPU cores wh
 
 ### 2.8 Express data work as algebra
 
-Machine operations use small typed formulas instead of prose-shaped options or sparse unions. Selection, projection, slicing, release, and materialization have explicit arity and composition rules. For retained data, the semantic forms are `σ(q,R)`, `π_C(R)`, range slicing, `drop(@r)`, and `μ(path,@r)`; ASH/1 maps them to single-byte ASCII operators because those have more stable tokenizer cost than decorative Unicode on the wire.
+Machine operations use small typed formulas instead of prose-shaped options or sparse unions. Selection, projection, slicing, release, and materialization have explicit arity and composition rules. For retained data, the semantic forms are `σ(q,R)`, `π_C(R)`, range slicing, `drop(@r)`, and `μ(path,@r)`; ASH/1 maps them to the single-byte mathematical operator set `/ # ? - | >`. Each symbol is the request opcode, so the operand vector needs neither a generic reference wrapper nor a second discriminator. The checked tokenizer matrix shows the symbol form at the same token and byte floor as direct ASCII letters and below a direct Greek-glyph form.
 
 The formula is the semantic IR, not a string to evaluate dynamically. Rust represents each operator as an enum variant, schema validation proves its operands before dispatch, and canonical ASON is only the compact serialization. No unused mode fields or nullable operands survive into a request.
 
@@ -145,7 +145,7 @@ Owns portable operation semantics:
 - `batch` — bounded dependency graphs over heterogeneous leaf operations;
 - `fs` — create, copy, move, and remove mutations;
 - `snapshot` — workspace state and deltas;
-- `ref` — algebraic slice, search, projection, release, and safe artifact materialization over stored results;
+- `/ # ? - | >` — algebraic byte slice, line slice, search, release, projection, and safe artifact materialization over stored results;
 - `cancel` — explicit cancellation of a program or node.
 - capability policy, approval challenge retention, permit verification, and replay rejection.
 

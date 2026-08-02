@@ -1,4 +1,4 @@
-/// Stable presentation identifiers for core ASH/1 operations.
+/// Canonical presentation identifiers for core ASH/1 operations.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Operation {
     Exec,
@@ -8,13 +8,18 @@ pub enum Operation {
     Patch,
     Fs,
     Batch,
-    Ref,
+    RefBytes,
+    RefLines,
+    RefSearch,
+    RefRelease,
+    RefProject,
+    RefMaterialize,
     Snapshot,
     Cancel,
 }
 
 impl Operation {
-    /// Returns the stable single-byte ASH/1 presentation identifier.
+    /// Returns the canonical single-byte ASH/1 presentation identifier.
     #[must_use]
     pub const fn id(self) -> u8 {
         match self {
@@ -25,13 +30,18 @@ impl Operation {
             Self::Patch => b'p',
             Self::Fs => b'f',
             Self::Batch => b'b',
-            Self::Ref => b'h',
+            Self::RefBytes => b'/',
+            Self::RefLines => b'#',
+            Self::RefSearch => b'?',
+            Self::RefRelease => b'-',
+            Self::RefProject => b'|',
+            Self::RefMaterialize => b'>',
             Self::Snapshot => b's',
             Self::Cancel => b'k',
         }
     }
 
-    /// Decodes a stable ASH/1 presentation identifier.
+    /// Decodes a canonical ASH/1 presentation identifier.
     #[must_use]
     pub const fn from_id(id: u8) -> Option<Self> {
         match id {
@@ -42,7 +52,12 @@ impl Operation {
             b'p' => Some(Self::Patch),
             b'f' => Some(Self::Fs),
             b'b' => Some(Self::Batch),
-            b'h' => Some(Self::Ref),
+            b'/' => Some(Self::RefBytes),
+            b'#' => Some(Self::RefLines),
+            b'?' => Some(Self::RefSearch),
+            b'-' => Some(Self::RefRelease),
+            b'|' => Some(Self::RefProject),
+            b'>' => Some(Self::RefMaterialize),
             b's' => Some(Self::Snapshot),
             b'k' => Some(Self::Cancel),
             _ => None,
@@ -60,10 +75,29 @@ impl Operation {
             Self::Patch => 1 << 4,
             Self::Fs => 1 << 5,
             Self::Batch => 1 << 6,
-            Self::Ref => 1 << 7,
+            Self::RefBytes
+            | Self::RefLines
+            | Self::RefSearch
+            | Self::RefRelease
+            | Self::RefProject
+            | Self::RefMaterialize => 1 << 7,
             Self::Snapshot => 1 << 8,
             Self::Cancel => 1 << 9,
         }
+    }
+
+    /// Retained-result formulas share one negotiated operation-family bit.
+    #[must_use]
+    pub const fn is_reference_formula(self) -> bool {
+        matches!(
+            self,
+            Self::RefBytes
+                | Self::RefLines
+                | Self::RefSearch
+                | Self::RefRelease
+                | Self::RefProject
+                | Self::RefMaterialize
+        )
     }
 }
 
@@ -75,7 +109,7 @@ mod tests {
     use super::{ALL_OPERATION_MASK, Operation};
 
     #[test]
-    fn operation_identifiers_are_stable_and_round_trip() {
+    fn canonical_operation_identifiers_round_trip() {
         let expected = [
             (Operation::Exec, b'x'),
             (Operation::Read, b'r'),
@@ -84,7 +118,12 @@ mod tests {
             (Operation::Patch, b'p'),
             (Operation::Fs, b'f'),
             (Operation::Batch, b'b'),
-            (Operation::Ref, b'h'),
+            (Operation::RefBytes, b'/'),
+            (Operation::RefLines, b'#'),
+            (Operation::RefSearch, b'?'),
+            (Operation::RefRelease, b'-'),
+            (Operation::RefProject, b'|'),
+            (Operation::RefMaterialize, b'>'),
             (Operation::Snapshot, b's'),
             (Operation::Cancel, b'k'),
         ];
@@ -93,7 +132,7 @@ mod tests {
             assert_eq!(operation.id(), id);
             assert_eq!(Operation::from_id(id), Some(operation));
         }
-        assert_eq!(Operation::from_id(b'?'), None);
+        assert_eq!(Operation::from_id(b'~'), None);
         let combined = expected
             .into_iter()
             .map(|(operation, _)| operation.mask())

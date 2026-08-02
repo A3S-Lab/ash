@@ -20,6 +20,11 @@ The report pins corpus SHA-256, tokenizer, source bytes, tokens, ratio, and gate
 Current ASON uses about 62% of compact row JSON tokens under both tokenizers; the
 regression ceiling is 65%.
 
+The same report compares all six retained-result formulas. Canonical `/ # ? - | >`
+uses 80 tokens in both tokenizers, matching the direct ASCII-letter floor; direct
+Greek uses 86/86 and the former wrapper uses 97/98. The canonical form is 84% of
+the wrapper bytes and 83%/82% of its tokens.
+
 ## Multicore determinism
 
 ```bash
