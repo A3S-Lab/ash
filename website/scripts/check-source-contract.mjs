@@ -51,6 +51,8 @@ const [
   runtimeMixed,
   runtimeReducer,
   runtimePrimitives,
+  taskRunner,
+  taskManifestSource,
   referenceOperation,
   repetitionReducer,
   execOperation,
@@ -71,6 +73,8 @@ const [
   text('benches/runner/src/runtime/mixed.rs'),
   text('benches/runner/src/runtime/reducer.rs'),
   text('benches/runner/src/runtime/primitives.rs'),
+  text('benches/runner/src/tasks.rs'),
+  text('benches/tasks/v1/manifest.json'),
   text('crates/ash-ops/src/reference.rs'),
   text('crates/ash-ops/src/reducer.rs'),
   text('crates/ash-ops/src/exec.rs'),
@@ -79,6 +83,7 @@ const [
 ]);
 const snapshots = JSON.parse(await text('website/version-snapshots.json'));
 const report = JSON.parse(await text('benches/reports/v0.1.0/format.json'));
+const taskManifest = JSON.parse(taskManifestSource);
 const workspaceVersion = cargo.match(
   /\[workspace\.package\][\s\S]*?\nversion = "([^"]+)"/,
 )?.[1];
@@ -192,6 +197,20 @@ if (
   !report.error_focus_reduction?.gates?.passed
 ) {
   throw new Error('The checked output-reduction token gates must pass.');
+}
+
+if (taskManifest.schema !== 2 || taskManifest.tasks.length !== 7) {
+  throw new Error('The locked task corpus must contain seven schema-2 tasks.');
+}
+for (const marker of [
+  'ExecutionSession::open(',
+  'Request::decode(&document)',
+  'deterministic-tool-plan',
+  'all_native_shell_success',
+  'all_ash_success',
+  'transcript_sha256(',
+]) {
+  requireIncludes(taskRunner, marker, 'Task benchmark schema');
 }
 
 for (const marker of [
@@ -322,6 +341,26 @@ for (const [document, markers, label] of [
 ]) {
   for (const marker of markers) requireIncludes(document, marker, label);
 }
+requireIncludes(
+  benchmarkZh,
+  '七个小型契约',
+  'Chinese task benchmark documentation',
+);
+requireIncludes(
+  benchmarkZh,
+  'agent_results: false',
+  'Chinese task benchmark documentation',
+);
+requireIncludes(
+  benchmarkEn,
+  'Seven small contracts',
+  'English task benchmark documentation',
+);
+requireIncludes(
+  benchmarkEn,
+  'agent_results: false',
+  'English task benchmark documentation',
+);
 for (const marker of [
   '×64#2',
   '⋯18',

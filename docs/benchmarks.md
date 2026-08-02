@@ -1,6 +1,6 @@
 # Token-efficiency benchmark contract
 
-Status: deterministic format corpus, two-tokenizer representation plus repeated-line/block/error-focus reduction evidence, retained-formula regression gate, a three-task cross-platform native-shell baseline seed, and a twenty-two-scenario host-local runtime harness; Coding Agent results and published hardware reports remain open
+Status: deterministic format corpus, two-tokenizer representation plus repeated-line/block/error-focus reduction evidence, retained-formula regression gate, a locked seven-task cross-platform ASH/native-shell tool-plan corpus, and a twenty-two-scenario host-local runtime harness; Coding Agent results and published hardware reports remain open
 
 Token reduction is the primary performance objective of `ash`. This document defines how it is measured without trading away task correctness or hiding protocol overhead.
 
@@ -42,9 +42,11 @@ cargo run -p a3s-ash-bench --locked -- \
 cargo run -p a3s-ash-bench --locked -- --tasks
 ```
 
-`manifest.json` contains three tasks: source-marker discovery, compiler-diagnostic aggregation, and an exact worker-limit mutation. It names objectives, allowed `ash` capabilities, output policy, hard limits, declarative expected output/files, and a native command for Linux, macOS, and Windows. The generated lock binds the complete manifest, each initial tree, and each expected final tree. The runner copies a fixture into a temporary workspace, executes only the current platform baseline, enforces a deadline and output ceiling, normalizes CRLF only for semantic comparison, verifies declared files and the complete final tree, and performs bounded child cleanup. Its total token count is the sum of separately tokenized objective, native command, stdout, and stderr messages. Raw platform output remains separately measured and hashed.
+`manifest.json` contains seven tasks: source-marker search, compiler-diagnostic aggregation, an exact worker-limit patch, recursive source listing, ordered multi-file reading, a guarded copy/remove transaction, and an independent two-node search graph. It names objectives, least-privilege operation sets, output policy, hard limits, declarative expected output/files, a declarative ASH plan, and a native command for Linux, macOS, and Windows. The generated schema-2 lock binds the complete manifest, each initial visible tree, and each expected final visible tree.
 
-This seed establishes native-shell denominators and fixture correctness. It does not execute a model, choose `ash` operations for an agent, or establish any Agent-task token reduction claim. Host-local elapsed time is printed by `--tasks` but not committed.
+The runner makes two isolated copies of the same fixture. One executes the current platform's native-shell baseline with bounded pipe drain and process cleanup. The other opens the production `ExecutionSession`, builds each typed request, canonicalizes it to ASON, decodes that document through the protocol validator, and executes it through the normal engine and portable operations. Read-derived BLAKE3 digests feed guarded `patch` and `fs` requests without benchmark-side file access. Both paths must match the declared semantic output, expected files, and locked final visible tree; ASH's reserved `.ash` state is excluded by the same visibility rule used by production listing and snapshots.
+
+The native-shell total is objective + command + stdout + stderr. The ASH total is the same objective + every canonical request + every canonical response; each step and each length-delimited transcript is separately hashed. The embedded session handshake is not LLM-facing and is not tokenized here; a future Agent report must add amortized primer and format-instruction cost. ASH elapsed time does include engine/session construction, canonical encode/decode, execution, response encoding, and session close. Request budgets are fixed by the manifest, so repeated runs produce stable transcripts. The report labels itself `deterministic-tool-plan` and sets `agent_results` to false: a human-authored plan is useful for protocol accounting and correctness, but it does not execute a model, measure retries caused by a model, or establish an Agent-task Token reduction claim. These tiny tasks currently expose structured metadata and digest overhead; no comparative Token gate is applied. Host-local elapsed time is printed by `--tasks` but not committed.
 
 ## 1. Optimization target
 
@@ -91,7 +93,7 @@ No baseline may receive less task context, a different repository state, or a mo
 
 ## 4. Corpus
 
-The implemented v1 seed covers one small workspace-discovery task, one tests-and-diagnostics task, and one coding-mutation task. The target corpus expands those seeds to small, medium, and large fixtures in these families:
+The implemented v1 corpus covers seven small deterministic contracts across workspace discovery/listing/reading, search, diagnostics, exact patching, file transactions, and batch graphs. The target corpus still expands those seeds to medium and large fixtures in these families:
 
 ### 4.1 Workspace discovery
 
@@ -162,11 +164,12 @@ agent objective
 allowed capabilities
 time and resource limits
 expected stdout, stderr, and exact file content
+declarative ASH operation plan and semantic answer extractor
 Linux, macOS, and Windows native-shell baseline definitions
 output-retention policy
 ```
 
-Its lock adds the manifest digest and the expected complete final-tree digest. Later Agent-task reports must additionally pin model/prompt configuration, the selected `ash` request trace, retries, verifier version, and raw normalized evidence. A compressed workspace archive becomes necessary when fixtures are published outside this source tree; it is not simulated for the current small checked-in directories.
+Its lock adds the manifest digest and the expected complete visible-tree digest. The schema-2 local report already pins the selected deterministic ASH request/response trace, per-step hashes, both tokenizer totals, and the native denominator. Later Agent-task reports must additionally pin model/prompt configuration, model-selected traces, retries, verifier version, and raw normalized evidence. A compressed workspace archive becomes necessary when fixtures are published outside this source tree; it is not simulated for the current small checked-in directories.
 
 Fixtures must not depend on an external network, current package registry state, wall-clock date, or unpinned tool version unless the task explicitly measures those conditions.
 

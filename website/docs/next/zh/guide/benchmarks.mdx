@@ -60,7 +60,7 @@ BLAKE3 快照、磁盘 spill/fetch、计算池空闲/全满时的配对磁盘 I/
 并在 I/O 完成时检查所有 Worker 仍在运行；随后才释放负载、计算 BLAKE3 并校验同一段
 64 KiB 尾部。样本交替先后顺序，报告逐 Worker 给出饱和/空闲 p50 比值，但不设跨主机门槛。
 
-## 原生 Shell 任务种子
+## ASH / 原生 Shell 任务语料
 
 ```bash
 cargo run -p a3s-ash-bench --locked -- \
@@ -68,9 +68,15 @@ cargo run -p a3s-ash-bench --locked -- \
 cargo run -p a3s-ash-bench --locked -- --tasks
 ```
 
-首批任务覆盖源码发现、诊断聚合和一次精确配置修改。锁文件绑定完整清单、每个初始工作区和
-期望最终工作区。Runner 校验输出与最终状态，再用两种 tokenizer 统计目标、命令、stdout
-和 stderr。它只执行当前平台的原生 Shell，不运行模型，也不声称这是 ash 任务成绩。
+七个小型契约覆盖搜索、诊断聚合、精确补丁、递归列表、多文件顺序读取、带摘要保护的文件事务，
+以及独立 Batch 图。每个任务都从同一份锁定的可见树启动两次：一次走当前平台的原生 Shell，
+一次把类型化请求送入生产 ASH 会话。
+
+schema 2 报告同时校验语义输出与最终状态。原生侧统计目标、命令、stdout 和 stderr；ASH 侧统计
+同一目标以及全部规范 ASON 请求和响应，并为每一步与完整轨迹记录稳定摘要。这些计划由人编写，
+所以报告明确标注 `deterministic-tool-plan` 与 `agent_results: false`。它只说明协议成本和正确性，
+不是模型成绩，也不是 Token 节省结论；在这些极小任务上，结构化元数据与安全摘要会表现为额外开销。
+嵌入式会话握手不计入 Token；未来的真实模型报告必须补上摊销后的 primer 与格式说明成本。
 
 ## 当前自动化
 
@@ -78,7 +84,7 @@ cargo run -p a3s-ash-bench --locked -- --tasks
 - Linux、macOS、Windows 的 `cargo check` 与测试。
 - 三平台安装器的真实发行构建 Smoke。
 - 十五条端到端运行时路径、三条多核输出 reducer、热路径字典与三种节点规模的 DAG 调度证据。
-- 三个锁定任务及 Linux、macOS、Windows 原生 Shell 基线。
+- 七个锁定任务、生产 ASH 轨迹及 Linux、macOS、Windows 原生 Shell 基线。
 - ASON、受限 ASH/1 帧、类型化请求与更新元数据 fuzz target。
 - 文件事务 crash cutpoint、更新激活/恢复和取消竞态测试。
 - 锁定的第三方许可证清单。

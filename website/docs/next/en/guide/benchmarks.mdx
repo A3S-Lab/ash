@@ -88,7 +88,7 @@ the load, compute BLAKE3, and verify the same 64 KiB tail. Sample order alternat
 the report emits a saturated/idle p50 ratio per worker configuration without a
 cross-host threshold.
 
-## Native-shell task seed
+## ASH/native-shell task corpus
 
 ```bash
 cargo run -p a3s-ash-bench --locked -- \
@@ -96,11 +96,21 @@ cargo run -p a3s-ash-bench --locked -- \
 cargo run -p a3s-ash-bench --locked -- --tasks
 ```
 
-The seed covers source discovery, diagnostic aggregation, and one exact config
-mutation. Its lock binds the manifest plus every initial and expected final
-workspace tree. The runner checks output and final state, then counts objective,
-command, stdout, and stderr with both tokenizers. It runs the current platform's
-native shell; it does not run a model or claim an ash task result.
+Seven small contracts cover search, diagnostic aggregation, exact patching,
+recursive listing, ordered multi-file reading, a guarded file transaction, and
+an independent batch graph. Each starts twice from the same locked visible tree:
+once in the current platform's native shell and once as typed requests through
+the production ASH session.
+
+The schema-2 report verifies semantic output and final state. Native cost is the
+objective plus command, stdout, and stderr; ASH cost is the same objective plus
+every canonical ASON request and response. Requests and responses carry stable
+per-step and transcript hashes. The plans are hand-authored, so the report marks
+itself `deterministic-tool-plan` and `agent_results: false`. It is protocol
+accounting, not a model score or a Token-reduction claim; on these tiny tasks,
+structured metadata and digest safety are visible overhead. The embedded
+session handshake is not tokenized; a future model report must add amortized
+primer and format-instruction cost.
 
 ## Current automation
 
@@ -108,7 +118,7 @@ native shell; it does not run a model or claim an ash task result.
 - `cargo check` and tests on Linux, macOS, and Windows.
 - Real release builds exercised by all three platform installers.
 - Fifteen end-to-end runtime paths, three multicore output reducers, hot path-dictionary lookup, and three-size DAG scheduling evidence.
-- Three locked tasks with Linux, macOS, and Windows native-shell baselines.
+- Seven locked tasks with production ASH traces and Linux, macOS, and Windows native-shell baselines.
 - Fuzz targets for ASON, bounded ASH/1 frames, typed requests, and update metadata.
 - File-transaction crash cutpoints, update activation/recovery, and cancellation race tests.
 - A locked third-party license inventory.
