@@ -194,6 +194,25 @@ fn main() {
             eprintln!("bad");
             std::process::exit(7);
         }
+        Some("diagnostic-fail") => {
+            let mut output = io::BufWriter::new(io::stderr().lock());
+            output.write_all(b"setup\ncommand\n").expect("write diagnostic header");
+            for line in 0..20 {
+                writeln!(output, "build noise-{line:02}").expect("write leading noise");
+            }
+            output
+                .write_all(b"error[E0609]: no field `missing`\n")
+                .expect("write diagnostic anchor");
+            for line in 0..6 {
+                writeln!(output, "detail-{line:02}").expect("write diagnostic detail");
+            }
+            for line in 0..24 {
+                writeln!(output, "trailing noise-{line:02}").expect("write trailing noise");
+            }
+            output.write_all(b"summary\ndone\n").expect("write diagnostic footer");
+            output.flush().expect("flush diagnostic output");
+            std::process::exit(7);
+        }
         Some("wait") => std::thread::sleep(Duration::from_secs(5)),
         Some("flood") => {
             let mut output = io::BufWriter::new(io::stdout().lock());
@@ -453,6 +472,87 @@ async fn exec_handles_environment_stdin_failure_and_timeout_without_a_shell() {
     assert!(response.starts_with("t:3\ni:52\ns:6\n"));
     assert!(response.contains("d{k,c,ms,o,e,ro,re}:\n2,~,"));
     assert!(response.contains("e{c,q,p,x,a}:\n402,2,4,~,~\n"));
+}
+
+#[tokio::test]
+async fn failed_exec_focuses_diagnostics_and_retains_exact_stderr() {
+    let directory = TestDirectory::new();
+    let executable = compile_helper(&directory);
+    let (session, operations) = runtime(&directory);
+    let request = Request::new(
+        57,
+        Arguments::Exec(
+            ExecArgs::new(
+                executable,
+                vec!["diagnostic-fail".to_owned()],
+                ".",
+                vec![],
+                InputSource::None,
+                0,
+            )
+            .expect("exec"),
+        ),
+        budget(4_096, 8),
+    )
+    .expect("request");
+    let program = session.begin(&request).await.expect("program");
+    let response = operations
+        .execute(&request, &program)
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), Status::Failed);
+    assert_eq!(
+        response.flags(),
+        RESULT_TRUNCATED | RESULT_REDUCED | RESULT_RETAINED
+    );
+    let Some(ResultData::Exec(result)) = response.data() else {
+        panic!("expected exec result");
+    };
+    assert_eq!(
+        result.stderr.projection.as_deref(),
+        Some(concat!(
+            "setup\n",
+            "command\n",
+            "⋯18\n",
+            "build noise-18\n",
+            "build noise-19\n",
+            "error[E0609]: no field `missing`\n",
+            "detail-00\n",
+            "detail-01\n",
+            "detail-02\n",
+            "detail-03\n",
+            "detail-04\n",
+            "detail-05\n",
+            "⋯24\n",
+            "summary\n",
+            "done\n",
+        ))
+    );
+    assert!(result.stdout.projection.is_none());
+    assert!(result.stdout.reference.is_none());
+    assert_eq!(result.stderr.reference, Some(1));
+
+    let mut retained_source = "setup\ncommand\n".to_owned();
+    for line in 0..20 {
+        retained_source.push_str(&format!("build noise-{line:02}\n"));
+    }
+    retained_source.push_str("error[E0609]: no field `missing`\n");
+    for line in 0..6 {
+        retained_source.push_str(&format!("detail-{line:02}\n"));
+    }
+    for line in 0..24 {
+        retained_source.push_str(&format!("trailing noise-{line:02}\n"));
+    }
+    retained_source.push_str("summary\ndone\n");
+    let retained = program
+        .store()
+        .get(1)
+        .expect("retained stderr")
+        .read_all(128 * 1_024)
+        .await
+        .expect("read retained stderr");
+    assert_eq!(retained.as_ref(), retained_source.as_bytes());
 }
 
 #[tokio::test]

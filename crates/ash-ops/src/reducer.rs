@@ -4,7 +4,70 @@ const PARALLEL_LINE_THRESHOLD: usize = 2_048;
 const PARTITION_LINES: usize = 1_024;
 const BLOCK_CANDIDATE_BATCH_LINES: usize = 4_096;
 const MAX_BLOCK_LINES: usize = 32;
+const ERROR_CONTEXT_BEFORE: usize = 2;
+const ERROR_CONTEXT_AFTER: usize = 6;
+const ERROR_EDGE_LINES: usize = 2;
 const REPEAT_SYMBOL: char = '×';
+const OMISSION_SYMBOL: char = '⋯';
+const ERROR_ANCHOR_TERMS: &[&[u8]] = &[
+    b"error",
+    b"fatal",
+    b"panic",
+    b"panicked",
+    b"failed",
+    b"failure",
+    b"failures",
+    b"exception",
+    b"traceback",
+    b"abort",
+    b"aborted",
+    b"assertion",
+    b"segmentation fault",
+    b"access violation",
+    b"undefined reference",
+    b"unhandled",
+];
+
+/// Deterministic projection retaining diagnostic windows from failed output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErrorFocusedReduction {
+    text: String,
+    diagnostic_lines: usize,
+    omitted_spans: usize,
+    omitted_lines: usize,
+}
+
+impl ErrorFocusedReduction {
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    #[must_use]
+    pub fn into_text(self) -> String {
+        self.text
+    }
+
+    #[must_use]
+    pub const fn reduced(&self) -> bool {
+        self.omitted_spans != 0
+    }
+
+    #[must_use]
+    pub const fn diagnostic_lines(&self) -> usize {
+        self.diagnostic_lines
+    }
+
+    #[must_use]
+    pub const fn omitted_spans(&self) -> usize {
+        self.omitted_spans
+    }
+
+    #[must_use]
+    pub const fn omitted_lines(&self) -> usize {
+        self.omitted_lines
+    }
+}
 
 /// Deterministic projection produced by consecutive-line reduction.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,6 +233,116 @@ pub fn collapse_repeated_blocks(text: &str) -> RepeatedBlockReduction {
         omitted_repetitions,
         omitted_lines,
     }
+}
+
+/// Retains deterministic diagnostic windows and replaces byte-saving gaps.
+///
+/// The first and last two logical lines are always retained. Every recognized
+/// diagnostic anchor retains two preceding and six following lines. A maximal
+/// omitted gap of `N` lines becomes `⋯N` only when the marker is shorter than
+/// the source gap. Large line classification enters Rayon, while selection and
+/// encoding remain in source order and therefore worker-stable.
+#[must_use]
+pub fn focus_error_output(text: &str) -> ErrorFocusedReduction {
+    let layout = LineLayout::new(text);
+    let total_lines = layout.total_lines();
+    if total_lines == 0 {
+        return unchanged_error_focus(text, 0);
+    }
+    let anchors = if total_lines >= PARALLEL_LINE_THRESHOLD {
+        (0..total_lines)
+            .into_par_iter()
+            .map(|line| is_diagnostic_anchor(layout.line(line)))
+            .collect::<Vec<_>>()
+    } else {
+        (0..total_lines)
+            .map(|line| is_diagnostic_anchor(layout.line(line)))
+            .collect::<Vec<_>>()
+    };
+    let diagnostic_lines = anchors.iter().filter(|&&anchor| anchor).count();
+    if diagnostic_lines == 0 {
+        return unchanged_error_focus(text, 0);
+    }
+
+    let mut retained = vec![false; total_lines];
+    let edge_lines = ERROR_EDGE_LINES.min(total_lines);
+    retained[..edge_lines].fill(true);
+    retained[total_lines - edge_lines..].fill(true);
+    for (line, &anchor) in anchors.iter().enumerate() {
+        if !anchor {
+            continue;
+        }
+        let start = line.saturating_sub(ERROR_CONTEXT_BEFORE);
+        let end = line
+            .saturating_add(ERROR_CONTEXT_AFTER + 1)
+            .min(total_lines);
+        retained[start..end].fill(true);
+    }
+
+    let mut output = String::with_capacity(text.len());
+    let mut omitted_spans = 0_usize;
+    let mut omitted_lines = 0_usize;
+    let mut line = 0_usize;
+    while line < total_lines {
+        if retained[line] {
+            output.push_str(layout.line(line));
+            line += 1;
+            continue;
+        }
+        let start = line;
+        while line < total_lines && !retained[line] {
+            line += 1;
+        }
+        let lines = line - start;
+        let source_bytes = layout.span_len(start, lines);
+        if omission_marker_len(lines) < source_bytes {
+            output.push_str(&omission_marker(lines));
+            omitted_spans += 1;
+            omitted_lines += lines;
+        } else {
+            output.push_str(layout.span(start, lines));
+        }
+    }
+
+    ErrorFocusedReduction {
+        text: output,
+        diagnostic_lines,
+        omitted_spans,
+        omitted_lines,
+    }
+}
+
+fn is_diagnostic_anchor(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    ERROR_ANCHOR_TERMS
+        .iter()
+        .any(|term| contains_ascii_term(bytes, term))
+        || bytes
+            .split(|byte| !is_identifier_byte(*byte))
+            .any(|word| word.ends_with(b"Error") || word.ends_with(b"Exception"))
+}
+
+fn contains_ascii_term(bytes: &[u8], term: &[u8]) -> bool {
+    if term.is_empty() || term.len() > bytes.len() {
+        return false;
+    }
+    bytes.windows(term.len()).enumerate().any(|(start, word)| {
+        word.eq_ignore_ascii_case(term)
+            && (start == 0 || !is_identifier_byte(bytes[start - 1]))
+            && (start + term.len() == bytes.len() || !is_identifier_byte(bytes[start + term.len()]))
+    })
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn omission_marker(lines: usize) -> String {
+    format!("{OMISSION_SYMBOL}{lines}\n")
+}
+
+fn omission_marker_len(lines: usize) -> usize {
+    OMISSION_SYMBOL.len_utf8() + decimal_digits(lines) + 1
 }
 
 struct LineLayout<'a> {
@@ -505,19 +678,132 @@ fn unchanged_blocks(text: &str) -> RepeatedBlockReduction {
     }
 }
 
+fn unchanged_error_focus(text: &str, diagnostic_lines: usize) -> ErrorFocusedReduction {
+    ErrorFocusedReduction {
+        text: text.to_owned(),
+        diagnostic_lines,
+        omitted_spans: 0,
+        omitted_lines: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rayon::ThreadPoolBuilder;
 
     use super::{
         BlockHashes, LineLayout, best_hashed_candidate, collapse_repeated_blocks,
-        collapse_repeated_lines, verified_candidate,
+        collapse_repeated_lines, focus_error_output, verified_candidate,
     };
 
     fn block(prefix: &str, lines: usize) -> String {
         (0..lines)
             .map(|line| format!("{prefix}-frame-{line:02}\n"))
             .collect()
+    }
+
+    #[test]
+    fn error_focus_keeps_edges_and_diagnostic_context_in_source_order() {
+        let mut input = "setup\ncommand\n".to_owned();
+        for line in 0..10 {
+            input.push_str(&format!("before-{line:02}\n"));
+        }
+        input.push_str("error[E0425]: missing value\n");
+        for line in 0..6 {
+            input.push_str(&format!("detail-{line:02}\n"));
+        }
+        for line in 0..12 {
+            input.push_str(&format!("after-{line:02}\n"));
+        }
+        input.push_str("summary\ndone\n");
+
+        let reduction = focus_error_output(&input);
+
+        assert_eq!(
+            reduction.text(),
+            concat!(
+                "setup\n",
+                "command\n",
+                "⋯8\n",
+                "before-08\n",
+                "before-09\n",
+                "error[E0425]: missing value\n",
+                "detail-00\n",
+                "detail-01\n",
+                "detail-02\n",
+                "detail-03\n",
+                "detail-04\n",
+                "detail-05\n",
+                "⋯12\n",
+                "summary\n",
+                "done\n",
+            )
+        );
+        assert_eq!(reduction.diagnostic_lines(), 1);
+        assert_eq!(reduction.omitted_spans(), 2);
+        assert_eq!(reduction.omitted_lines(), 20);
+    }
+
+    #[test]
+    fn error_focus_recognizes_exception_suffixes_without_substring_false_positives() {
+        let mut input = "start\ncommand\n".to_owned();
+        for line in 0..12 {
+            input.push_str(&format!("noise-{line:02}\n"));
+        }
+        input.push_str("TypeError: value is not callable\nstack-a\nstack-b\nend\ndone\n");
+        let reduction = focus_error_output(&input);
+        assert_eq!(reduction.diagnostic_lines(), 1);
+        assert!(reduction.reduced());
+        assert!(
+            reduction
+                .text()
+                .contains("TypeError: value is not callable")
+        );
+
+        let ordinary = "terror value\nfailover ready\nexceptional case\n";
+        let unchanged = focus_error_output(ordinary);
+        assert_eq!(unchanged.text(), ordinary);
+        assert_eq!(unchanged.diagnostic_lines(), 0);
+        assert!(!unchanged.reduced());
+    }
+
+    #[test]
+    fn error_focus_is_worker_stable_and_preserves_an_unterminated_utf8_tail() {
+        let mut input = String::new();
+        for line in 0..8_192 {
+            if line % 1_024 == 511 {
+                input.push_str(&format!("fatal: shard {line:04} failed\n"));
+            } else {
+                input.push_str(&format!("构建记录-{line:04}\n"));
+            }
+        }
+        input.push_str("最终摘要");
+        let one = ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("one-worker pool")
+            .install(|| focus_error_output(&input));
+        let four = ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("four-worker pool")
+            .install(|| focus_error_output(&input));
+
+        assert_eq!(one, four);
+        assert_eq!(one.diagnostic_lines(), 8);
+        assert!(one.omitted_spans() > 8);
+        assert!(one.text().ends_with("最终摘要"));
+    }
+
+    #[test]
+    fn error_focus_never_expands_a_short_diagnostic_capture() {
+        let input = "start\nerror: boom\nend\n";
+        let reduction = focus_error_output(input);
+
+        assert_eq!(reduction.text(), input);
+        assert_eq!(reduction.diagnostic_lines(), 1);
+        assert_eq!(reduction.omitted_spans(), 0);
+        assert!(!reduction.reduced());
     }
 
     #[test]

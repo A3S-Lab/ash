@@ -17,7 +17,9 @@ use ash_store::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::projection::{charge, presentation_limit};
-use crate::{OperationError, collapse_repeated_blocks, collapse_repeated_lines};
+use crate::{
+    OperationError, collapse_repeated_blocks, collapse_repeated_lines, focus_error_output,
+};
 
 const MAX_STDIN_BYTES: usize = 64 * 1024 * 1024;
 
@@ -94,10 +96,10 @@ impl Capture {
         self.content.as_ref().ok_or(StoreError::Invariant)
     }
 
-    fn project(&self, limit: usize) -> Result<Projection, StoreError> {
+    fn project(&self, limit: usize, focus_errors: bool) -> Result<Projection, StoreError> {
         let content = self.content()?;
         Ok(match content.view() {
-            CapturedView::Complete(bytes) => project(bytes, limit),
+            CapturedView::Complete(bytes) => project(bytes, limit, focus_errors),
             CapturedView::Sampled {
                 head,
                 head_next,
@@ -163,6 +165,7 @@ async fn build_response(
     } else {
         (limit / 2, limit / 8)
     };
+    let focus_errors = matches!(&stop, Stop::Exited(ProcessExit { success: false, .. }));
     let finalizing = matches!(stop, Stop::TimedOut | Stop::Cancelled);
     let (stdout, stderr, stdout_projection, stderr_projection) = if finalizing {
         // Cancellation and deadline finalization must still produce typed
@@ -170,13 +173,17 @@ async fn build_response(
         // acquiring through the cancelled program would reject it outright.
         program
             .compute_pool()
-            .run(move || project_captures(stdout, stderr, stdout_budget, stderr_budget))
+            .run(move || {
+                project_captures(stdout, stderr, stdout_budget, stderr_budget, focus_errors)
+            })
             .await??
     } else {
         let _compute = program.acquire(PermitKind::Compute).await?;
         program
             .compute_pool()
-            .run(move || project_captures(stdout, stderr, stdout_budget, stderr_budget))
+            .run(move || {
+                project_captures(stdout, stderr, stdout_budget, stderr_budget, focus_errors)
+            })
             .await??
     };
     let stdout_retained = stdout_projection.reduced
@@ -252,9 +259,10 @@ fn project_captures(
     stderr: Capture,
     stdout_budget: usize,
     stderr_budget: usize,
+    focus_errors: bool,
 ) -> Result<(Capture, Capture, Projection, Projection), StoreError> {
-    let stdout_projection = stdout.project(stdout_budget)?;
-    let stderr_projection = stderr.project(stderr_budget)?;
+    let stdout_projection = stdout.project(stdout_budget, focus_errors)?;
+    let stderr_projection = stderr.project(stderr_budget, focus_errors)?;
     Ok((stdout, stderr, stdout_projection, stderr_projection))
 }
 
@@ -330,7 +338,7 @@ struct Projection {
     normalized: bool,
 }
 
-fn project(bytes: &[u8], limit: usize) -> Projection {
+fn project(bytes: &[u8], limit: usize, focus_errors: bool) -> Projection {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return Projection {
             text: None,
@@ -347,8 +355,15 @@ fn project(bytes: &[u8], limit: usize) -> Projection {
     let line_reduction = collapse_repeated_lines(&normalized_text);
     let line_reduced = line_reduction.reduced();
     let block_reduction = collapse_repeated_blocks(line_reduction.text());
-    let reduced = line_reduced || block_reduction.reduced();
-    let normalized_text = block_reduction.into_text();
+    let block_reduced = block_reduction.reduced();
+    let (normalized_text, error_reduced) = if focus_errors {
+        let error_reduction = focus_error_output(block_reduction.text());
+        let reduced = error_reduction.reduced();
+        (error_reduction.into_text(), reduced)
+    } else {
+        (block_reduction.into_text(), false)
+    };
+    let reduced = line_reduced || block_reduced || error_reduced;
     if normalized_text.len() <= limit {
         return Projection {
             text: (!normalized_text.is_empty()).then_some(normalized_text),
@@ -615,7 +630,7 @@ mod tests {
 
     #[test]
     fn projection_keeps_utf8_boundaries_and_both_ends() {
-        let projection = project("头部-0123456789-尾部".as_bytes(), 16);
+        let projection = project("头部-0123456789-尾部".as_bytes(), 16, false);
         let text = projection.text.expect("excerpt");
         assert!(projection.reduced);
         assert!(text.contains("..."));
@@ -626,16 +641,16 @@ mod tests {
 
     #[test]
     fn projection_collapses_only_byte_saving_repeated_lines() {
-        let repeated = project("alpha\n".repeat(5).as_bytes(), 1_024);
+        let repeated = project("alpha\n".repeat(5).as_bytes(), 1_024, false);
         assert_eq!(repeated.text.as_deref(), Some("alpha\n×5\n"));
         assert!(repeated.reduced);
         assert!(!repeated.normalized);
 
-        let too_short_to_save = project(b"x\nx\n", 1_024);
+        let too_short_to_save = project(b"x\nx\n", 1_024, false);
         assert_eq!(too_short_to_save.text.as_deref(), Some("x\nx\n"));
         assert!(!too_short_to_save.reduced);
 
-        let normalized = project("same\r\n".repeat(4).as_bytes(), 1_024);
+        let normalized = project("same\r\n".repeat(4).as_bytes(), 1_024, false);
         assert_eq!(normalized.text.as_deref(), Some("same\n×4\n"));
         assert!(normalized.reduced);
         assert!(normalized.normalized);
@@ -644,16 +659,59 @@ mod tests {
     #[test]
     fn projection_collapses_repeated_blocks_after_line_reduction() {
         let block = "compile crate-a\nlink crate-a\n".repeat(6);
-        let projection = project(block.as_bytes(), 1_024);
+        let projection = project(block.as_bytes(), 1_024, false);
         assert_eq!(
             projection.text.as_deref(),
             Some("compile crate-a\nlink crate-a\n×6#2\n")
         );
         assert!(projection.reduced);
 
-        let no_saving = project(b"a\nb\na\nb\n", 1_024);
+        let no_saving = project(b"a\nb\na\nb\n", 1_024, false);
         assert_eq!(no_saving.text.as_deref(), Some("a\nb\na\nb\n"));
         assert!(!no_saving.reduced);
+    }
+
+    #[test]
+    fn failed_projection_focuses_diagnostics_but_success_projection_does_not() {
+        let mut input = "setup\ncommand\n".to_owned();
+        for line in 0..10 {
+            input.push_str(&format!("before-{line:02}\n"));
+        }
+        input.push_str("error[E0425]: missing value\n");
+        for line in 0..6 {
+            input.push_str(&format!("detail-{line:02}\n"));
+        }
+        for line in 0..12 {
+            input.push_str(&format!("after-{line:02}\n"));
+        }
+        input.push_str("summary\ndone\n");
+
+        let failed = project(input.as_bytes(), 4_096, true);
+        assert_eq!(
+            failed.text.as_deref(),
+            Some(concat!(
+                "setup\n",
+                "command\n",
+                "⋯8\n",
+                "before-08\n",
+                "before-09\n",
+                "error[E0425]: missing value\n",
+                "detail-00\n",
+                "detail-01\n",
+                "detail-02\n",
+                "detail-03\n",
+                "detail-04\n",
+                "detail-05\n",
+                "⋯12\n",
+                "summary\n",
+                "done\n",
+            ))
+        );
+        assert!(failed.reduced);
+
+        let success = project(input.as_bytes(), 4_096, false);
+        assert_eq!(success.text.as_deref(), Some(input.as_str()));
+        assert!(!success.reduced);
     }
 
     #[test]
