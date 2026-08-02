@@ -46,6 +46,9 @@ const [
   symbolAlgebra,
   switcher,
   alignedStyles,
+  runtimeHarness,
+  benchmarkZh,
+  benchmarkEn,
 ] = await Promise.all([
   text('Cargo.toml'),
   text('install.sh'),
@@ -56,6 +59,9 @@ const [
   text('website/theme/components/AshSymbolAlgebra.tsx'),
   text('website/theme/components/InstallSwitcher.tsx'),
   text('website/theme/a3s-aligned.css'),
+  text('benches/runner/src/runtime.rs'),
+  text('website/docs/next/zh/guide/benchmarks.mdx'),
+  text('website/docs/next/en/guide/benchmarks.mdx'),
 ]);
 const snapshots = JSON.parse(await text('website/version-snapshots.json'));
 const report = JSON.parse(await text('benches/reports/v0.1.0/format.json'));
@@ -164,6 +170,31 @@ requireIncludes(
 );
 if (!report.formula_algebra.gates.passed) {
   throw new Error('The checked formula algebra gate must pass.');
+}
+
+for (const marker of [
+  'schema: 7',
+  '"list-recursive"',
+  '"search-literal"',
+  '"search-regex"',
+  '"snapshot-blake3"',
+  'require_equivalent_output(&scenarios, "search-literal", "search-regex")',
+]) {
+  requireIncludes(runtimeHarness, marker, 'Runtime benchmark schema');
+}
+for (const [document, markers, label] of [
+  [
+    benchmarkZh,
+    ['schema 7', '十条真实路径'],
+    'Chinese benchmark documentation',
+  ],
+  [
+    benchmarkEn,
+    ['Schema 7', 'ten real paths'],
+    'English benchmark documentation',
+  ],
+]) {
+  for (const marker of markers) requireIncludes(document, marker, label);
 }
 
 for (const marker of [

@@ -26,7 +26,7 @@ cargo run -p a3s-ash-bench --release --locked -- --runtime
 cargo run -p a3s-ash-bench --release --locked -- --runtime ./path/to/ash
 ```
 
-The schema-6 report includes every observation, p50/p95/p99 nanoseconds, item and byte throughput, selected compute and I/O workers, host OS/architecture/available CPU count, per-scenario input digest, and output digest. Matrix scenarios also report speedup and parallel efficiency in basis points. Fresh CLI startup uses the host-detected runtime once rather than pretending it belongs to the configurable scaling matrix, so both scaling fields are `null`. Stable evidence bytes are compared across warm-up, samples, and applicable worker counts; a difference fails before timing is printed. Host timings are not checked in or gated because shared-runner performance is not portable.
+The schema-7 report includes every observation, p50/p95/p99 nanoseconds, item and byte throughput, selected compute and I/O workers, host OS/architecture/available CPU count, per-scenario input digest, and output digest. Matrix scenarios also report speedup and parallel efficiency in basis points. Recursive listing reports zero byte throughput because it reads metadata rather than file content. Fresh CLI startup uses the host-detected runtime once rather than pretending it belongs to the configurable scaling matrix, so both scaling fields are `null`. Stable evidence bytes are compared across warm-up, samples, and applicable worker counts; a difference fails before timing is printed. Host timings are not checked in or gated because shared-runner performance is not portable.
 
 The versioned task seed is independently locked and executable on all three operating systems:
 
@@ -232,10 +232,12 @@ cargo test -p a3s-ash-bench direct_math_symbols_beat_wrappers_and_match_the_asci
 
 ## 9. Runtime benchmarks
 
-The implemented host-local slice exercises eight real runtime paths over deterministic inputs:
+The implemented host-local slice exercises ten real runtime paths over deterministic inputs:
 
-- `search-literal` walks the workspace, reads files on bounded workers, scans text, performs stable merge and path interning, and encodes the final ASON response;
-- `snapshot-blake3` walks the same workspace, hashes files in the Rayon pool, builds and retains the canonical manifest, and encodes the final ASON response;
+- `list-recursive` walks 16 disjoint fixture roots on bounded workers, selects files, performs stable merge and path interning, validates one output record per fixture file, and encodes the final ASON response without claiming content-byte throughput;
+- `search-literal` walks the same roots, reads files on bounded workers, finds one fixed literal per file, validates the exact match count, performs stable merge and path interning, and encodes the final ASON response;
+- `search-regex` compiles an anchored regular expression, walks and scans the same roots, validates one match per file and the same canonical evidence as literal search, and includes compilation in the timed operation;
+- `snapshot-blake3` walks the same roots, hashes files in the Rayon pool, builds and retains the canonical manifest, and encodes the final ASON response;
 - `result-store-spill-fetch` captures 8 MiB in 16 KiB chunks with a 4 MiB memory ceiling, proves disk residency, hashes and atomically retains the value through the compute pool, fetches its final 64 KiB range, releases the alias, and tears down the session spool;
 - `cli-cold-startup` starts the selected real `ash run` executable for every observation, sends one canonical request, and measures from immediately before OS spawn until process exit and complete stdout/stderr drain; its input digest binds the executable bytes, arguments, and request;
 - `exec-spawn-empty` launches a silent success fixture through normal engine admission, the hierarchical governor, and the native process owner, then validates the typed exit evidence;
@@ -243,20 +245,19 @@ The implemented host-local slice exercises eight real runtime paths over determi
 - `exec-cancel-tree-empty` runs a parent that spawns a pipe-inheriting descendant, waits for the descendant PID marker, then measures from `Session::cancel` until the native process group or Job Object is empty, inherited pipes reach EOF, the request unregisters, and the canonical cancelled response is encoded;
 - `rpc-warm-dispatch` starts the production RPC gateway over an in-memory duplex transport, completes the real ASH/1 handshake outside the timed interval, then measures full framed request/response round trips through decode, admission, stable response encoding, flush, and client decode on the same warm session.
 
-Search, snapshot, store, and direct-process matrix samples use fresh execution sessions so aliases, dictionaries, budgets, cancellation registrations, and spools start from the same state. Fixture compilation, engine construction, and session creation are outside those timed intervals. Cold CLI observations use a fresh OS process and include startup, request I/O, shutdown, and pipe drain; a 10-second bound kills and reaps a stuck child. Warm RPC keeps one production service session per worker configuration, excludes only service creation and handshake, and closes it within the same bound after sampling. Search, snapshot, child spawn, and process capture time admission through canonical response encoding. Store timing includes capture through range fetch, release, and spool teardown. Cancellation timing begins only after the descendant exists and ends after tree wait plus canonical response encoding. The benchmark has no fixed speedup, startup, dispatch, spawn, or cancellation threshold: it proves stable evidence and bounded completion, then reports current-host measurements.
+List, search, snapshot, store, and direct-process matrix samples use fresh execution sessions so aliases, dictionaries, budgets, cancellation registrations, and spools start from the same state. Fixture and request creation, engine construction, and session creation are outside those timed intervals; regular-expression compilation remains inside the search operation and is timed. Cold CLI observations use a fresh OS process and include startup, request I/O, shutdown, and pipe drain; a 10-second bound kills and reaps a stuck child. Warm RPC keeps one production service session per worker configuration, excludes only service creation and handshake, and closes it within the same bound after sampling. List, search, snapshot, child spawn, and process capture time admission through canonical response encoding. Store timing includes capture through range fetch, release, and spool teardown. Cancellation timing begins only after the descendant exists and ends after tree wait plus canonical response encoding. The benchmark has no fixed speedup, startup, dispatch, spawn, or cancellation threshold: it proves stable evidence and bounded completion, then reports current-host measurements.
 
 The remaining runtime corpus expands this implemented slice with:
 
 - stream capture at additional output rates and chunk distributions;
-- reducer throughput;
+- reducer throughput and reduction at 1, 2, 4, 8, and host-default compute workers;
 - path dictionary lookup;
 - graph scheduling at several node counts;
-- directory traversal, literal search, regular-expression search, hashing, and reduction at 1, 2, 4, 8, and host-default compute workers;
 - mixed-load I/O latency while the compute pool is saturated.
 
 The current schema reports p50, p95, p99, sample count, host OS/architecture/available CPU count, selected compute and I/O workers, work volume, input and output digests, output size, throughput, and every raw observation. Speedup and parallel efficiency are present only when a scenario has a worker matrix. Future scenarios must add peak resident memory and CPU utilization where those values are material to the claim. Results from different hosts are not combined into one scaling curve.
 
-Parallel and sequential runs consume the same input digest and must emit byte-identical evidence. Search, snapshot, cold CLI, and warm RPC outputs are canonical ASON; store and process-capture outputs are verified ranges; child spawn and cancellation outputs bind typed termination evidence after cleanup. A faster run with reordered, missing, duplicated, or changed evidence is a correctness failure rather than a performance result. Future fixtures still need fewer large files, skewed directory trees, binary files, ignored paths, sparse and dense matches, varied output rates, and mixed compute/process pressure.
+Parallel and sequential runs consume the same input digest and must emit byte-identical evidence. List, literal and regular-expression search, snapshot, cold CLI, and warm RPC outputs are canonical ASON; store and process-capture outputs are verified ranges; child spawn and cancellation outputs bind typed termination evidence after cleanup. Literal and regular-expression search additionally must emit the same evidence for their intentionally equivalent queries. A faster run with reordered, missing, duplicated, or changed evidence is a correctness failure rather than a performance result. Future fixtures still need fewer large files, skewed directory trees, binary files, ignored paths, sparse and dense matches, varied output rates, and mixed compute/process pressure.
 
 ## 10. Proposed release gates
 

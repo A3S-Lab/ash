@@ -32,13 +32,17 @@ cargo build -p a3s-ash --release --locked
 cargo run -p a3s-ash-bench --release --locked -- --runtime
 ```
 
-Schema 6 measures eight real paths: literal search, BLAKE3 snapshot, disk
-spill/fetch, fresh `ash run` startup, empty child spawn, dual-pipe pressure,
-process-tree cancellation, and warm framed RPC dispatch. Matrix paths run at 1,
-2, 4, 8, and host-available worker counts. Each cold observation starts and
-reaps the real same-profile binary. Warm dispatch keeps one production RPC
-session alive and excludes only its handshake. A changed canonical result fails
-the report. Cold startup has no scaling curve, so its speedup and parallel
+Schema 7 measures ten real paths: recursive directory traversal, literal search,
+regular-expression search, BLAKE3 snapshot, disk spill/fetch, fresh `ash run`
+startup, empty child spawn, dual-pipe pressure, process-tree cancellation, and
+warm framed RPC dispatch. List and search split the fixture into disjoint roots
+so traversal and scanning enter the bounded worker pool. Listing reports item
+throughput without inventing content-byte throughput. Matrix paths run at 1, 2,
+4, 8, and host-available worker counts. Each cold observation starts and reaps
+the real same-profile binary. Warm dispatch keeps one production RPC session
+alive and excludes only its handshake. Changed canonical evidence fails the
+report; the intentionally equivalent literal and regex queries must also emit
+the same result. Cold startup has no scaling curve, so its speedup and parallel
 efficiency are `null`. Timing remains host-local.
 
 ## Native-shell task seed
@@ -60,7 +64,7 @@ native shell; it does not run a model or claim an ash task result.
 - Rust unit and integration suites across every workspace crate.
 - `cargo check` and tests on Linux, macOS, and Windows.
 - Real release builds exercised by all three platform installers.
-- Eight real runtime paths, including fresh CLI startup, warm RPC dispatch, direct child spawn, dual-pipe disk capture, and cancellation to tree empty.
+- Ten real runtime paths, including parallel recursive traversal, literal/regex search, fresh CLI startup, warm RPC dispatch, dual-pipe disk capture, and cancellation to tree empty.
 - Three locked tasks with Linux, macOS, and Windows native-shell baselines.
 - Fuzz targets for ASON, bounded ASH/1 frames, typed requests, and update metadata.
 - File-transaction crash cutpoints, update activation/recovery, and cancellation race tests.
