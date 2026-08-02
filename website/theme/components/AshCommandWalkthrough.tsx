@@ -263,8 +263,8 @@ const steps: WalkthroughStep[] = [
       en: 'Program, arguments, working directory, and environment are encoded separately. There is no quoting ambiguity or accidental second command.',
     },
     shellComment: {
-      zh: '执行 cargo test --locked；超时与取消会传到整个进程树',
-      en: 'Run cargo test --locked; timeout and cancellation reach the process tree',
+      zh: '执行 cargo test --locked；重复诊断块先投影为 ×N#K',
+      en: 'Run cargo test --locked; repeated diagnostic blocks project to ×N#K',
     },
     annotations: [
       {
@@ -276,11 +276,15 @@ const steps: WalkthroughStep[] = [
         en: 'The `-SECRET` entry removes a sensitive variable from the inherited environment.',
       },
       {
-        zh: '输出投影与完整输出引用分离；通常只需消费退出码与短摘要。',
-        en: 'Output projection is separate from full-output references; agents usually consume only the exit code and short summary.',
+        zh: '`×64#2` 表示前两行构成的块总共出现 64 次；只保留一份块正文。',
+        en: '`×64#2` means the preceding two-line block occurred 64 times; only one copy remains inline.',
+      },
+      {
+        zh: '完整 stdout 保留为 `@12`；投影只减少模型上下文，不丢失原始测试证据。',
+        en: 'Complete stdout remains at `@12`; projection reduces model context without losing test evidence.',
       },
     ],
-    tags: ['o:x', 'argv', 'process-tree'],
+    tags: ['o:x', 'argv', '×N#K', 'retained'],
     request: [
       't:1',
       'i:18',
@@ -296,8 +300,8 @@ const steps: WalkthroughStep[] = [
       'i:18',
       's:0',
       'd{k,c,ms,o,e,ro,re}:',
-      '0,0,842,"test result: ok",~,~,~',
-      'z:0',
+      '0,0,842,"compile crate-a\\nlink crate-a\\n×64#2\\ntest result: ok",~,@12,~',
+      'z:11',
       'r:~',
     ],
     resultFocus: [3, 4, 5],

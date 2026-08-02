@@ -62,6 +62,14 @@ order and worker count cannot change the result. Normalized or reduced output se
 the corresponding flags and retains the exact source, so `×N` need not be a
 reversible escape syntax.
 
+A second pass handles blocks. If a `K`-line block `B` occurs `N` consecutive
+times, it projects one `B` plus `×N#K`, with `2 <= K <= 32`. Each position first
+selects the candidate with greatest byte savings, then smaller `K` and larger
+`N`; a non-saving candidate remains verbatim. Candidate search and large exact
+checks enter Rayon, but every omitted block is finally byte-equal to the retained
+block. Hash collisions and worker count cannot alter the result, and the exact
+source reference remains authoritative.
+
 Every spool carries a versioned owner marker and a lifetime lock. A later
 process reclaims it only after one hour, only when no active lock remains, and
 only when every entry is recognized; uncertain roots are never modified.

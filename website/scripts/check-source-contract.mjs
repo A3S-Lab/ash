@@ -43,6 +43,7 @@ const [
   releaseWorkflow,
   config,
   home,
+  commandWalkthrough,
   symbolAlgebra,
   switcher,
   alignedStyles,
@@ -50,7 +51,7 @@ const [
   runtimeReducer,
   runtimePrimitives,
   referenceOperation,
-  repeatedLineReducer,
+  repetitionReducer,
   execOperation,
   benchmarkZh,
   benchmarkEn,
@@ -61,6 +62,7 @@ const [
   text('.github/workflows/release.yml'),
   text('website/rspress.config.ts'),
   text('website/theme/components/HomeLayout.tsx'),
+  text('website/theme/components/AshCommandWalkthrough.tsx'),
   text('website/theme/components/AshSymbolAlgebra.tsx'),
   text('website/theme/components/InstallSwitcher.tsx'),
   text('website/theme/a3s-aligned.css'),
@@ -141,7 +143,7 @@ for (const command of [unixCommand, windowsCommand, cargoCommand]) {
   requireIncludes(switcher, command, 'Homepage install switcher');
 }
 
-requireIncludes(home, "metricTestsValue: '168'", 'Homepage evidence');
+requireIncludes(home, "metricTestsValue: '174'", 'Homepage evidence');
 requireIncludes(
   home,
   `metricTokenValue: '${report.gates.ason_vs_record_json_cl100k_percent}%'`,
@@ -181,12 +183,16 @@ requireIncludes(
 if (!report.formula_algebra.gates.passed) {
   throw new Error('The checked formula algebra gate must pass.');
 }
-if (report.schema !== 3 || !report.repeated_line_reduction?.gates?.passed) {
-  throw new Error('The checked repeated-line token gate must pass.');
+if (
+  report.schema !== 4 ||
+  !report.repeated_line_reduction?.gates?.passed ||
+  !report.repeated_block_reduction?.gates?.passed
+) {
+  throw new Error('The checked repetition token gates must pass.');
 }
 
 for (const marker of [
-  'schema: 10',
+  'schema: 11',
   '"list-recursive"',
   '"search-literal"',
   '"search-regex"',
@@ -194,6 +200,7 @@ for (const marker of [
   'require_equivalent_output(&scenarios, "search-literal", "search-regex")',
   'reducer::measure_structured_projection_scenario(',
   'reducer::measure_repeated_line_scenario(&config)',
+  'reducer::measure_repeated_block_scenario(&config)',
   'primitives::measure_path_dictionary_scenario(&config)',
   'primitives::measure_dag_scenario(nodes, id, &config)',
 ]) {
@@ -202,9 +209,13 @@ for (const marker of [
 for (const marker of [
   '"ref-project-structured"',
   '"reduce-repeated-lines"',
+  '"reduce-repeated-blocks"',
   'const ROWS_PER_FIXTURE_FILE: usize = 64',
   'const REPEATED_LINES_PER_FIXTURE_FILE: usize = 512',
+  'const REPEATED_BLOCK_LINES: usize = 8',
+  'const REPEATED_BLOCK_REPETITIONS: usize = 64',
   'pool.install(|| collapse_repeated_lines(&workload.input))',
+  'pool.install(|| collapse_repeated_blocks(&workload.input))',
   'validate_response(&response, workload, reference)',
   'runtime_run(',
 ]) {
@@ -221,11 +232,19 @@ for (const marker of [
   '.par_chunks(PARTITION_LINES)',
   "line.ends_with('\\n') && marker.len() < omitted_bytes",
   'previous.count += run.count',
+  'const BLOCK_CANDIDATE_BATCH_LINES: usize = 4_096',
+  'const MAX_BLOCK_LINES: usize = 32',
+  'pub fn collapse_repeated_blocks(text: &str)',
+  'verified_candidate(&layout, index, hashed)',
+  'candidate_is_exact(layout, start, candidate)',
+  '(1..repetitions).into_par_iter().all(matches)',
+  'format!("{REPEAT_SYMBOL}{repetitions}#{block_lines}\\n")',
 ]) {
-  requireIncludes(repeatedLineReducer, marker, 'Repeated-line reducer');
+  requireIncludes(repetitionReducer, marker, 'Repetition reducer');
 }
 for (const marker of [
-  'let reduction = collapse_repeated_lines(&normalized_text);',
+  'let line_reduction = collapse_repeated_lines(&normalized_text);',
+  'let block_reduction = collapse_repeated_blocks(line_reduction.text());',
   'let finalizing = matches!(stop, Stop::TimedOut | Stop::Cancelled);',
   '.run(move || project_captures(',
 ]) {
@@ -243,14 +262,21 @@ for (const marker of [
   requireIncludes(runtimePrimitives, marker, 'Runtime primitive benchmark');
 }
 for (const [document, markers, label] of [
-  [benchmarkZh, ['schema 10', '十六个场景'], 'Chinese benchmark documentation'],
+  [benchmarkZh, ['schema 11', '十七个场景'], 'Chinese benchmark documentation'],
   [
     benchmarkEn,
-    ['Schema 10', 'sixteen scenarios'],
+    ['Schema 11', 'seventeen scenarios'],
     'English benchmark documentation',
   ],
 ]) {
   for (const marker of markers) requireIncludes(document, marker, label);
+}
+for (const marker of [
+  '×64#2',
+  'z:11',
+  "tags: ['o:x', 'argv', '×N#K', 'retained']",
+]) {
+  requireIncludes(commandWalkthrough, marker, 'Repeated-block command tour');
 }
 
 for (const marker of [

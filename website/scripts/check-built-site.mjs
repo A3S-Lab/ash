@@ -82,6 +82,7 @@ const homepages = {
     '悬停或聚焦符号查看批注',
     '字段注释',
     '07-project.ason',
+    '×64#2',
     'CANONICAL ASON',
     'A3S-Lab/ash/main/install.sh',
   ],
@@ -99,6 +100,7 @@ const homepages = {
     'Hover or focus a symbol for its note',
     'Field notes',
     '07-project.ason',
+    '×64#2',
     'CANONICAL ASON',
     'A3S-Lab/ash/main/install.sh',
   ],
@@ -110,8 +112,8 @@ const homepages = {
     'V0.1.0 · SOURCE CHECKPOINT',
     'd8756614ad6a54128336f50a6a52fcb6f92d1305',
   ],
-  'guide/benchmarks.html': ['schema 10', '十六个场景'],
-  'en/guide/benchmarks.html': ['Schema 10', 'sixteen scenarios'],
+  'guide/benchmarks.html': ['schema 11', '十七个场景', '×N#K'],
+  'en/guide/benchmarks.html': ['Schema 11', 'seventeen scenarios', '×N#K'],
 };
 
 for (const [homepage, markers] of Object.entries(homepages)) {
