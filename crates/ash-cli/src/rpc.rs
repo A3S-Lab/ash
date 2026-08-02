@@ -8,7 +8,7 @@ use ash_protocol::frame::FrameCodec;
 use ash_protocol::handshake::{HandshakeRequest, ServerHandshake};
 use ash_protocol::request::{Arguments, Request};
 use ash_protocol::response::FinalResponse;
-use tokio::io::{AsyncWriteExt, stdin, stdout};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, stdin, stdout};
 use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinSet;
 
@@ -16,20 +16,28 @@ use crate::cli_error::CliError;
 use crate::execution::{ExecutionSession, capacity_exceeded, invalid_request};
 
 pub async fn run() -> Result<(), CliError> {
+    serve(stdin(), stdout(), Parallelism::detected()).await
+}
+
+pub async fn serve<R, W>(
+    mut reader: R,
+    mut writer: W,
+    parallelism: Parallelism,
+) -> Result<(), CliError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let bootstrap_codec = FrameCodec::default();
     let limits = Limits {
         max_bytes: bootstrap_codec.max_payload(),
         ..Limits::default()
     };
-    let mut stdin = stdin();
-    let mut stdout = stdout();
-
     let document = bootstrap_codec
-        .read_document(&mut stdin, &limits)
+        .read_document(&mut reader, &limits)
         .await?
         .ok_or(CliError::MissingHandshake)?;
     let request = HandshakeRequest::decode(&document)?;
-    let parallelism = Parallelism::detected();
     let response = ServerHandshake {
         operation_mask: ExecutionSession::operation_mask(),
         capability_mask: ExecutionSession::capability_mask(),
@@ -45,9 +53,9 @@ pub async fn run() -> Result<(), CliError> {
     )?);
     let response_document = response.encode()?;
     bootstrap_codec
-        .write_document(&mut stdout, &response_document)
+        .write_document(&mut writer, &response_document)
         .await?;
-    stdout.flush().await?;
+    writer.flush().await?;
 
     let session_codec = FrameCodec::new(response.frame_bytes() as usize)?;
     let session_limits = Limits {
@@ -66,7 +74,7 @@ pub async fn run() -> Result<(), CliError> {
 
     loop {
         if fatal.is_none() {
-            flush_ready(&session_codec, &mut stdout, &mut buffered, &mut next_output).await?;
+            flush_ready(&session_codec, &mut writer, &mut buffered, &mut next_output).await?;
         }
         if !input_open && tasks.is_empty() {
             break;
@@ -76,7 +84,7 @@ pub async fn run() -> Result<(), CliError> {
                 < u64::try_from(max_pending).unwrap_or(u64::MAX);
 
         tokio::select! {
-            document = session_codec.read_document(&mut stdin, &session_limits), if can_read => {
+            document = session_codec.read_document(&mut reader, &session_limits), if can_read => {
                 match document {
                     Ok(Some(document)) => {
                         let sequence = next_sequence;
@@ -155,7 +163,7 @@ pub async fn run() -> Result<(), CliError> {
     if let Some(error) = fatal {
         Err(error)
     } else {
-        flush_ready(&session_codec, &mut stdout, &mut buffered, &mut next_output).await?;
+        flush_ready(&session_codec, &mut writer, &mut buffered, &mut next_output).await?;
         Ok(())
     }
 }
@@ -181,4 +189,106 @@ where
         writer.flush().await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use ash_engine::Parallelism;
+    use ash_protocol::Operation;
+    use ash_protocol::frame::FrameCodec;
+    use ash_protocol::handshake::{HandshakePreferences, HandshakeRequest, ServerHandshake};
+    use ash_protocol::request::{
+        Arguments, Budget, CancelArgs, MAX_REQUEST_RECORDS, MAX_REQUEST_TOKENS, Request,
+    };
+    use ash_protocol::response::{CancelResult, CancellationState, FinalResponse, ResultData};
+    use tokio::io::{AsyncWriteExt, duplex, split};
+
+    use crate::execution::ExecutionSession;
+
+    #[tokio::test]
+    async fn one_warm_session_dispatches_repeatable_frames_without_restart() {
+        let parallelism = Parallelism::for_available_cpus(2);
+        let (client, server) = duplex(64 * 1024);
+        let (mut client_reader, mut client_writer) = split(client);
+        let (server_reader, server_writer) = split(server);
+        let server_task = tokio::spawn(super::serve(server_reader, server_writer, parallelism));
+        let codec = FrameCodec::default();
+        let handshake = HandshakeRequest::new(
+            1,
+            ".",
+            "rpc-unit",
+            HandshakePreferences {
+                operation_mask: Operation::Cancel.mask(),
+                ..HandshakePreferences::default()
+            },
+        )
+        .expect("handshake");
+        codec
+            .write_document(
+                &mut client_writer,
+                &handshake.encode().expect("encode handshake"),
+            )
+            .await
+            .expect("write handshake");
+        client_writer.flush().await.expect("flush handshake");
+        let handshake_response = codec
+            .read_document(&mut client_reader, &Default::default())
+            .await
+            .expect("read handshake")
+            .expect("handshake response");
+        let expected_handshake = ServerHandshake {
+            operation_mask: ExecutionSession::operation_mask(),
+            capability_mask: ExecutionSession::capability_mask(),
+            ..ServerHandshake::default()
+        }
+        .negotiate(&handshake, 1)
+        .expect("negotiate")
+        .encode()
+        .expect("encode expected handshake");
+        assert_eq!(handshake_response, expected_handshake);
+
+        let request = Request::new(
+            2,
+            Arguments::Cancel(CancelArgs::new(999).expect("cancel arguments")),
+            Budget::new(MAX_REQUEST_TOKENS, MAX_REQUEST_RECORDS, 30_000).expect("budget"),
+        )
+        .expect("request");
+        let request = request.encode().expect("encode request");
+        let expected = FinalResponse::success(
+            2,
+            vec![],
+            ResultData::Cancel(CancelResult {
+                target_id: 999,
+                state: CancellationState::NotActive,
+            }),
+            0,
+            None,
+        )
+        .expect("response")
+        .encode()
+        .expect("encode response");
+        for _ in 0..3 {
+            codec
+                .write_document(&mut client_writer, &request)
+                .await
+                .expect("write request");
+            client_writer.flush().await.expect("flush request");
+            let actual = codec
+                .read_document(&mut client_reader, &Default::default())
+                .await
+                .expect("read response")
+                .expect("response");
+            assert_eq!(actual, expected);
+        }
+
+        drop(client_writer);
+        drop(client_reader);
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("server shutdown bound")
+            .expect("server task")
+            .expect("server result");
+    }
 }

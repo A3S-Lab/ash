@@ -19,6 +19,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+mod cold;
+mod dispatch;
+
 const DEFAULT_FILES: usize = 256;
 const DEFAULT_BYTES_PER_FILE: usize = 32 * 1024;
 const DEFAULT_SAMPLES: usize = 5;
@@ -37,7 +40,7 @@ const PROCESS_CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_HELPER_SOURCE: &str = r#"
 use std::error::Error;
 use std::fs;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -48,6 +51,31 @@ const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = std::env::args_os().skip(1);
     match arguments.next().as_deref() {
+        Some(mode) if mode == "exit" => {
+            if arguments.next().is_some() {
+                return Err("unexpected exit argument".into());
+            }
+        }
+        Some(mode) if mode == "respond" => {
+            let request = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or("missing request")?;
+            let response = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or("missing response")?;
+            if arguments.next().is_some() {
+                return Err("unexpected respond argument".into());
+            }
+            let mut input = Vec::new();
+            io::stdin().read_to_end(&mut input)?;
+            if input != decode_hex(&request)? {
+                return Err("unexpected request input".into());
+            }
+            io::stdout().write_all(&decode_hex(&response)?)?;
+            io::stdout().flush()?;
+        }
         Some(mode) if mode == "emit" => {
             let bytes = arguments
                 .next()
@@ -117,6 +145,20 @@ fn emit(mut writer: impl Write, total: usize, seed: usize) -> io::Result<()> {
     }
     writer.flush()
 }
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    if value.len() % 2 != 0 {
+        return Err("odd response hex length".into());
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair)?;
+            Ok(u8::from_str_radix(text, 16)?)
+        })
+        .collect()
+}
 "#;
 
 #[derive(Debug, Serialize)]
@@ -155,15 +197,16 @@ struct ScenarioReport {
 
 #[derive(Debug, Serialize)]
 struct RuntimeRun {
-    workers: usize,
+    compute_workers: usize,
+    io_workers: usize,
     observations_ns: Vec<u128>,
     p50_ns: u128,
     p95_ns: u128,
     p99_ns: u128,
     items_per_second: u128,
     bytes_per_second: u128,
-    speedup_basis_points: u128,
-    parallel_efficiency_basis_points: u128,
+    speedup_basis_points: Option<u128>,
+    parallel_efficiency_basis_points: Option<u128>,
     output_sha256: String,
 }
 
@@ -280,12 +323,15 @@ impl Scenario {
     }
 }
 
-pub(crate) async fn runtime_report() -> Result<RuntimeReport, Box<dyn Error>> {
-    runtime_report_with_config(RuntimeConfig::detected()).await
+pub(crate) async fn runtime_report(
+    ash_binary: Option<&std::path::Path>,
+) -> Result<RuntimeReport, Box<dyn Error>> {
+    runtime_report_with_config(RuntimeConfig::detected(), ash_binary).await
 }
 
 async fn runtime_report_with_config(
     mut config: RuntimeConfig,
+    ash_binary: Option<&std::path::Path>,
 ) -> Result<RuntimeReport, Box<dyn Error>> {
     config.validate()?;
     let fixture = prepare_fixture(config.files, config.bytes_per_file)?;
@@ -293,7 +339,8 @@ async fn runtime_report_with_config(
     let operations = PortableOperations::new(workspace);
     let workspace_text = fixture.directory.path().to_string_lossy().into_owned();
     let process_fixture = prepare_process_fixture()?;
-    let mut scenarios = Vec::with_capacity(Scenario::ALL.len() + 3);
+    let cold_fixture = cold::prepare_fixture(ash_binary, &process_fixture)?;
+    let mut scenarios = Vec::with_capacity(Scenario::ALL.len() + 6);
     for scenario in Scenario::ALL {
         scenarios.push(
             measure_scenario(
@@ -307,10 +354,14 @@ async fn runtime_report_with_config(
         );
     }
     scenarios.push(measure_store_scenario(&workspace_text, &config).await?);
+    scenarios
+        .push(cold::measure_cold_startup_scenario(&cold_fixture, &workspace_text, &config).await?);
+    scenarios.push(measure_process_spawn_scenario(&process_fixture, &config).await?);
     scenarios.push(measure_process_capture_scenario(&process_fixture, &config).await?);
     scenarios.push(measure_process_cancel_scenario(&process_fixture, &config).await?);
+    scenarios.push(dispatch::measure_rpc_dispatch_scenario(&workspace_text, &config).await?);
     Ok(RuntimeReport {
-        schema: 4,
+        schema: 6,
         host: HostReport {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
@@ -320,6 +371,103 @@ async fn runtime_report_with_config(
         samples: config.samples,
         scenarios,
     })
+}
+
+async fn measure_process_spawn_scenario(
+    fixture: &ProcessFixture,
+    config: &RuntimeConfig,
+) -> Result<ScenarioReport, Box<dyn Error>> {
+    let request = process_request(2, fixture, vec!["exit".to_owned()])?;
+    let input_sha256 = process_input_sha256(fixture, "mode=exit\n");
+    let mut runs = Vec::with_capacity(config.worker_counts.len());
+    let mut expected_output = None;
+    let mut baseline = None;
+
+    for &workers in &config.worker_counts {
+        let parallelism = Parallelism::for_available_cpus(workers);
+        let engine = Engine::new(parallelism)?;
+        let (warm_output, _) =
+            execute_process_spawn_once(&engine, fixture, parallelism, &request, 15_000).await?;
+        require_stable_output(&mut expected_output, &warm_output)?;
+
+        let mut observations = Vec::with_capacity(config.samples);
+        for sample in 0..config.samples {
+            let session_id = u64::try_from(sample)?.saturating_add(15_001);
+            let (output, elapsed) =
+                execute_process_spawn_once(&engine, fixture, parallelism, &request, session_id)
+                    .await?;
+            require_stable_output(&mut expected_output, &output)?;
+            observations.push(elapsed);
+        }
+        let output = expected_output
+            .as_ref()
+            .ok_or_else(|| io::Error::other("process spawn benchmark emitted no output"))?;
+        runs.push(runtime_run(
+            parallelism,
+            observations,
+            &mut baseline,
+            1,
+            0,
+            output,
+        ));
+    }
+
+    let output = expected_output.ok_or_else(|| io::Error::other("missing process spawn output"))?;
+    Ok(ScenarioReport {
+        id: "exec-spawn-empty",
+        work_items: 1,
+        work_bytes: 0,
+        input_sha256,
+        output_bytes: output.len(),
+        output_sha256: sha256_hex(&output),
+        runs,
+    })
+}
+
+async fn execute_process_spawn_once(
+    engine: &Engine,
+    fixture: &ProcessFixture,
+    parallelism: Parallelism,
+    request: &Request,
+    session_id: u64,
+) -> Result<(Vec<u8>, u128), Box<dyn Error>> {
+    let session = engine.open_session(SessionConfig::new(
+        session_id,
+        &fixture.workspace,
+        PROCESS_RESPONSE_BYTES,
+        parallelism,
+    ))?;
+    let started = Instant::now();
+    let program = session.begin(request).await?;
+    let response = fixture.operations.execute(request, &program).await?;
+    let _canonical = response.encode()?.encode();
+    let elapsed = started.elapsed().as_nanos().max(1);
+    let result = match response.data() {
+        Some(ResultData::Exec(result)) => result,
+        _ => return Err(io::Error::other("unexpected empty process result").into()),
+    };
+    if response.status() != Status::Success
+        || response.flags() != 0
+        || result.termination != TerminationKind::Exited
+        || result.code != Some(0)
+        || result.stdout.projection.is_some()
+        || result.stdout.reference.is_some()
+        || result.stderr.projection.is_some()
+        || result.stderr.reference.is_some()
+    {
+        return Err(io::Error::other("empty process spawn produced unexpected evidence").into());
+    }
+    let output = format!(
+        "status={}\ntermination={}\ncode={}\nstdout=0\nstderr=0\nflags={}\n",
+        response.status().code(),
+        result.termination as u8,
+        result.code.unwrap_or_default(),
+        response.flags(),
+    )
+    .into_bytes();
+    drop(program);
+    drop(session);
+    Ok((output, elapsed))
 }
 
 async fn measure_store_scenario(
@@ -371,15 +519,16 @@ async fn measure_store_scenario(
             .as_ref()
             .ok_or_else(|| io::Error::other("store benchmark emitted no output"))?;
         runs.push(RuntimeRun {
-            workers,
+            compute_workers: workers,
+            io_workers: parallelism.io_workers().get(),
             observations_ns: observations,
             p50_ns: p50,
             p95_ns: p95,
             p99_ns: p99,
             items_per_second: throughput(1, p50),
             bytes_per_second: throughput(workload.input.len() as u128, p50),
-            speedup_basis_points: speedup,
-            parallel_efficiency_basis_points: speedup / workers as u128,
+            speedup_basis_points: Some(speedup),
+            parallel_efficiency_basis_points: Some(speedup / workers as u128),
             output_sha256: sha256_hex(output),
         });
     }
@@ -501,7 +650,7 @@ async fn measure_process_capture_scenario(
             .as_ref()
             .ok_or_else(|| io::Error::other("process capture benchmark emitted no output"))?;
         runs.push(runtime_run(
-            workers,
+            parallelism,
             observations,
             &mut baseline,
             2,
@@ -632,7 +781,7 @@ async fn measure_process_cancel_scenario(
             .as_ref()
             .ok_or_else(|| io::Error::other("process cancellation emitted no output"))?;
         runs.push(runtime_run(
-            workers,
+            parallelism,
             observations,
             &mut baseline,
             1,
@@ -785,13 +934,14 @@ fn process_stream_tail(total: usize, length: usize, seed: usize) -> Vec<u8> {
 }
 
 fn runtime_run(
-    workers: usize,
+    parallelism: Parallelism,
     observations: Vec<u128>,
     baseline: &mut Option<u128>,
     work_items: u128,
     work_bytes: u128,
     output: &[u8],
 ) -> RuntimeRun {
+    let workers = parallelism.compute_workers().get();
     let mut ordered = observations.clone();
     ordered.sort_unstable();
     let p50 = percentile(&ordered, 50);
@@ -800,15 +950,16 @@ fn runtime_run(
     let baseline = *baseline.get_or_insert(p50);
     let speedup = ratio_basis_points(baseline, p50);
     RuntimeRun {
-        workers,
+        compute_workers: workers,
+        io_workers: parallelism.io_workers().get(),
         observations_ns: observations,
         p50_ns: p50,
         p95_ns: p95,
         p99_ns: p99,
         items_per_second: throughput(work_items, p50),
         bytes_per_second: throughput(work_bytes, p50),
-        speedup_basis_points: speedup,
-        parallel_efficiency_basis_points: speedup / workers as u128,
+        speedup_basis_points: Some(speedup),
+        parallel_efficiency_basis_points: Some(speedup / workers as u128),
         output_sha256: sha256_hex(output),
     }
 }
@@ -859,15 +1010,16 @@ async fn measure_scenario(
             .as_ref()
             .ok_or_else(|| io::Error::other("runtime benchmark emitted no output"))?;
         runs.push(RuntimeRun {
-            workers,
+            compute_workers: workers,
+            io_workers: parallelism.io_workers().get(),
             observations_ns: observations,
             p50_ns: p50,
             p95_ns: p95,
             p99_ns: p99,
             items_per_second: throughput(fixture.files as u128, p50),
             bytes_per_second: throughput(u128::from(fixture.bytes), p50),
-            speedup_basis_points: speedup,
-            parallel_efficiency_basis_points: speedup / workers as u128,
+            speedup_basis_points: Some(speedup),
+            parallel_efficiency_basis_points: Some(speedup / workers as u128),
             output_sha256: sha256_hex(output),
         });
     }
@@ -1058,37 +1210,52 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn real_runtime_outputs_are_stable_across_worker_counts() {
-        let report = runtime_report_with_config(RuntimeConfig {
-            files: 8,
-            bytes_per_file: 4 * 1024,
-            samples: 2,
-            store_bytes: 128 * 1024,
-            store_memory_bytes: 16 * 1024,
-            store_fetch_bytes: 4 * 1024,
-            process_stream_bytes: 5 * 1024 * 1024,
-            process_fetch_bytes: 4 * 1024,
-            worker_counts: vec![2, 1, 2],
-        })
+        let report = runtime_report_with_config(
+            RuntimeConfig {
+                files: 8,
+                bytes_per_file: 4 * 1024,
+                samples: 2,
+                store_bytes: 128 * 1024,
+                store_memory_bytes: 16 * 1024,
+                store_fetch_bytes: 4 * 1024,
+                process_stream_bytes: 5 * 1024 * 1024,
+                process_fetch_bytes: 4 * 1024,
+                worker_counts: vec![2, 1, 2],
+            },
+            None,
+        )
         .await
         .expect("runtime report");
 
-        assert_eq!(report.schema, 4);
+        assert_eq!(report.schema, 6);
         assert_eq!(report.fixture.files, 8);
         assert_eq!(report.fixture.bytes, 8 * 4 * 1024);
         assert_eq!(report.samples, 2);
-        assert_eq!(report.scenarios.len(), 5);
+        assert_eq!(report.scenarios.len(), 8);
         for scenario in &report.scenarios {
             assert!(scenario.output_bytes > 0);
-            assert_eq!(scenario.runs.len(), 2);
-            assert_eq!(scenario.runs[0].workers, 1);
-            assert_eq!(scenario.runs[0].speedup_basis_points, 10_000);
-            assert_eq!(scenario.runs[0].parallel_efficiency_basis_points, 10_000);
             for run in &scenario.runs {
                 assert_eq!(run.observations_ns.len(), 2);
                 assert!(run.p50_ns <= run.p95_ns);
                 assert!(run.p95_ns <= run.p99_ns);
                 assert_eq!(run.output_sha256, scenario.output_sha256);
             }
+        }
+        for scenario in report
+            .scenarios
+            .iter()
+            .filter(|scenario| scenario.id != "cli-cold-startup")
+        {
+            assert_eq!(scenario.runs.len(), 2);
+            assert_eq!(scenario.runs[0].compute_workers, 1);
+            assert_eq!(scenario.runs[0].io_workers, 1);
+            assert_eq!(scenario.runs[1].compute_workers, 2);
+            assert_eq!(scenario.runs[1].io_workers, 2);
+            assert_eq!(scenario.runs[0].speedup_basis_points, Some(10_000));
+            assert_eq!(
+                scenario.runs[0].parallel_efficiency_basis_points,
+                Some(10_000)
+            );
         }
         for scenario in &report.scenarios[..2] {
             assert_eq!(scenario.work_items, 8);
@@ -1106,15 +1273,34 @@ mod tests {
         assert_ne!(&store.input_sha256, &report.fixture.sha256);
         assert_eq!(store.output_bytes, 4 * 1024);
 
-        let capture = &report.scenarios[3];
+        let cold = &report.scenarios[3];
+        assert_eq!(cold.id, "cli-cold-startup");
+        assert_eq!(cold.work_items, 1);
+        assert!(cold.work_bytes > 0);
+        assert_eq!(cold.runs.len(), 1);
+        assert_eq!(cold.runs[0].observations_ns.len(), 2);
+        assert_eq!(cold.runs[0].speedup_basis_points, None);
+        assert_eq!(cold.runs[0].parallel_efficiency_basis_points, None);
+
+        let spawn = &report.scenarios[4];
+        assert_eq!(spawn.id, "exec-spawn-empty");
+        assert_eq!(spawn.work_items, 1);
+        assert_eq!(spawn.work_bytes, 0);
+
+        let capture = &report.scenarios[5];
         assert_eq!(capture.id, "exec-capture-pressure");
         assert_eq!(capture.work_items, 2);
         assert_eq!(capture.work_bytes, 2 * 5 * 1024 * 1024);
         assert_eq!(capture.output_bytes, 2 * 4 * 1024);
 
-        let cancellation = &report.scenarios[4];
+        let cancellation = &report.scenarios[6];
         assert_eq!(cancellation.id, "exec-cancel-tree-empty");
         assert_eq!(cancellation.work_items, 1);
         assert_eq!(cancellation.work_bytes, 0);
+
+        let dispatch = &report.scenarios[7];
+        assert_eq!(dispatch.id, "rpc-warm-dispatch");
+        assert_eq!(dispatch.work_items, 1);
+        assert!(dispatch.work_bytes > 0);
     }
 }

@@ -22,6 +22,7 @@ repository = "https://github.com/A3S-Lab/ash"
 homepage = "https://a3s-lab.github.io/ash/"
 
 [workspace.dependencies]
+ash-cli = { package = "a3s-ash", path = "crates/ash-cli" }
 ash-engine = { package = "a3s-ash-engine", path = "crates/ash-engine" }
 ash-ops = { package = "a3s-ash-ops", path = "crates/ash-ops" }
 ash-platform = { package = "a3s-ash-platform", path = "crates/ash-platform" }

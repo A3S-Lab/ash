@@ -26,6 +26,7 @@ dependencies = [
 name = "a3s-ash-bench"
 version = "0.1.0"
 dependencies = [
+ "a3s-ash",
  "a3s-ash-engine",
  "a3s-ash-ops",
  "a3s-ash-platform",

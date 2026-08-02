@@ -110,8 +110,15 @@ struct Gates {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
-    if matches!(arguments.as_slice(), [command] if command == "--runtime") {
-        let mut encoded = serde_json::to_vec_pretty(&runtime::runtime_report().await?)?;
+    if matches!(arguments.as_slice(), [command, ..] if command == "--runtime") {
+        let ash_binary = match arguments.as_slice() {
+            [_] => None,
+            [_, path] => Some(std::path::Path::new(path)),
+            _ => {
+                return Err("usage: a3s-ash-bench --runtime [path-to-ash]".into());
+            }
+        };
+        let mut encoded = serde_json::to_vec_pretty(&runtime::runtime_report(ash_binary).await?)?;
         encoded.push(b'\n');
         print!("{}", std::str::from_utf8(&encoded)?);
         return Ok(());
@@ -128,7 +135,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         _ => {
-            return Err("usage: a3s-ash-bench [--runtime|--write <path>|--check <path>]".into());
+            return Err(
+                "usage: a3s-ash-bench [--runtime [path-to-ash]|--write <path>|--check <path>]"
+                    .into(),
+            );
         }
     }
     Ok(())

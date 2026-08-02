@@ -11,6 +11,7 @@ homepage.workspace = true
 publish = false
 
 [dependencies]
+ash-cli.workspace = true
 ash-engine.workspace = true
 ash-ops.workspace = true
 ash-platform.workspace = true
