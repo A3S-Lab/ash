@@ -5,12 +5,16 @@
     "activeMatch": "^/guide/"
   },
   {
-    "text": "Install",
-    "link": "/guide/install"
+    "text": "Capabilities",
+    "link": "/guide/capabilities"
   },
   {
-    "text": "ASON",
-    "link": "/guide/ason"
+    "text": "Agent Skill",
+    "link": "/guide/coding-agents"
+  },
+  {
+    "text": "Install",
+    "link": "/guide/install"
   },
   {
     "text": "Resources",

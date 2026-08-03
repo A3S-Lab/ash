@@ -5,12 +5,16 @@
     "activeMatch": "^/guide/"
   },
   {
-    "text": "安装",
-    "link": "/guide/install"
+    "text": "完整能力",
+    "link": "/guide/capabilities"
   },
   {
-    "text": "ASON",
-    "link": "/guide/ason"
+    "text": "Agent Skill",
+    "link": "/guide/coding-agents"
+  },
+  {
+    "text": "安装",
+    "link": "/guide/install"
   },
   {
     "text": "资源",

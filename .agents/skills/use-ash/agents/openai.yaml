@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use ash"
+  short_description: "Run coding tasks through typed ash"
+  default_prompt: "Use $use-ash to execute this coding task with typed, bounded ash operations."

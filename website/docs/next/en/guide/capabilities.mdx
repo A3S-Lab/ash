@@ -1,0 +1,133 @@
+---
+title: Complete capability map
+description: See every implemented ash capability, its guarantees, evidence path, and deliberate boundary.
+---
+
+# Complete capability map
+
+`ash` turns repository work into typed, bounded programs for Coding Agents. The
+current surface covers discovery, process execution, guarded mutation, parallel
+graphs, workspace state, retained evidence, authorization, and signed delivery.
+Every operation returns canonical ASON rather than terminal-oriented prose.
+
+:::warning Pre-release boundary
+The source implementation, cross-platform installers, and six-target release
+workflow are available. Release credentials are not provisioned and no
+supported signed binary has been published.
+:::
+
+## ASH/1 operation surface
+
+The request envelope is always `t,i,o,a,u`; a trusted harness adds `v` only for
+an approved permit retry. Fifteen operation IDs make the behavior explicit:
+
+| Area                 | ID   | Capability                                                               | Runtime guarantee                                                                                           |
+| -------------------- | ---- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| Process              | `x`  | Launch an executable with argv, cwd, environment delta, stdin, and flags | No implicit shell; concurrent stdout/stderr capture; deadline, cancellation, and owned process-tree cleanup |
+| Read                 | `r`  | Read explicit byte or one-based line ranges                              | Workspace-confined paths and bounded output                                                                 |
+| List                 | `l`  | Walk stable paths and metadata to a maximum depth                        | Deterministic ordering and bounded records                                                                  |
+| Search               | `g`  | Search literal text or a regular expression across roots                 | Partitioned CPU work followed by stable merge                                                               |
+| Patch                | `p`  | Apply aligned byte edits to existing files                               | Sorted BLAKE3 preimages, compare-and-swap conflict detection, and no partial commit                         |
+| File transaction     | `f`  | Create, copy, move, or remove regular files                              | Journaled all-or-nothing commit, no overwrite, rollback, and restart recovery                               |
+| Batch                | `b`  | Execute an acyclic dependency graph                                      | Ready-node concurrency, failed-descendant skip, independent drain, and stable lowest-index errors           |
+| Snapshot             | `s`  | Capture a workspace manifest or compare a matching baseline              | Deterministic snapshot and scoped delta                                                                     |
+| Evidence slice       | `/`  | Retrieve a zero-based byte range from retained output                    | Exact bounded bytes                                                                                         |
+| Evidence lines       | `#`  | Retrieve a one-based line range                                          | Exact bounded lines                                                                                         |
+| Evidence search      | `?`  | Search a retained result                                                 | Full stored source remains available                                                                        |
+| Evidence release     | `-`  | Release a retained alias                                                 | Explicit cleanup after active leases end; unknown or busy aliases fail                                      |
+| Evidence project     | `\|` | Project ordered table columns and rows                                   | Stable schema-aware projection                                                                              |
+| Evidence materialize | `>`  | Write retained bytes into the workspace                                  | Capability-gated, journaled, and no-overwrite                                                               |
+| Cancel               | `k`  | Cancel queued or active work and descendants                             | Idempotent completion and owned-resource cleanup                                                            |
+
+See [ASH/1](/guide/protocol) for exact argument columns, flags, response
+variants, framing, handshake, and diagnostic codes.
+
+## Runtime and scheduling
+
+One hierarchical governor bounds host, session, request, and operation work.
+Tokio owns framed RPC, child processes, pipes, deadlines, and cancellation;
+Rayon owns search, hashing, diffs, reduction, retained-store commits, and other
+splittable CPU work. Parallel completion order never becomes protocol order:
+stable merge produces deterministic canonical ASON.
+
+Batch requests validate the graph before launch. Nodes become ready when their
+dependencies succeed. A failed node skips only its descendants; already-running
+or independent nodes drain before ash chooses the stable task error.
+
+## Lossless evidence with a small immediate context
+
+Process output is captured losslessly under a bounded session store. A fixed
+head/tail projection keeps the immediate response compact; once a session's
+4 MiB memory ceiling is crossed, immutable evidence spills to private files.
+Range fetch, aliases, deduplication, leases, normal release, and proven
+crash-orphan recovery are part of the same store contract.
+
+Reduction is explicit rather than silent:
+
+- `×N` marks repeated lines, `×N#K` repeated blocks, and `⋯N` omitted diagnostic
+  regions.
+- Homogeneous ASON records use columns; repeated paths use dictionaries.
+- `/ # ? - | >` operate on complete retained results in the same live session,
+  so a Coding Agent can retrieve only the missing evidence without rerunning
+  broad work.
+- Every budget reports whether the immediate projection is complete and whether
+  a retained source is available.
+
+Retained aliases are session-local. A self-contained `ash run` call ends its
+temporary session after the response; reference formulas, snapshot deltas,
+batch-child inspection, active cancellation, and permit retries require one
+live framed `ash rpc` session.
+
+## Workspace integrity and recovery
+
+All native workspace operations resolve confined, canonical relative paths and
+reject lexical or symlink escape. Patches require current BLAKE3 preimages.
+Multi-file lifecycle changes use a checksummed on-disk journal, cross-process
+serialization, durable commit markers, reverse rollback, and restart recovery.
+Native file identity closes hard-link crash windows without confusing equal
+external bytes with files owned by ash.
+
+The transaction fault matrix drives the implementation through 30 forward
+durable cutpoints and interrupts recovery again at 12 rollback or cleanup
+cutpoints. Snapshot/delta adds an independent typed view of the resulting
+workspace state.
+
+## Capabilities, permits, and delivery
+
+The RPC handshake negotiates the least-privilege capability mask. A risky
+semantic retry requires a one-time permit bound to the session, action, policy,
+and expiry; replay is rejected. This authorizes ash behavior, not a universal
+network or syscall sandbox for arbitrary child programs.
+
+`ash self status|check|update|rollback|recover` uses canonical ASON. Update
+metadata is byte-bounded and HTTPS-only; signed manifests enforce Ed25519
+verification, sequence monotonicity, exact archive shape, extraction ceilings,
+embedded binary identity, transactional activation, health-gated recovery, and
+rollback. The release workflow covers Linux, macOS, and Windows on x86-64 and
+ARM64, with checksums, SBOMs, and provenance.
+
+## Evidence behind the claims
+
+- 200 Rust workspace tests cover typed schemas, RPC, operations, store,
+  transactions, recovery, cancellation, updates, and deterministic scheduling.
+- The schema-14 runtime harness contains 22 scenarios across worker matrices,
+  including an 8 MiB spill/fetch proof over the 4 MiB memory ceiling.
+- Seven locked coding tasks compare a native-shell Agent trace with an ash Agent
+  trace under one task and transcript schema.
+- The complete 1,024-case four-node forward-DAG/success-mask space is tested with
+  forced completion-order variation.
+- Source-bound format reports, fuzzing, AddressSanitizer artifacts, installer
+  smoke tests, and third-party license gates keep evidence reproducible.
+
+Read [benchmarks](/guide/benchmarks) for the measurement contract and
+[security](/guide/security) for the trust and recovery model.
+
+## Deliberate non-goals
+
+ASH/1 is not a human REPL, a POSIX shell compatibility layer, an embedded model,
+a remote executor, or a universal process sandbox. It does not provide an
+interactive terminal, shell-language evaluation, overwrite, recursive directory
+mutation, or runtime value piping between batch nodes. These boundaries keep the
+typed contract portable and auditable.
+
+For Agent adoption, continue with [Coding Agent integration](/guide/coding-agents).

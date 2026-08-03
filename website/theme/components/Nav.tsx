@@ -41,9 +41,20 @@ function versionHref(
   cleanUrls: boolean,
 ) {
   const parts = removeBase(pathname).split('/').filter(Boolean);
+  const nextOnlyGuidePages = new Set(['capabilities', 'coding-agents']);
+  const currentPage = parts.at(-1)?.replace(/\.html$/, '') ?? '';
 
   if (currentVersion !== defaultVersion && parts[0] === currentVersion) {
     parts.shift();
+  }
+  if (
+    targetVersion !== defaultVersion &&
+    parts.at(-2) === 'guide' &&
+    nextOnlyGuidePages.has(currentPage)
+  ) {
+    parts.pop();
+    parts.unshift(targetVersion);
+    return `/${parts.join('/')}/`;
   }
   if (targetVersion !== defaultVersion) {
     parts.unshift(targetVersion);

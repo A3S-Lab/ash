@@ -1,0 +1,133 @@
+---
+title: Coding Agent integration
+description: Use the repository-native Agent Skill and typed ash workflows in a coding harness.
+---
+
+# Coding Agent integration
+
+The repository ships a project-native Agent Skill at
+`.agents/skills/use-ash/`. It teaches a Coding Agent when to choose ash, how to
+compose exact ASH/1 requests, how to mutate files safely, and what evidence must
+be checked before reporting success.
+
+```text
+.agents/skills/use-ash/
+├── SKILL.md
+├── agents/openai.yaml
+└── references/
+    ├── operations.md
+    └── workflows.md
+```
+
+The Skill follows the portable Agent Skills shape: concise activation metadata
+stays in `SKILL.md`, while exact operation schemas and reusable coding patterns
+load only when the task needs them.
+
+## Invoke the Skill
+
+In a repository-aware Coding Agent that supports project skills, refer to the
+Skill directly:
+
+```text
+Use $use-ash to inspect this repository, make the requested change, and verify it.
+```
+
+The checked-in project copy keeps the instructions versioned with ASH/1. For a
+personal Codex installation, copy the whole `use-ash` directory into
+`$CODEX_HOME/skills/`; keep `SKILL.md`, `agents/`, and `references/` together.
+
+## What the Skill changes in an Agent workflow
+
+1. **Preflight:** establish the workspace root and run `ash --build-info`. If ash
+   is unavailable, the Skill does not install or mutate the environment without
+   user authorization.
+2. **Select precisely:** use `g/l/r` for discovery, `x/k` for processes,
+   `p/f` for mutation, `b` for an explicit DAG, `s` for state, and
+   `/ # ? - | >` for retained evidence.
+3. **Bound the request:** emit exact canonical ASON in `t,i,o,a,u` order with
+   positive IDs and realistic token, record, and wall-clock budgets.
+4. **Mutate defensively:** patch current BLAKE3 preimages or use one journaled
+   file transaction; conflicts trigger rereading, never a weaker guard.
+5. **Verify the result:** check typed status, focused tests, the changed range or
+   snapshot delta, and any retained stdout/stderr needed to support the answer.
+
+The Skill intentionally does not force every trivial command through ash. A
+short, already-safe native command remains appropriate when structured budgets,
+parallelism, guarded mutation, or retained evidence would add no value.
+
+## Pick the right integration
+
+| Agent setting      | Entry point        | Use it for                                                                               |
+| ------------------ | ------------------ | ---------------------------------------------------------------------------------------- |
+| One tool call      | `ash run`          | A self-contained bare ASON request whose immediate response is sufficient                |
+| Persistent harness | `ash rpc`          | Handshake, framed concurrency, permits, cancellation, snapshots, and reference lifecycle |
+| Request authoring  | `ash ason`         | Validate and canonicalize a document before execution                                    |
+| Repository setup   | `ash --build-info` | Confirm binary identity and feature profile during preflight                             |
+
+References are session-local. `ash run` closes its temporary session after one
+response, so another `ash run` process cannot follow its aliases, compare its
+snapshot baseline, inspect its batch children, cancel its active work, or retry
+its permit challenge. Use one live `ash rpc` session for those workflows, and
+only when the harness owns the canonical handshake, framing, and shutdown
+lifecycle. Sending bare documents to RPC is not an equivalent shortcut.
+
+## Run a canonical request
+
+Search the `src` tree for literal `TODO`:
+
+```ason
+t:1
+i:17
+o:g
+a{q,p,f}:
+TODO,[src],0
+u{tok,rec,ms}:
+256,64,30000
+```
+
+On Unix-like shells:
+
+```bash
+ash run < request.ason
+```
+
+On PowerShell, preserve the canonical UTF-8/LF bytes instead of piping a decoded
+string:
+
+```powershell
+$ash = Start-Process ash -ArgumentList run -NoNewWindow -Wait -PassThru `
+  -RedirectStandardInput request.ason
+if ($ash.ExitCode) { throw "ash exited with code $($ash.ExitCode)" }
+```
+
+When an Agent process tool accepts stdin, pass executable `ash`, argv `run`, and
+the exact request bytes directly. Do not convert the `x` operation into a quoted
+Bash, PowerShell, or CMD program string: `x` takes one executable and an argv
+vector, which keeps intent, environment changes, cancellation, and process
+ownership typed.
+
+## Recommended coding loop
+
+1. Search narrowly, list shallowly, then read only useful byte or line ranges.
+2. In one live RPC session, follow a retained reference instead of repeating a broad command.
+3. In that session, capture a snapshot when an exact multi-file before/after delta is valuable.
+4. Apply a digest-guarded patch or a file-only transaction.
+5. Run the smallest relevant test, then broader project gates when warranted.
+6. Retrieve only the failure or proof ranges needed for model context.
+7. Report the verified outcome, evidence, and any deliberate ASH/1 boundary.
+
+For exact columns and examples, read the checked-in
+[operation reference](https://github.com/A3S-Lab/ash/blob/main/.agents/skills/use-ash/references/operations.md)
+and [workflow reference](https://github.com/A3S-Lab/ash/blob/main/.agents/skills/use-ash/references/workflows.md).
+
+## Keep the boundary explicit
+
+The Skill tells an Agent to fall back or stop when work requires recursive
+directory mutation, overwrite, an interactive terminal, shell-language
+evaluation, remote execution, or a portable child-process network/syscall
+sandbox. It never presents retained projections as complete source unless the
+typed response proves completeness.
+
+Review the [complete capability map](/guide/capabilities) before designing a
+larger harness, then use [ASH/1](/guide/protocol) as the authoritative wire
+contract.

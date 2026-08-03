@@ -304,7 +304,7 @@ const steps: WalkthroughStep[] = [
       'i:18',
       's:5',
       'd{k,c,ms,o,e,ro,re}:',
-      '0,101,842,~,"cargo test --locked\\nrunning 180 tests\\n⋯18\\nerror[E0609]: no field `missing`\\n --> src/lib.rs:42:9\\ncompile crate-a\\nlink crate-a\\n×64#2\\ndetail: field unavailable\\nhelp: inspect schema\\n⋯24\\ntest result: FAILED\\nfinished",~,@12',
+      '0,101,842,~,"cargo test --locked\\nrunning 200 tests\\n⋯18\\nerror[E0609]: no field `missing`\\n --> src/lib.rs:42:9\\ncompile crate-a\\nlink crate-a\\n×64#2\\ndetail: field unavailable\\nhelp: inspect schema\\n⋯24\\ntest result: FAILED\\nfinished",~,@12',
       'e{c,q,p,x,a}:',
       '401,0,4,~,~',
       'z:11',

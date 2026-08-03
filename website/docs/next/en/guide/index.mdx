@@ -1,52 +1,73 @@
 ---
 title: Get started with ash
-description: Understand the boundary and integrate the AI Native Shell through typed requests.
+description: Choose a path into the AI Native Shell, run a canonical request, and find every implemented capability.
 ---
 
 # Get started with ash
 
 `ash` is an **AI Native Shell** for Coding Agents. It accepts typed ASH/1
-requests, runs work across bounded Tokio I/O and Rayon CPU planes, and returns
-canonical ASON instead of terminal text formatted for people.
+requests, runs them across bounded Tokio I/O and Rayon CPU planes, and returns
+canonical ASON with retrievable evidence instead of terminal text formatted for
+people.
 
 :::warning Current status
-The `next` docs track `main`. The source, installers, and six-target release
-workflow are implemented and pass Linux, macOS, and Windows CI, but release
-credentials are not provisioned and no supported signed binary is published.
+The `next` docs track `main`. Source, cross-platform installers, and the
+six-target release workflow are implemented, but release credentials are not
+provisioned and no supported signed binary is published.
 :::
 
-## Choose an integration
+## Choose your path
 
-| Scenario                 | Entry point                  | Contract                                                                    |
-| ------------------------ | ---------------------------- | --------------------------------------------------------------------------- |
-| Long-lived Agent Harness | `ash rpc`                    | Frames, handshake, concurrent requests, cancellation, and result references |
-| One typed call           | `ash run`                    | Reads one bare ASON request from standard input                             |
-| ASON canonicalization    | `ash ason`                   | Validates and emits the unique canonical representation                     |
-| Install and upgrade      | `install.sh` / `install.ps1` | Target detection, verification, transactional activation, and uninstall     |
-| Development validation   | Cargo source build           | Builds the `a3s-ash` package with the current lockfile                      |
+| You want to…                     | Start here                                       | Then read                                                  |
+| -------------------------------- | ------------------------------------------------ | ---------------------------------------------------------- |
+| Use ash in a Coding Agent        | [Coding Agent integration](/guide/coding-agents) | [Complete capability map](/guide/capabilities)             |
+| Build a persistent Agent Harness | [ASH/1 protocol](/guide/protocol)                | [ASON format](/guide/ason) and [security](/guide/security) |
+| Understand the runtime           | [Architecture](/guide/architecture)              | [Benchmarks and evidence](/guide/benchmarks)               |
+| Install or operate releases      | [Installation](/guide/install)                   | [CLI](/guide/cli) and [security](/guide/security)          |
 
-## Minimal one-shot request
+## Choose an entry point
 
-Send a canonical ASON request to `ash run`:
+| Scenario                 | Entry point                                 | Contract                                                                                  |
+| ------------------------ | ------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Long-lived Agent Harness | `ash rpc`                                   | Framed handshake, concurrent requests, cancellation, permits, and result references       |
+| One typed call           | `ash run`                                   | One bare ASON request from standard input                                                 |
+| ASON authoring           | `ash ason`                                  | Validation plus the unique canonical representation                                       |
+| Binary identity          | `ash --build-info`                          | Version, target, feature profile, and protocol identity                                   |
+| Install and lifecycle    | `install.sh` / `install.ps1` / `ash self …` | Verification, transactional activation, status, update, recovery, rollback, and uninstall |
+
+## Run a canonical request
+
+Create `request.ason` to search `src` for literal `TODO`:
 
 ```ason
-i:req-1
-o:read
-b{r,o}:1024,256
-a{p,s,m}:"README.md",0,512
+t:1
+i:17
+o:g
+a{q,p,f}:
+TODO,[src],0
+u{tok,rec,ms}:
+256,64,30000
 ```
 
 ```bash
 ash run < request.ason
 ```
 
-The response is canonical ASON as well. Errors contain stable diagnostic codes
-and typed fields—not help text, color, progress bars, or human suggestions.
+The envelope order is exact: message type, positive request ID, operation,
+typed arguments, then token/record/time budgets. The response is canonical ASON
+as well. Errors contain stable diagnostic codes and typed fields—not color,
+progress bars, or prose suggestions.
 
-## Recommended path
+## How one request flows
 
-1. [Installation](/guide/install) for platforms, targets, and the current release boundary.
-2. [Architecture](/guide/architecture) for the dual execution planes and governor.
-3. [ASH/1](/guide/protocol) for handshake, framing, requests, and responses.
-4. [ASON](/guide/ason) for canonical encoding, columns, and references.
-5. [Security](/guide/security) for capabilities, permits, transactions, and signed updates.
+1. Decode canonical ASON into typed ASH/1 semantic IR.
+2. Validate capabilities, budgets, paths, digests, and graph structure.
+3. Schedule I/O on Tokio and splittable CPU work on Rayon under one governor.
+4. Stable-merge concurrent results and retain complete evidence when needed.
+5. Emit the smallest honest ASON projection; follow its reference for more.
+
+The [complete capability map](/guide/capabilities) lists all fifteen operations,
+runtime guarantees, transaction recovery, output storage, delivery, test
+evidence, and deliberate non-goals. The checked-in
+[Coding Agent Skill](/guide/coding-agents) turns those contracts into a reusable
+repository workflow.

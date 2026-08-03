@@ -3,6 +3,12 @@
   "install",
   {
     "type": "section-header",
+    "label": "Use ash"
+  },
+  "coding-agents",
+  "capabilities",
+  {
+    "type": "section-header",
     "label": "Core contract"
   },
   "architecture",

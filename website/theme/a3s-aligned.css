@@ -1235,6 +1235,178 @@ body {
   font-size: var(--ash-type-caption);
 }
 
+.ash-capabilities {
+  padding-top: 104px;
+  padding-bottom: 104px;
+  border-bottom: 1px solid var(--ash-line);
+  scroll-margin-top: var(--rp-nav-height);
+}
+
+.ash-capabilities-link {
+  display: inline-flex;
+  margin-top: 30px;
+  align-items: center;
+  gap: 8px;
+  color: var(--ash-green);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.ash-capabilities-link svg,
+.ash-agent-skill-actions svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+  stroke-width: 1.4;
+}
+
+.ash-agent-skill {
+  border-bottom: 1px solid var(--ash-line);
+  background: #020302;
+  scroll-margin-top: var(--rp-nav-height);
+}
+
+.ash-agent-skill-inner {
+  display: grid;
+  padding-top: 92px;
+  padding-bottom: 92px;
+  background: transparent;
+  align-items: center;
+  gap: clamp(52px, 7vw, 104px);
+  grid-template-columns: minmax(280px, 0.8fr) minmax(500px, 1.2fr);
+}
+
+.ash-agent-skill-copy > span {
+  color: var(--ash-green);
+  font-size: var(--ash-type-caption);
+  letter-spacing: 0.09em;
+}
+
+.ash-agent-skill-copy h2 {
+  max-width: 570px;
+  margin: 16px 0 0;
+  color: var(--ash-text);
+  font-size: clamp(32px, 3.5vw, 48px);
+  font-weight: 500;
+  letter-spacing: -0.045em;
+  line-height: 1.08;
+}
+
+.ash-agent-skill-copy p {
+  max-width: 540px;
+  margin: 22px 0 0;
+  color: var(--ash-muted);
+  font-size: var(--ash-type-body);
+  line-height: 1.75;
+}
+
+.ash-agent-skill-actions {
+  display: flex;
+  margin-top: 28px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 22px;
+}
+
+.ash-agent-skill-actions a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ash-green);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.ash-agent-skill-actions a:last-child {
+  color: var(--ash-muted);
+}
+
+.ash-agent-skill-actions a:hover {
+  color: var(--ash-text);
+}
+
+.ash-skill-card {
+  border: 1px solid var(--ash-line-strong);
+  background: #000;
+}
+
+.ash-skill-card > header {
+  display: flex;
+  min-height: 42px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--ash-line);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ash-skill-card > header span {
+  color: var(--ash-green);
+  font-size: var(--ash-type-label);
+  letter-spacing: 0.08em;
+}
+
+.ash-skill-card > header small,
+.ash-skill-card > footer span {
+  color: var(--ash-faint);
+  font-size: var(--ash-type-caption);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.ash-skill-card > code {
+  display: block;
+  padding: 26px 22px;
+  border-bottom: 1px solid var(--ash-line);
+  color: var(--ash-text);
+  font-size: var(--ash-type-code);
+  overflow-wrap: anywhere;
+}
+
+.ash-skill-card ol {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.ash-skill-card li {
+  display: grid;
+  min-height: 118px;
+  padding: 18px;
+  border-right: 1px solid var(--ash-line);
+  align-content: space-between;
+  color: var(--ash-muted);
+  font-size: var(--ash-type-label);
+  line-height: 1.55;
+}
+
+.ash-skill-card li:last-child {
+  border-right: 0;
+}
+
+.ash-skill-card li span {
+  color: var(--ash-green);
+  font-size: var(--ash-type-caption);
+}
+
+.ash-skill-card > footer {
+  display: grid;
+  padding: 18px 22px 22px;
+  border-top: 1px solid var(--ash-line);
+  gap: 10px;
+}
+
+.ash-skill-card > footer code {
+  color: #d4d7d4;
+  font-size: var(--ash-type-code);
+  line-height: 1.65;
+  white-space: normal;
+}
+
 .ash-command-section {
   border-bottom: 1px solid var(--ash-line);
   background: #000;
@@ -2845,6 +3017,12 @@ body {
     min-height: 190px;
   }
 
+  .ash-agent-skill-inner {
+    padding-top: 78px;
+    padding-bottom: 78px;
+    grid-template-columns: 1fr;
+  }
+
   .ash-architecture-inner {
     padding-top: 84px;
     padding-bottom: 86px;
@@ -2913,6 +3091,37 @@ body {
 }
 
 @media (max-width: 600px) {
+  .ash-capabilities {
+    padding-top: 76px;
+    padding-bottom: 76px;
+  }
+
+  .ash-agent-skill-inner {
+    padding-top: 72px;
+    padding-bottom: 72px;
+    gap: 38px;
+  }
+
+  .ash-agent-skill-actions {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .ash-skill-card ol {
+    grid-template-columns: 1fr;
+  }
+
+  .ash-skill-card li {
+    min-height: 82px;
+    border-right: 0;
+    border-bottom: 1px solid var(--ash-line);
+  }
+
+  .ash-skill-card li:last-child {
+    border-bottom: 0;
+  }
+
   .ash-terminal-demo {
     min-height: 900px;
     grid-template-rows: 44px minmax(800px, 1fr) 56px;

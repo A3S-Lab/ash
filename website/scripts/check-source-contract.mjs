@@ -36,6 +36,12 @@ function requireIncludes(source, marker, label) {
   }
 }
 
+function requireExcludes(source, marker, label) {
+  if (source.includes(marker)) {
+    throw new Error(`${label} contains forbidden contract marker: ${marker}`);
+  }
+}
+
 const [
   cargo,
   unixInstaller,
@@ -46,6 +52,7 @@ const [
   commandWalkthrough,
   symbolAlgebra,
   switcher,
+  nav,
   alignedStyles,
   runtimeHarness,
   runtimeMixed,
@@ -60,6 +67,14 @@ const [
   execOperation,
   benchmarkZh,
   benchmarkEn,
+  capabilitiesZh,
+  capabilitiesEn,
+  codingAgentsZh,
+  codingAgentsEn,
+  agentSkill,
+  agentSkillOperations,
+  agentSkillWorkflows,
+  readme,
 ] = await Promise.all([
   text('Cargo.toml'),
   text('install.sh'),
@@ -70,6 +85,7 @@ const [
   text('website/theme/components/AshCommandWalkthrough.tsx'),
   text('website/theme/components/AshSymbolAlgebra.tsx'),
   text('website/theme/components/InstallSwitcher.tsx'),
+  text('website/theme/components/Nav.tsx'),
   text('website/theme/a3s-aligned.css'),
   text('benches/runner/src/runtime.rs'),
   text('benches/runner/src/runtime/mixed.rs'),
@@ -84,6 +100,14 @@ const [
   text('crates/ash-ops/src/exec.rs'),
   text('website/docs/next/zh/guide/benchmarks.mdx'),
   text('website/docs/next/en/guide/benchmarks.mdx'),
+  text('website/docs/next/zh/guide/capabilities.mdx'),
+  text('website/docs/next/en/guide/capabilities.mdx'),
+  text('website/docs/next/zh/guide/coding-agents.mdx'),
+  text('website/docs/next/en/guide/coding-agents.mdx'),
+  text('.agents/skills/use-ash/SKILL.md'),
+  text('.agents/skills/use-ash/references/operations.md'),
+  text('.agents/skills/use-ash/references/workflows.md'),
+  text('README.md'),
 ]);
 const snapshots = JSON.parse(await text('website/version-snapshots.json'));
 const report = JSON.parse(await text('benches/reports/v0.1.0/format.json'));
@@ -155,7 +179,7 @@ for (const command of [unixCommand, windowsCommand, cargoCommand]) {
   requireIncludes(switcher, command, 'Homepage install switcher');
 }
 
-requireIncludes(home, "metricTestsValue: '180'", 'Homepage evidence');
+requireIncludes(home, "metricTestsValue: '200'", 'Homepage evidence');
 requireIncludes(
   home,
   `metricTokenValue: '${report.gates.ason_vs_record_json_cl100k_percent}%'`,
@@ -166,6 +190,144 @@ requireIncludes(
   home,
   '<AshSymbolAlgebra locale={locale} />',
   'Homepage algebra',
+);
+for (const marker of [
+  'ash-capabilities',
+  'ash-agent-skill',
+  'ASH/1 · 15 TYPED OPERATIONS',
+  '.agents/skills/use-ash/SKILL.md',
+  'Use $use-ash to inspect this repository',
+]) {
+  requireIncludes(home, marker, 'Homepage capability map');
+}
+for (const marker of [
+  "new Set(['capabilities', 'coding-agents'])",
+  "parts.at(-1)?.replace(/\\.html$/, '')",
+  'nextOnlyGuidePages.has(currentPage)',
+]) {
+  requireIncludes(nav, marker, 'Next-only version fallback');
+}
+
+const operationIds = [
+  '`x`',
+  '`r`',
+  '`l`',
+  '`g`',
+  '`p`',
+  '`f`',
+  '`b`',
+  '`/`',
+  '`#`',
+  '`?`',
+  '`-`',
+  '`\\|`',
+  '`>`',
+  '`s`',
+  '`k`',
+];
+for (const document of [capabilitiesZh, capabilitiesEn]) {
+  for (const operation of operationIds) {
+    requireIncludes(document, operation, 'Complete capability documentation');
+  }
+  for (const marker of ['4 MiB', '30', '12', '200', '22', '1,024']) {
+    requireIncludes(document, marker, 'Capability evidence documentation');
+  }
+}
+
+for (const document of [codingAgentsZh, codingAgentsEn, readme]) {
+  requireIncludes(
+    document,
+    '.agents/skills/use-ash/',
+    'Coding Agent Skill docs',
+  );
+  requireIncludes(document, '$use-ash', 'Coding Agent Skill invocation');
+  requireIncludes(
+    document,
+    'Start-Process ash',
+    'PowerShell byte-preserving invocation',
+  );
+  requireExcludes(
+    document,
+    'Get-Content -Raw request.ason | ash run',
+    'PowerShell byte-preserving invocation',
+  );
+}
+for (const marker of [
+  'cd crates/ash-cli',
+  'cargo run -p a3s-ash -- run < ../../spec/fixtures/ason/search-request.ason',
+  'cargo build -p a3s-ash --release --locked',
+]) {
+  requireIncludes(readme, marker, 'Executable README request');
+}
+requireExcludes(
+  readme,
+  'cargo run -p a3s-ash -- run < spec/fixtures/ason/search-request.ason',
+  'Executable README request',
+);
+for (const marker of [
+  'name: use-ash',
+  '## Select the operation',
+  '## Enforce request discipline',
+  't,i,o,a,u',
+  'one-shot session ends',
+  'Start-Process ash',
+  'same live session',
+  '| `/ # ? - \\| >`',
+]) {
+  requireIncludes(agentSkill, marker, 'Coding Agent Skill');
+}
+for (const marker of [
+  '## Session lifecycle',
+  '## Canonical envelope',
+  '## Operation matrix',
+  '/ # ? - \\| >',
+  '| `\\|` | `[@r,table,offset,length,column...]`',
+  'same live `ash rpc` session',
+]) {
+  requireIncludes(
+    agentSkillOperations,
+    marker,
+    'Coding Agent operation reference',
+  );
+}
+for (const marker of [
+  '## Explore an unfamiliar repository',
+  '## Make a guarded code edit',
+  '## Diagnose a noisy test failure',
+  '## Run independent work concurrently',
+  '## Prove a workspace change',
+  'Separate `ash run` processes do not share',
+]) {
+  requireIncludes(
+    agentSkillWorkflows,
+    marker,
+    'Coding Agent workflow reference',
+  );
+}
+requireExcludes(
+  agentSkill,
+  'Get-Content -Raw request.ason | ash run',
+  'Coding Agent Skill PowerShell invocation',
+);
+requireIncludes(
+  capabilitiesEn,
+  'Retained aliases are session-local.',
+  'English retained-reference lifecycle',
+);
+requireIncludes(
+  capabilitiesEn,
+  'unknown or busy aliases fail',
+  'English retained-release semantics',
+);
+requireIncludes(
+  capabilitiesZh,
+  '保留别名只在生成它的会话中有效。',
+  'Chinese retained-reference lifecycle',
+);
+requireIncludes(
+  capabilitiesZh,
+  '未知或占用中的别名会失败',
+  'Chinese retained-release semantics',
 );
 for (const marker of [
   "event.pointerType !== 'touch'",

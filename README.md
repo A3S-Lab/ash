@@ -2,120 +2,146 @@
   <img src="./assets/readme/hero.svg" width="100%" alt="ash — AI Native Shell executing typed work across bounded I/O and CPU planes and returning compact ASON evidence">
 </p>
 
-<p align="center"><strong>AI Native Shell</strong> · typed parallel execution · compact model context</p>
+<p align="center"><strong>AI Native Shell</strong> · typed execution · guarded mutation · compact, retrievable evidence</p>
 
 <p align="center">
   <a href="https://a3s-lab.github.io/ash/">中文网站</a> ·
   <a href="https://a3s-lab.github.io/ash/en/">English docs</a> ·
-  <a href="https://a3s-lab.github.io/ash/guide/install.html">Install</a> ·
-  <a href="https://a3s-lab.github.io/ash/guide/protocol.html">ASH/1</a>
+  <a href="https://a3s-lab.github.io/ash/guide/capabilities.html">Capabilities</a> ·
+  <a href="https://a3s-lab.github.io/ash/guide/coding-agents.html">Coding Agent Skill</a> ·
+  <a href="https://a3s-lab.github.io/ash/guide/install.html">Install</a>
 </p>
 
 > [!IMPORTANT]
-> `ash` is pre-release. Source builds now execute typed `exec`, `read`, `list`, `search`, compare-and-swap `patch`, durable file-only `fs` transactions, workspace `snapshot/delta`, and bounded dependency-graph `batch` requests; they also negotiate least-privilege capabilities, enforce session/action-bound one-time approval permits, evaluate retained-result data formulas, spill large process evidence into a bounded session store, recover proven crash-orphan spools, cancel active work, measure real recursive listing, literal and regular-expression search, snapshot, disk spill/fetch, dual-pipe pressure, and process-tree cleanup across the worker matrix, and verify, activate, recover, or roll back signed releases. Cross-platform installers and a fail-closed six-target release workflow are implemented; release credentials are not provisioned and no supported signed binary release is published yet.
+> `ash` is pre-release. The source implementation, cross-platform installers,
+> and fail-closed six-target release workflow are available, but release
+> credentials are not provisioned and no supported signed binary has been
+> published. Build from source for development validation.
 
-`ash` is a greenfield shell designed around coding agents rather than terminal users. It turns shell work into typed programs, executes independent work across bounded I/O and CPU planes, and returns only the evidence worth placing in an LLM context.
+`ash` is a greenfield shell designed around Coding Agents rather than terminal
+users. It accepts typed ASH/1 programs, executes independent work under explicit
+budgets, and returns canonical ASON with references to complete retained
+evidence. No hidden shell string, silent truncation, or completion-order output
+becomes part of the contract.
 
-The [project website](https://a3s-lab.github.io/ash/) opens in Chinese by default, switches between Chinese and English plus `next` and frozen documentation versions, and uses a reduced-motion-aware terminal animation, scroll-linked command tour, and hover/focus formula notes to explain the implemented ASH/1 execution path.
+## What ash covers
 
-## Proof starts at the result
+| Surface              | Operations                            | What is implemented                                                                                                                                                    |
+| -------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Repository discovery | `read r`, `list l`, `search g`        | Workspace-confined byte/line reads, stable traversal, literal and regular-expression search                                                                            |
+| Processes            | `exec x`, `cancel k`                  | Direct executable + argv launch, environment/stdin control, deadlines, concurrent stdout/stderr capture, and owned process-tree cleanup                                |
+| Guarded mutation     | `patch p`, `fs f`                     | BLAKE3 compare-and-swap edits plus journaled, no-overwrite file create/copy/move/remove with rollback and restart recovery                                             |
+| Parallel programs    | `batch b`                             | Validated acyclic graphs, ready-node concurrency, failed-descendant skip, independent drain, and stable lowest-index errors                                            |
+| Workspace state      | `snapshot s`                          | Deterministic scoped manifests and matching before/after deltas                                                                                                        |
+| Retained evidence    | `/ # ? - \| >`                        | Byte and line slices, search, release, ordered table projection, and capability-gated materialization                                                                  |
+| Model context        | ASON, `×N`, `×N#K`, `⋯N`              | Columnar records, path dictionaries, explicit reductions, stable merge, and references back to the full source                                                         |
+| Trust and delivery   | capabilities, permits, signed updates | Least-privilege negotiation, session/action/policy/expiry-bound one-time permits, replay rejection, transactional activation, recovery, rollback, SBOM, and provenance |
 
-The default LLM-facing representation is **ASON**, the native structured format designed and implemented by `ash` for LLM exchange. Homogeneous records are emitted in columns, paths are interned into compact dictionaries, and large or nested values become references instead of repeated text.
+The [complete capability map](https://a3s-lab.github.io/ash/guide/capabilities.html)
+documents guarantees, evidence, and deliberate non-goals for the full surface.
 
-Conceptual search result:
+## Coding Agent Skill
+
+The repository includes a project-native Agent Skill:
+
+```text
+.agents/skills/use-ash/
+├── SKILL.md
+├── agents/openai.yaml
+└── references/
+    ├── operations.md
+    └── workflows.md
+```
+
+It teaches an Agent to select an operation, emit the exact `t,i,o,a,u`
+envelope, use digest-guarded mutation, build bounded DAGs, retrieve retained
+evidence, and verify the result. Invoke it in a compatible Coding Agent with:
+
+```text
+Use $use-ash to inspect this repository, make the requested change, and verify it.
+```
+
+Read the [Coding Agent integration guide](https://a3s-lab.github.io/ash/guide/coding-agents.html)
+or inspect the [Skill source](./.agents/skills/use-ash/SKILL.md).
+
+## First typed request
+
+This canonical request searches `src` for literal `TODO` with explicit token,
+record, and wall-clock budgets:
 
 ```ason
-t:3
+t:1
 i:17
-s:0
-p[1]{i,v}:
-1,src/lib.rs
-d[2]{p,l,c,t}:
-1,42,7,"TODO item"
-1,87,3,"FIXME item"
-z:0
-r:~
+o:g
+a{q,p,f}:
+TODO,[src],0
+u{tok,rec,ms}:
+256,64,30000
 ```
 
-The schema for these short fields is negotiated once. Full output remains available through a bounded session reference; truncation is explicit instead of silently destructive.
+Run the checked fixture from a source crate whose workspace contains `src`:
 
-Reference work is a typed prefix formula, not a mode plus unused options. This request computes `π_{p,l,t}(d[0:64])` over retained result `@7`:
-
-```ason
-o:|
-a:[@7,d,0,64,p,l,t]
+```sh
+cd crates/ash-cli
+cargo run -p a3s-ash -- run < ../../spec/fixtures/ason/search-request.ason
 ```
 
-The same algebra uses `/ # ? - | >` for byte slice, line slice, search, release, table projection, and workspace materialization. The operator is the request opcode and `a` is only its operand vector, so there is no generic reference wrapper or second discriminator. `>` is capability-gated and uses the journaled, no-overwrite file transaction path. On the checked six-formula corpus this canonical symbol form is 80 tokens in both pinned tokenizers, matching the direct ASCII-letter floor, versus 86/86 for direct Greek glyphs and 97/98 for the former wrapped form.
+An installed binary uses `ash run < request.ason`. Windows PowerShell must keep
+the canonical UTF-8/LF bytes intact; use
+`Start-Process ash -ArgumentList run -NoNewWindow -Wait -RedirectStandardInput request.ason`
+instead of piping a decoded string.
 
-## Why ash is different
-
-- **Agent-first semantics.** Programs are typed graphs, not human-oriented command strings.
-- **Token cost is a runtime concern.** Filtering, projection, byte-saving `×N` line, `×N#K` block, and failure-only `⋯N` diagnostic-window reduction, deduplication, path interning, and output budgets happen before serialization.
-- **Multi-core by design.** Independent graph nodes and repository partitions use a work-stealing compute pool while process and RPC I/O stay responsive.
-- **Bounded lossless capture.** Large stdout and stderr streams spill to session-private files while a fixed head/tail sample keeps the immediate response small.
-- **Portable by construction.** Linux, macOS, and Windows share one semantic contract; platform behavior is isolated behind native backends.
-- **Deterministic at the boundary.** Parallel workers may finish in any order; stable merge produces byte-identical canonical ASON.
-- **Loss is visible.** Every omitted byte is recoverable by reference, and every reduced result declares its status.
+For long-lived integration, `ash rpc` adds a framed handshake, concurrent
+requests, cancellation, capabilities, permits, and retained-reference lifecycle.
+Use `ash ason` to validate and canonicalize a request while authoring it.
+References are session-local: a later `ash run` process cannot consume an alias,
+snapshot baseline, batch-child response, cancellation target, or permit
+challenge returned by an earlier process. Workflows that need those values must
+keep one framed `ash rpc` session alive.
 
 ## One runtime, two execution planes
 
 <p align="center">
-  <img src="./assets/readme/architecture.svg" width="100%" alt="ash architecture from coding agent through typed program and hierarchical governor into separate Tokio I/O and Rayon CPU planes, native backends, stable merge, and canonical ASON">
+  <img src="./assets/readme/architecture.svg" width="100%" alt="ash architecture from Coding Agent through typed program and hierarchical governor into Tokio I/O and Rayon CPU planes, stable merge, and canonical ASON">
 </p>
 
-A persistent stdio session is the primary integration. One-shot calls use the same engine. Tokio owns RPC, child processes, pipes, deadlines, and cancellation; a fixed Rayon work-stealing pool owns search, hashing, diffing, reduction, and other splittable CPU work. A shared governor prevents a wide graph from multiplying inner parallelism beyond host and request budgets.
+Tokio owns RPC, child processes, pipes, deadlines, and cancellation. A fixed
+Rayon work-stealing pool owns search, hashing, diffs, reduction, store commits,
+and other splittable CPU work. One hierarchical governor bounds host, session,
+request, and operation concurrency. Stable merge erases worker completion order
+before canonical ASON is emitted.
 
-The externally visible path remains deterministic:
+Large process streams remain lossless without flooding the model context. A
+fixed head/tail projection is returned immediately; evidence beyond the 4 MiB
+session memory ceiling spills to private immutable files. Bounded range fetch,
+aliases, deduplication, leases, release, and proven crash-orphan cleanup complete
+the store lifecycle.
 
-1. **Semantic IR** — typed programs, nodes, edges, values, budgets, and capabilities.
-2. **Parallel runtime** — dependency-aware nodes plus bounded operation partitions.
-3. **Stable merge** — logical path and position keys erase worker completion order.
-4. **LLM presentation** — deterministic reduction followed by canonical ASON.
+## Evidence, not aspiration
 
-Read the complete contracts:
+The current `main` baseline includes:
 
-- [Website and versioned documentation](https://a3s-lab.github.io/ash/)
-- [System architecture](./docs/architecture.md)
-- [Proposed portable human-shell architecture](./docs/portable-human-shell.md)
-- [ASH/1 protocol and ASON specification](./docs/protocol.md)
-- [Cross-platform distribution and one-click installation](./docs/distribution.md)
-- [Release operator contract](./docs/releasing.md)
-- [Token-efficiency benchmark contract](./docs/benchmarks.md)
-- [Rust and dual-plane runtime decision](./docs/decisions/0001-rust-and-dual-plane-runtime.md)
-- [Separate portable human-shell layer decision](./docs/decisions/0002-separate-portable-human-shell-layer.md)
+- **200 Rust workspace tests** across protocol schemas, RPC, every operation,
+  transactions, recovery, the retained store, cancellation, and signed updates.
+- **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB
+  retained capture crossing the 4 MiB memory ceiling and fetching only its final
+  64 KiB.
+- **7 locked Coding Agent tasks** comparing native-shell and ash traces under
+  one task, result, and transcript schema.
+- **1,024 exhaustive four-node DAG/success-mask cases**, with forced completion
+  order changes and stable error selection.
+- **30 forward transaction cutpoints plus 12 recovery cutpoints**, including
+  hard-link identity crash windows.
+- Source-bound format/token reports, twice-weekly fuzzing, AddressSanitizer
+  artifacts, six-target installer smoke tests, and third-party license gates.
 
-## Cross-platform installation
+The checked format corpus reports canonical ASON at **62% of compact row-object
+JSON tokens** for both pinned tokenizers. Explicit reductions and reference
+formulas are measured separately; the full source remains retrievable.
 
-> [!WARNING]
-> No supported signed binary release exists yet. The Linux, macOS, and Windows release installers below are implemented and tested, but intentionally fail closed until the first signed release is published. The Cargo command builds the current source and is available now for development validation; it is not a signed release.
-
-Linux and macOS (`x86-64` and `ARM64`):
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/A3S-Lab/ash/main/install.sh | sh
-```
-
-Windows PowerShell (`x86-64` and `ARM64`):
-
-```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-irm https://raw.githubusercontent.com/A3S-Lab/ash/main/install.ps1 | iex
-```
-
-Build the current source with Cargo:
+Reproduce the gates:
 
 ```sh
-cargo install --git https://github.com/A3S-Lab/ash --locked a3s-ash
-```
-
-Platform detection, pinned versions, custom prefixes, offline archives, checksum verification, transactional activation, and uninstall are covered by the [installation guide](https://a3s-lab.github.io/ash/guide/install.html).
-
-## Verify the current baseline
-
-```sh
-git clone https://github.com/A3S-Lab/ash.git
-cd ash
 cargo test --workspace --all-targets
 cargo run -p a3s-ash-bench --release --locked -- \
   --check benches/reports/v0.1.0/format.json
@@ -128,63 +154,62 @@ npm --prefix website ci
 npm --prefix website run check
 ```
 
-Run one canonical request from the repository root:
+Read the [benchmark contract](https://a3s-lab.github.io/ash/guide/benchmarks.html)
+before interpreting a number.
+
+## Installation
+
+> [!WARNING]
+> The release installers intentionally fail closed until a supported signed
+> binary exists. The Cargo command below builds current source; it is not a
+> signed release.
+
+Linux and macOS, x86-64 and ARM64:
 
 ```sh
-cargo run -p a3s-ash -- run < spec/fixtures/ason/search-request.ason
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/A3S-Lab/ash/main/install.sh | sh
 ```
 
-The pinned Rust workspace currently verifies typed ASH/1 schemas, canonical framed handshakes, negotiated capability masks, action/session/policy/expiry-bound approval permits, replay rejection, concurrent `exec/read/list/search/patch/fs/snapshot`, acyclic batch graphs, dependency-failure skipping, stable child-response references, retained-result byte/line slicing, search, table projection, safe materialization, and release, chained workspace deltas, preemptive cancellation, atomic budgets, hierarchical permits, workspace-confined paths, direct argv launch with timeout-safe process-tree cleanup, quota-bound stdout/stderr capture with a 4 MiB memory ceiling, disk spill, bounded range reads, atomic aliases, deduplication, and cleanup, deterministic multi-core preparation, and multi-file rollback. The schema-14 runtime harness contains twenty-two scenarios. Its fifteen end-to-end paths cover recursive listing, literal and regular-expression search, snapshot, store spill/fetch, paired disk-spill I/O with the Rayon plane idle and fully occupied, fresh CLI startup, empty child spawn, steady, fragmented, and paced-bursty dual-stream capture, process-tree cancellation, warm framed RPC dispatch, and retained ASON projection on the ordered Rayon compute plane. It also measures multi-core repeated-line, repeated-block, and error-focused reduction over separate 131,072-line fixtures, plus hot path-dictionary lookup and DAG scheduling at 64, 256, and 1,024 nodes. The mixed-load pair times only asynchronous capture and flush over identical bytes, proves every compute worker is still active when saturated I/O completes, validates the same retained tail after releasing the load, and reports a paired p50 latency ratio per worker configuration without inventing a scaling curve. Capture-profile metadata records the exact producer chunk cycle, flush boundary, burst pause, and output seed; the compiled helper must describe the same configuration before timing starts. Matrix scenarios run at 1, 2, 4, 8, and host-available worker counts; single-caller primitives have no invented scaling curve, and changed evidence fails before timing is printed. Compare-and-swap patch replacement plus file-only create, copy, move, and remove transactions use digest guards, a checksummed on-disk journal, cross-process serialization, reverse rollback, durable commit markers, and restart recovery; create and destination paths additionally enforce no-overwrite semantics. Signed-release tests cover strict Ed25519 verification, sequence rollback/equivocation, the complete six-target manifest, exact archive shape, extraction ceilings, embedded binary identity, transactional activation, health-gated recovery, and reversible rollback. `ash self status|check|update|rollback|recover` uses canonical ASON, and network update input is HTTPS-only and byte-bounded. `ash rpc` executes independent requests concurrently while emitting final frames in stable input order. Offline installer smoke tests cover installation, integrity rejection, idempotent and forced reinstall, lock ownership, PATH ownership, rollback, and uninstall. Twice-weekly fuzzing covers canonical ASON, bounded ASH/1 framing and typed requests, arbitrary update metadata, and validly signed update-decision semantics. Each AddressSanitizer run continues a bounded corpus and retains a source-bound JSON summary, raw log, final corpus, findings, and uploaded artifact digest for 90 days. This is still a development checkpoint, not a supported installation path.
+Windows PowerShell, x86-64 and ARM64:
 
-The transaction fault matrix drives the actual implementation through 30 forward durable cutpoints and interrupts recovery again at 12 rollback or cleanup cutpoints. Native file identity closes both-name hard-link crash windows without mistaking equal external bytes for ASH state. DAG tests exhaust all 1,024 four-node forward-graph/success-mask combinations, force different completion orders, and select concurrent task errors by stable input index after independent work drains.
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+irm https://raw.githubusercontent.com/A3S-Lab/ash/main/install.ps1 | iex
+```
 
-The runtime harness also forces an 8 MiB retained capture across the 4 MiB memory ceiling, commits its disk-backed identity on Rayon, fetches only the final 64 KiB, and verifies identical bytes across the worker matrix. Store tests prove that normal release removes spools and that crash-orphan recovery skips live, recent, malformed, or foreign roots.
+Build current source with Cargo:
 
-Fresh-start measurements launch the same-profile `ash run` binary for every observation and include spawn, request I/O, exit, and pipe drain. Warm dispatch keeps one production RPC service alive per worker configuration, excludes its handshake, and times a complete framed request/response round trip. Direct child overhead launches a silent executable through the normal governor and process owner. The process-pressure paths still require the Unix process group or Windows Job Object to empty, both pipes to reach EOF, and the request to unregister before evidence is accepted. Cold startup has no scaling comparison, so its speedup and parallel-efficiency fields are `null` rather than invented values.
+```sh
+cargo install --git https://github.com/A3S-Lab/ash --locked a3s-ash
+```
 
-The locked task corpus now contains seven cross-platform contracts covering search, diagnostic aggregation, exact patching, recursive listing, multi-file reading, a guarded copy/remove transaction, and an independent batch graph. Every task runs twice from the same locked tree: once through the current platform's native shell and once through declarative typed requests on the production ASH engine. The schema-2 report verifies semantic output and the complete visible final tree, then counts the objective plus every canonical ASON request/response under both pinned tokenizers. It labels this evidence `deterministic-tool-plan`: no model selected the operations, so it is neither a Coding Agent score nor a Token-reduction claim.
-
-The next evidence layer now has a strict provider-neutral [paired Agent trace contract](./benches/agents/v1/README.md) and a checked-in stateless OpenAI Responses capture adapter. It binds exact model/driver revisions, reasoning settings, primers, function schemas, task prompts, provider usage, raw request/response audit JSONL, paired seeds, and task order before replaying every model-selected ASH request and native script from isolated locked fixtures. Tool-result hashes, final semantic output, expected files, and the complete visible tree must all match. Native-script replay requires an explicit opt-in; the adapter is tested against a local mock, and no real or synthetic model score is published yet.
-
-## Release contract
-
-The first usable release must ship as one native `ash` binary and include:
-
-- persistent stdio RPC and one-shot invocation;
-- direct process execution with cancellation, timeouts, and process-tree cleanup;
-- bounded read, list, search, patch, filesystem mutation, snapshot, and algebraic result-reference operations;
-- deterministic multi-core batch and dependency-graph execution with compact, retrievable node evidence;
-- Linux and macOS `install.sh`, Windows `install.ps1`, verified release artifacts, self-update, and rollback;
-- native builds for x86-64 and ARM64 on Linux, macOS, and Windows.
-
-The release installer entrypoints are public so their contract can be tested, but they fail closed until signed binaries and clean-host end-to-end release evidence exist. The implemented entrypoints and remaining trust boundary are documented in the [distribution design](./docs/distribution.md).
-
-## Repository ownership
-
-`A3S-Lab/ash` is an independently buildable Rust workspace and release unit. The A3S umbrella repository consumes the same history as its `crates/ash` Git submodule, matching the existing A3S component model without turning the a3s root package into a Cargo workspace.
+See [installation](https://a3s-lab.github.io/ash/guide/install.html) for pinned
+versions, custom prefixes, offline archives, verification, transactional
+activation, upgrade, rollback, recovery, and uninstall.
 
 ## Deliberate boundaries
 
-`ash` is not a Bash, Zsh, PowerShell, or CMD compatibility layer. Version one does not include a human REPL, prompt themes, completion, aliases, interactive job control, an embedded model, remote execution, or a universal security sandbox.
+ASH/1 is not a human REPL, POSIX compatibility layer, embedded model, remote
+executor, or universal child-process sandbox. It does not provide interactive
+terminal semantics, shell-language evaluation, overwrite, recursive directory
+mutation, or runtime value piping between batch nodes. Child programs inherit
+the operating-system authority of the ash process.
 
-It is a local execution boundary for coding agents. Workspace capabilities, resource limits, atomic file mutation, explicit approval permits, and structured errors are in scope; pretending that arbitrary child-process network and syscall isolation is portable is not.
+These are contract boundaries, not undocumented gaps. See
+[security](https://a3s-lab.github.io/ash/guide/security.html) for the precise
+capability, permit, path, transaction, and signed-update model.
 
-## Delivery order
+## Documentation map
 
-1. Stabilize the implemented vertical slice and its formula fixtures across Linux, macOS, and Windows.
-2. Integrate the implemented capability-scoped permit API with trusted harness policy providers and freeze the protocol only when the first supported release is cut.
-3. Continue accumulating the implemented twice-weekly ASON/frame/update fuzz evidence, and extend transaction, recovery, and scheduling fault matrices whenever a new durable boundary is added.
-4. Provision protected release credentials and execute the implemented six-target signing, notarization, attestation, clean-host upgrade/rollback, and installer gates.
-5. Gate release promotion on correctness, token cost, latency, cancellation, installer, upgrade, and benchmark evidence, and keep every proven integration revision pinned in the A3S submodule.
+- [Get started](https://a3s-lab.github.io/ash/guide/) — reader paths and first request
+- [Complete capabilities](https://a3s-lab.github.io/ash/guide/capabilities.html) — every operation, guarantee, and non-goal
+- [Coding Agent integration](https://a3s-lab.github.io/ash/guide/coding-agents.html) — Skill and harness workflow
+- [Architecture](./docs/architecture.md) — semantic IR, scheduler, governor, and platform boundary
+- [Portable human-shell proposal](./docs/portable-human-shell.md) and [separation decision](./docs/decisions/0002-separate-portable-human-shell-layer.md)
+- [ASH/1 and ASON](./docs/protocol.md) — authoritative wire and data contract
+- [Distribution](./docs/distribution.md) and [release operations](./docs/releasing.md)
+- [Benchmark methodology](./docs/benchmarks.md)
 
-The checked-in numeric report remains intentionally representation-and-projection-only: canonical ASON uses 62% of compact row-object JSON tokens under both pinned tokenizer profiles, while deterministic `×N` line, `×N#K` block, and `⋯N` failure-diagnostic projections use 1%, 2%, and 4% of their retained sources. The closer columnar JSON baseline is reported alongside ASON. The task lock records fixture identity, not timing or model results. Runtime and deterministic task reports are reproducible locally but deliberately not checked in as cross-host evidence. The tiny task corpus currently exposes protocol and digest overhead rather than proving a Token advantage; none of these results is an Agent-task claim. The report rules, schemas, remaining acceptance criteria, and accounting rules are defined in [docs/benchmarks.md](./docs/benchmarks.md).
-
-## Contributing and support
-
-Read [CONTRIBUTING.md](./CONTRIBUTING.md) before proposing behavior or protocol changes. Focused design questions, feature requests, architecture proposals, and reproducible bugs each have a structured issue form. General expectations are documented in [SUPPORT.md](./SUPPORT.md) and the [Code of Conduct](./CODE_OF_CONDUCT.md).
-
-Do not report suspected vulnerabilities in a public issue. Follow the private reporting instructions in [SECURITY.md](./SECURITY.md).
-
-## License
-
-`ash` is available under the [MIT License](./LICENSE).
+Contributions follow [CONTRIBUTING.md](./CONTRIBUTING.md), the project
+[Code of Conduct](./CODE_OF_CONDUCT.md), and [SECURITY.md](./SECURITY.md).
+The Rust workspace is MIT licensed.

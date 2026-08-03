@@ -3,6 +3,12 @@
   "install",
   {
     "type": "section-header",
+    "label": "使用 ash"
+  },
+  "coding-agents",
+  "capabilities",
+  {
+    "type": "section-header",
     "label": "核心契约"
   },
   "architecture",

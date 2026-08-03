@@ -1,51 +1,68 @@
 ---
 title: 开始使用 ash
-description: 理解 ash 的边界，并从类型化请求开始集成 AI Native Shell。
+description: 选择 AI Native Shell 的接入路径，运行规范请求，并了解全部已实现能力。
 ---
 
 # 开始使用 ash
 
-`ash` 是为 Coding Agent 设计的 **AI Native Shell**。它接收类型化 ASH/1
-请求，在有界的 Tokio I/O 与 Rayon CPU 执行平面中运行工作，最后返回规范
-ASON，而不是面向人类排版的终端文本。
+`ash` 是为 Coding Agent 设计的 **AI Native Shell**。它接收类型化 ASH/1 请求，
+在有界的 Tokio I/O 与 Rayon CPU 平面中运行，最后返回带可取回证据的规范 ASON，
+而不是面向人类排版的终端文字。
 
 :::warning 当前状态
-`next` 文档对应 `main` 开发线。源码、安装器和六目标发布流水线已经实现并通过
-Linux、macOS、Windows CI，但发布凭据尚未配置，也没有受支持的签名二进制。
+`next` 文档对应 `main` 开发线。源码、跨平台安装器和六目标发布流水线已经实现，
+但发布凭据尚未配置，也没有受支持的签名二进制。
 :::
 
-## 选择接入方式
+## 选择你的阅读路径
 
-| 场景               | 入口                         | 特性                                   |
-| ------------------ | ---------------------------- | -------------------------------------- |
-| 长驻 Agent Harness | `ash rpc`                    | 帧协议、握手、并发请求、取消与结果引用 |
-| 单次类型化调用     | `ash run`                    | 从标准输入读取一个裸 ASON 请求         |
-| ASON 规范化        | `ash ason`                   | 校验并输出唯一规范表示                 |
-| 安装与升级         | `install.sh` / `install.ps1` | 目标检测、校验、事务激活和卸载         |
-| 开发验证           | Cargo 源码构建               | 使用当前锁文件构建 `a3s-ash` 包        |
+| 目标                       | 从这里开始                                | 接着阅读                                          |
+| -------------------------- | ----------------------------------------- | ------------------------------------------------- |
+| 在 Coding Agent 中使用 ash | [Coding Agent 接入](/guide/coding-agents) | [完整能力地图](/guide/capabilities)               |
+| 构建长驻 Agent Harness     | [ASH/1 协议](/guide/protocol)             | [ASON 格式](/guide/ason)与[安全](/guide/security) |
+| 理解运行时                 | [架构](/guide/architecture)               | [基准与证据](/guide/benchmarks)                   |
+| 安装或管理发行版           | [安装](/guide/install)                    | [CLI](/guide/cli)与[安全](/guide/security)        |
 
-## 最小单次请求
+## 选择入口
 
-将规范 ASON 请求送入 `ash run`：
+| 场景               | 入口                                        | 契约                                         |
+| ------------------ | ------------------------------------------- | -------------------------------------------- |
+| 长驻 Agent Harness | `ash rpc`                                   | 帧式握手、并发请求、取消、Permit 与结果引用  |
+| 单次类型化调用     | `ash run`                                   | 从标准输入读取一个裸 ASON 请求               |
+| 编写 ASON          | `ash ason`                                  | 校验并输出唯一规范表示                       |
+| 确认二进制身份     | `ash --build-info`                          | 版本、目标、功能配置与协议身份               |
+| 安装与生命周期     | `install.sh` / `install.ps1` / `ash self …` | 校验、事务激活、状态、更新、恢复、回滚与卸载 |
+
+## 运行规范请求
+
+创建 `request.ason`，在 `src` 中搜索字面量 `TODO`：
 
 ```ason
-i:req-1
-o:read
-b{r,o}:1024,256
-a{p,s,m}:"README.md",0,512
+t:1
+i:17
+o:g
+a{q,p,f}:
+TODO,[src],0
+u{tok,rec,ms}:
+256,64,30000
 ```
 
 ```bash
 ash run < request.ason
 ```
 
-响应同样是规范 ASON。错误只包含稳定诊断码和结构化字段，不输出帮助文本、颜色、
-进度条或面向人的建议。
+信封顺序是精确契约：消息类型、正请求 ID、操作、类型化参数，最后是 Token、记录和
+时间预算。响应同样是规范 ASON。错误只包含稳定诊断码和类型化字段，不输出颜色、
+进度条或说明性建议。
 
-## 推荐阅读顺序
+## 一个请求如何流动
 
-1. [安装](/guide/install)——平台、目标与当前发行边界。
-2. [架构](/guide/architecture)——双执行平面和分层 Governor。
-3. [ASH/1](/guide/protocol)——握手、帧、请求与响应。
-4. [ASON](/guide/ason)——规范编码、列与引用。
-5. [安全](/guide/security)——能力、Permit、事务和签名更新。
+1. 将规范 ASON 解码为类型化 ASH/1 语义 IR。
+2. 校验能力、预算、路径、摘要与任务图结构。
+3. 在同一 Governor 下，把 I/O 调度给 Tokio，把可拆分 CPU 工作调度给 Rayon。
+4. 稳定归并并发结果，并在需要时保留完整证据。
+5. 发出最小但诚实的 ASON 投影；需要更多内容时沿引用继续取回。
+
+[完整能力地图](/guide/capabilities)列出十五个操作、运行保证、事务恢复、输出存储、
+交付、测试证据与明确非目标。仓库内置的
+[Coding Agent Skill](/guide/coding-agents)则把这些契约变成可复用的编码工作流。

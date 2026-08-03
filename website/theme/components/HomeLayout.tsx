@@ -12,7 +12,7 @@ const copy = {
     titleLead: 'AI Native',
     titleAccent: 'Shell.',
     subtitle:
-      '用一条类型化命令完成搜索、读取、并行执行、补丁、测试与证据提取。',
+      '用类型化请求完成仓库探索、进程执行、事务修改、DAG 并行、快照与可取回证据。',
     start: '阅读文档',
     architectureAction: '观看命令漫游',
     github: 'GitHub',
@@ -30,13 +30,31 @@ const copy = {
     metricToken: 'ASON / 行式 JSON',
     metricTokenValue: '62%',
     metricTests: 'Rust 测试',
-    metricTestsValue: '180',
+    metricTestsValue: '200',
     metricTargets: '原生目标',
     metricTargetsValue: '6',
-    signalProtocol: 'g · r · b · p · / · ? · | · >',
+    signalProtocol: 'ASH/1 · 15 个类型化操作',
     signalParallel: '并行执行 · 稳定归并',
     signalAson: 'ASON · 按需投影',
     signalTargets: 'Linux · macOS · Windows',
+    capabilitiesEyebrow: '完整能力面',
+    capabilitiesTitle: '从读取代码到交付证据，一套类型化契约',
+    capabilitiesBody:
+      'ASH/1 将探索、执行、修改、并行、状态与结果取回拆成可预算、可取消、可审计的操作。',
+    capabilitiesLink: '查看完整能力与边界',
+    skillEyebrow: 'CODING AGENT SKILL',
+    skillTitle: '让 Coding Agent 正确使用 ash',
+    skillBody:
+      '仓库内置可复用的 Agent Skill，说明精确 ASON 信封、操作选择、安全修改、并行工作流和验证方式。',
+    skillAction: '阅读 Agent 接入指南',
+    skillSource: '查看 Skill 源码',
+    skillPathLabel: '项目级 Skill',
+    skillStepOne: '发现与读取',
+    skillStepTwo: '摘要保护的修改',
+    skillStepThree: '测试与证据取回',
+    skillPromptLabel: '调用示例',
+    skillPrompt:
+      'Use $use-ash to inspect this repository, make the requested change, and verify it.',
     whyEyebrow: '命令漫游',
     whyTitle: '看 ASH 完成一次代码任务',
     whyBody:
@@ -73,6 +91,8 @@ const copy = {
     footerDescription: '面向 Coding Agent 的开源 Shell。',
     footerDocs: '文档',
     footerProtocol: 'ASH/1 协议',
+    footerCapabilities: '完整能力',
+    footerAgents: 'Coding Agent Skill',
     footerSource: '源码',
     footerLicense: 'MIT 许可 · Rust 构建',
   },
@@ -81,7 +101,7 @@ const copy = {
     titleLead: 'AI Native',
     titleAccent: 'Shell.',
     subtitle:
-      'One typed command for search, read, parallel work, patching, tests, and evidence retrieval.',
+      'Typed requests for repository discovery, process execution, transactional edits, DAG parallelism, snapshots, and retrievable evidence.',
     start: 'Read the docs',
     architectureAction: 'Watch the command tour',
     github: 'GitHub',
@@ -99,13 +119,31 @@ const copy = {
     metricToken: 'ASON / row JSON',
     metricTokenValue: '62%',
     metricTests: 'Rust tests',
-    metricTestsValue: '180',
+    metricTestsValue: '200',
     metricTargets: 'Native targets',
     metricTargetsValue: '6',
-    signalProtocol: 'g · r · b · p · / · ? · | · >',
+    signalProtocol: 'ASH/1 · 15 TYPED OPERATIONS',
     signalParallel: 'PARALLEL RUN · STABLE MERGE',
     signalAson: 'ASON · PROJECT ON DEMAND',
     signalTargets: 'LINUX · MACOS · WINDOWS',
+    capabilitiesEyebrow: 'COMPLETE SURFACE',
+    capabilitiesTitle: 'One typed contract, from source reading to evidence',
+    capabilitiesBody:
+      'ASH/1 separates discovery, execution, mutation, parallel work, state, and retrieval into budgeted, cancellable, auditable operations.',
+    capabilitiesLink: 'Explore every capability and boundary',
+    skillEyebrow: 'CODING AGENT SKILL',
+    skillTitle: 'Teach a Coding Agent to use ash correctly',
+    skillBody:
+      'The repository ships a reusable Agent Skill for exact ASON envelopes, operation selection, guarded edits, parallel workflows, and verification.',
+    skillAction: 'Read the Agent integration guide',
+    skillSource: 'View the Skill source',
+    skillPathLabel: 'Project skill',
+    skillStepOne: 'Discover and read',
+    skillStepTwo: 'Digest-guarded mutation',
+    skillStepThree: 'Tests and evidence retrieval',
+    skillPromptLabel: 'Example invocation',
+    skillPrompt:
+      'Use $use-ash to inspect this repository, make the requested change, and verify it.',
     whyEyebrow: 'COMMAND WALKTHROUGH',
     whyTitle: 'Watch ASH complete a coding task',
     whyBody:
@@ -144,9 +182,114 @@ const copy = {
     footerDescription: 'An open-source shell for coding agents.',
     footerDocs: 'Documentation',
     footerProtocol: 'ASH/1 protocol',
+    footerCapabilities: 'All capabilities',
+    footerAgents: 'Coding Agent Skill',
     footerSource: 'Source',
     footerLicense: 'MIT licensed · Built in Rust',
   },
+};
+
+const capabilityCards = {
+  zh: [
+    {
+      index: '01',
+      title: '探索工作区',
+      body: '按字节或行读取、稳定遍历路径，并执行有界的字面量或正则搜索。',
+      tags: ['read · r', 'list · l', 'search · g'],
+    },
+    {
+      index: '02',
+      title: '进程与取消',
+      body: '通过 argv 直接启动进程，同时捕获双管道，并在超时或取消后清理整个进程树。',
+      tags: ['exec · x', 'cancel · k', 'timeout'],
+    },
+    {
+      index: '03',
+      title: '安全修改',
+      body: '用 BLAKE3 前像保护补丁；文件创建、复制、移动与删除作为可恢复事务提交。',
+      tags: ['patch · p', 'fs · f', 'journal'],
+    },
+    {
+      index: '04',
+      title: '并行任务图',
+      body: 'DAG 就绪节点并发运行，失败后代跳过，独立工作排空，错误按稳定索引选择。',
+      tags: ['batch · b', 'Tokio', 'Rayon'],
+    },
+    {
+      index: '05',
+      title: '工作区状态',
+      body: '捕获限定范围的清单快照，并以相同作用域计算确定性的增量。',
+      tags: ['snapshot · s', 'delta', 'BLAKE3'],
+    },
+    {
+      index: '06',
+      title: '可取回证据',
+      body: '大输出在固定内存上限后落盘；切片、搜索、投影、物化与释放都使用类型化公式。',
+      tags: ['/ · # · ?', '| · > · -', 'spill'],
+    },
+    {
+      index: '07',
+      title: '模型上下文',
+      body: 'ASON 列编码、路径字典与显式归约减少令牌；完整源数据仍由引用保留。',
+      tags: ['ASON', '×N · ×N#K', '⋯N'],
+    },
+    {
+      index: '08',
+      title: '信任与交付',
+      body: '能力协商、一次性 Permit、事务恢复与签名更新覆盖三个系统和六个原生目标。',
+      tags: ['capabilities', 'permit', 'signed update'],
+    },
+  ],
+  en: [
+    {
+      index: '01',
+      title: 'Workspace discovery',
+      body: 'Read explicit byte or line ranges, walk stable paths, and run bounded literal or regular-expression search.',
+      tags: ['read · r', 'list · l', 'search · g'],
+    },
+    {
+      index: '02',
+      title: 'Processes and cancellation',
+      body: 'Launch argv directly, capture both pipes, and clean up the owned process tree after timeout or cancellation.',
+      tags: ['exec · x', 'cancel · k', 'timeout'],
+    },
+    {
+      index: '03',
+      title: 'Guarded mutation',
+      body: 'Protect patches with BLAKE3 preimages; commit file create, copy, move, and remove as recoverable transactions.',
+      tags: ['patch · p', 'fs · f', 'journal'],
+    },
+    {
+      index: '04',
+      title: 'Parallel task graphs',
+      body: 'Run ready DAG nodes concurrently, skip failed descendants, drain independent work, and select errors by stable index.',
+      tags: ['batch · b', 'Tokio', 'Rayon'],
+    },
+    {
+      index: '05',
+      title: 'Workspace state',
+      body: 'Capture a scoped manifest snapshot and compare the same scope as a deterministic delta.',
+      tags: ['snapshot · s', 'delta', 'BLAKE3'],
+    },
+    {
+      index: '06',
+      title: 'Retrievable evidence',
+      body: 'Spill beyond a fixed memory ceiling; slice, search, project, materialize, or release with typed formulas.',
+      tags: ['/ · # · ?', '| · > · -', 'spill'],
+    },
+    {
+      index: '07',
+      title: 'Model context',
+      body: 'ASON columns, path dictionaries, and explicit reductions save tokens while references preserve the full source.',
+      tags: ['ASON', '×N · ×N#K', '⋯N'],
+    },
+    {
+      index: '08',
+      title: 'Trust and delivery',
+      body: 'Capability negotiation, one-time permits, transaction recovery, and signed updates span three systems and six native targets.',
+      tags: ['capabilities', 'permit', 'signed update'],
+    },
+  ],
 };
 
 function ArrowIcon() {
@@ -193,7 +336,13 @@ function RuntimeDiagram({ labels }: { labels: (typeof copy)[Locale] }) {
   );
 }
 
-function MarkdownHome({ locale }: { locale: Locale }) {
+function MarkdownHome({
+  locale,
+  isCheckpoint,
+}: {
+  locale: Locale;
+  isCheckpoint: boolean;
+}) {
   const labels = copy[locale];
   return (
     <main>
@@ -201,6 +350,17 @@ function MarkdownHome({ locale }: { locale: Locale }) {
         {labels.titleLead} {labels.titleAccent}
       </h1>
       <p>{labels.subtitle}</p>
+      {!isCheckpoint && (
+        <>
+          <h2>{labels.capabilitiesTitle}</h2>
+          <p>{labels.capabilitiesBody}</p>
+          <h2>{labels.skillTitle}</h2>
+          <p>{labels.skillBody}</p>
+          <pre>
+            <code>{labels.skillPrompt}</code>
+          </pre>
+        </>
+      )}
       <h2>{labels.installLabel}</h2>
       <pre>
         <code>{`curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/A3S-Lab/ash/main/install.sh | sh`}</code>
@@ -238,7 +398,7 @@ export function HomeLayout() {
   };
 
   if (import.meta.env.SSG_MD) {
-    return <MarkdownHome locale={locale} />;
+    return <MarkdownHome locale={locale} isCheckpoint={isCheckpoint} />;
   }
 
   const signals = [
@@ -293,6 +453,85 @@ export function HomeLayout() {
           ))}
         </div>
       </section>
+
+      {!isCheckpoint && (
+        <section className="ash-section ash-capabilities" id="capabilities">
+          <header className="ash-section-header">
+            <div>
+              <span>{labels.capabilitiesEyebrow}</span>
+              <h2>{labels.capabilitiesTitle}</h2>
+            </div>
+            <p>{labels.capabilitiesBody}</p>
+          </header>
+          <div className="ash-feature-grid">
+            {capabilityCards[locale].map((capability) => (
+              <article key={capability.index}>
+                <span>{capability.index}</span>
+                <h3>{capability.title}</h3>
+                <p>{capability.body}</p>
+                <div>
+                  {capability.tags.map((tag) => (
+                    <small key={tag}>{tag}</small>
+                  ))}
+                </div>
+              </article>
+            ))}
+          </div>
+          <a
+            className="ash-capabilities-link"
+            href={route('/guide/capabilities.html')}
+          >
+            {labels.capabilitiesLink}
+            <ArrowIcon />
+          </a>
+        </section>
+      )}
+
+      {!isCheckpoint && (
+        <section className="ash-agent-skill" id="coding-agents">
+          <div className="ash-section ash-agent-skill-inner">
+            <div className="ash-agent-skill-copy">
+              <span>{labels.skillEyebrow}</span>
+              <h2>{labels.skillTitle}</h2>
+              <p>{labels.skillBody}</p>
+              <div className="ash-agent-skill-actions">
+                <a href={route('/guide/coding-agents.html')}>
+                  {labels.skillAction}
+                  <ArrowIcon />
+                </a>
+                <a href="https://github.com/A3S-Lab/ash/tree/main/.agents/skills/use-ash">
+                  {labels.skillSource}
+                </a>
+              </div>
+            </div>
+            <div className="ash-skill-card">
+              <header>
+                <span>AGENT SKILL</span>
+                <small>{labels.skillPathLabel}</small>
+              </header>
+              <code>.agents/skills/use-ash/SKILL.md</code>
+              <ol>
+                <li>
+                  <span>01</span>
+                  {labels.skillStepOne}
+                </li>
+                <li>
+                  <span>02</span>
+                  {labels.skillStepTwo}
+                </li>
+                <li>
+                  <span>03</span>
+                  {labels.skillStepThree}
+                </li>
+              </ol>
+              <footer>
+                <span>{labels.skillPromptLabel}</span>
+                <code>{labels.skillPrompt}</code>
+              </footer>
+            </div>
+          </div>
+        </section>
+      )}
 
       <section className="ash-command-section" id="core">
         <div className="ash-section ash-command-section-inner">
@@ -437,6 +676,16 @@ export function HomeLayout() {
           <div className="ash-footer-column">
             <b>{labels.footerDocs}</b>
             <a href={route('/guide/')}>{labels.footerDocs}</a>
+            {!isCheckpoint && (
+              <a href={route('/guide/capabilities.html')}>
+                {labels.footerCapabilities}
+              </a>
+            )}
+            {!isCheckpoint && (
+              <a href={route('/guide/coding-agents.html')}>
+                {labels.footerAgents}
+              </a>
+            )}
             <a href={route('/guide/protocol.html')}>{labels.footerProtocol}</a>
           </div>
           <div className="ash-footer-column">

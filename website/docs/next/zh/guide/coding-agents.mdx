@@ -1,0 +1,119 @@
+---
+title: Coding Agent 接入
+description: 在 Coding Harness 中使用仓库级 Agent Skill 与类型化 ash 工作流。
+---
+
+# Coding Agent 接入
+
+仓库在 `.agents/skills/use-ash/` 内置项目级 Agent Skill。它会告诉 Coding Agent
+何时选择 ash、如何编写精确的 ASH/1 请求、怎样安全修改文件，以及在报告成功前
+必须检查哪些证据。
+
+```text
+.agents/skills/use-ash/
+├── SKILL.md
+├── agents/openai.yaml
+└── references/
+    ├── operations.md
+    └── workflows.md
+```
+
+Skill 遵循可移植的 Agent Skills 结构：简短的激活元数据保留在 `SKILL.md`，精确
+操作 Schema 与可复用编码模式只在任务需要时加载。
+
+## 调用 Skill
+
+在支持项目 Skill、能够感知仓库的 Coding Agent 中直接点名：
+
+```text
+Use $use-ash to inspect this repository, make the requested change, and verify it.
+```
+
+提交到仓库的版本会和 ASH/1 一同演进。若要作为个人 Codex Skill 使用，可将完整的
+`use-ash` 目录复制到 `$CODEX_HOME/skills/`；`SKILL.md`、`agents/` 和
+`references/` 必须一起保留。
+
+## Skill 如何改变 Agent 工作流
+
+1. **预检：**确定工作区根并运行 `ash --build-info`。若 ash 不存在，未经用户授权，
+   Skill 不会自行安装或修改环境。
+2. **精确选择：**用 `g/l/r` 探索，用 `x/k` 管理进程，用 `p/f` 修改，用 `b`
+   表示明确 DAG，用 `s` 表示状态，用 `/ # ? - | >` 处理保留证据。
+3. **限制请求：**按 `t,i,o,a,u` 精确顺序发出规范 ASON，使用正请求 ID 和现实的
+   Token、记录与墙钟预算。
+4. **防御式修改：**补丁绑定当前 BLAKE3 前像，文件生命周期修改放进一个日志化
+   事务；发生冲突时重新读取，绝不削弱保护。
+5. **验证结果：**检查类型化状态、聚焦测试、修改区间或快照增量，以及支撑结论所需
+   的 stdout/stderr 保留片段。
+
+Skill 不会强迫每条琐碎命令都经过 ash。当结构化预算、并行、安全修改或保留证据
+没有收益时，一条简短且本来就安全的原生命令仍然合适。
+
+## 选择正确入口
+
+| Agent 场景   | 入口               | 用途                                             |
+| ------------ | ------------------ | ------------------------------------------------ |
+| 单次工具调用 | `ash run`          | 提交一个即时响应已经足够的、自包含裸 ASON 请求   |
+| 长驻 Harness | `ash rpc`          | 握手、帧式并发、Permit、取消、快照与引用生命周期 |
+| 请求编写     | `ash ason`         | 执行前校验并规范化文档                           |
+| 仓库预检     | `ash --build-info` | 确认二进制身份与功能配置                         |
+
+引用只在生成它的会话中有效。`ash run` 写出一次响应后就会关闭临时会话；后续另一个
+`ash run` 进程不能沿用其中的别名、比较快照基线、检查 Batch 子响应、取消运行中任务，
+也不能重试 Permit 挑战。这些工作流必须保留同一个 `ash rpc` 会话，而且只有 Harness
+负责规范握手、帧与关闭生命周期时才能使用 RPC；向 RPC 发送裸文档不是等价捷径。
+
+## 运行规范请求
+
+在 `src` 中搜索字面量 `TODO`：
+
+```ason
+t:1
+i:17
+o:g
+a{q,p,f}:
+TODO,[src],0
+u{tok,rec,ms}:
+256,64,30000
+```
+
+Unix 类 Shell：
+
+```bash
+ash run < request.ason
+```
+
+PowerShell 必须保持规范 UTF-8/LF 字节，不能通过字符串管道重编码：
+
+```powershell
+$ash = Start-Process ash -ArgumentList run -NoNewWindow -Wait -PassThru `
+  -RedirectStandardInput request.ason
+if ($ash.ExitCode) { throw "ash exited with code $($ash.ExitCode)" }
+```
+
+若 Agent 的进程工具可以直接传标准输入，就把可执行文件 `ash`、argv `run` 和精确请求
+字节直接传入。不要把 `x` 操作转换为一段加引号的 Bash、PowerShell 或 CMD 程序字符串；
+`x` 直接接收一个可执行文件与 argv 向量，因此意图、环境变化、取消和进程归属都保持类型化。
+
+## 推荐编码循环
+
+1. 窄范围搜索、浅层列表，然后只读取有用的字节或行区间。
+2. 在同一个存活的 RPC 会话中沿保留引用继续取证，而不是重复宽泛命令。
+3. 在该会话中，当多文件前后差异具有证明价值时先捕获快照。
+4. 应用摘要保护的补丁或仅限文件的事务。
+5. 先运行最小相关测试，再按任务风险扩大项目门禁。
+6. 只取回模型上下文真正需要的失败或证明区间。
+7. 报告已验证结果、证据以及遇到的明确 ASH/1 边界。
+
+精确参数列和示例见仓库中的
+[操作参考](https://github.com/A3S-Lab/ash/blob/main/.agents/skills/use-ash/references/operations.md)
+与[工作流参考](https://github.com/A3S-Lab/ash/blob/main/.agents/skills/use-ash/references/workflows.md)。
+
+## 明确保留边界
+
+当任务要求递归目录修改、覆盖、交互式终端、Shell 语言求值、远程执行或可移植的
+子进程网络/系统调用沙箱时，Skill 会要求 Agent 回退或停止。除非类型化响应证明
+完整，否则它也不会把保留结果的即时投影描述成完整源。
+
+设计大型 Harness 前先查看[完整能力地图](/guide/capabilities)，并始终以
+[ASH/1 协议](/guide/protocol)作为权威线协议。
