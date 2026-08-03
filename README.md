@@ -77,11 +77,13 @@ Read the complete contracts:
 
 - [Website and versioned documentation](https://a3s-lab.github.io/ash/)
 - [System architecture](./docs/architecture.md)
+- [Proposed portable human-shell architecture](./docs/portable-human-shell.md)
 - [ASH/1 protocol and ASON specification](./docs/protocol.md)
 - [Cross-platform distribution and one-click installation](./docs/distribution.md)
 - [Release operator contract](./docs/releasing.md)
 - [Token-efficiency benchmark contract](./docs/benchmarks.md)
 - [Rust and dual-plane runtime decision](./docs/decisions/0001-rust-and-dual-plane-runtime.md)
+- [Separate portable human-shell layer decision](./docs/decisions/0002-separate-portable-human-shell-layer.md)
 
 ## Cross-platform installation
 

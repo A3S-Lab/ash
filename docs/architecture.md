@@ -37,6 +37,10 @@ Its primary caller is a coding agent or an agent harness. The shell therefore op
 - A universal cross-platform syscall or network sandbox.
 - Reimplementation of Git, compilers, package managers, or other domain tools.
 
+A post-v1, opt-in human frontend is proposed in
+[Portable Human Shell Architecture](./portable-human-shell.md). It remains
+separate from ASH/1 and does not change the version-one non-goals above.
+
 ## 2. Architectural principles
 
 ### 2.1 Optimize completed tasks, not individual strings
@@ -633,7 +637,7 @@ The benchmark contract in [benchmarks.md](./benchmarks.md) measures correctness,
 | Platform set | Linux, macOS, Windows; x86-64 and ARM64 |
 | Installation | `install.sh` and `install.ps1`, no admin by default |
 | Global daemon | None required |
-| Human shell compatibility | Out of scope |
+| Human shell compatibility | Out of scope for ASH/1 v1; proposed as a separate frontend |
 | Embedded LLM | Out of scope |
 | PTY in version one | Out of scope |
 
