@@ -31,8 +31,8 @@ Harness interface.
 
 The current H1 checkpoint executes the H0 simple-command syntax sequentially
 against one persistent native state. It implements `pwd`, `echo` (with `-n`),
-`cd`, portable `ls`, raw-byte `cat`, and text `grep`. Source may come from
-`-c SOURCE`, a native script-file path, or stdin:
+`cd`, literal `export`/`unset`, portable `ls`, raw-byte `cat`, and text `grep`.
+Source may come from `-c SOURCE`, a native script-file path, or stdin:
 
 ```sh
 ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
@@ -53,6 +53,13 @@ supports `-E`/`--extended-regexp`, `-F`/`--fixed-strings`,
 `-i`/`--ignore-case`, `-n`/`--line-number`, combined short options, and `--`.
 Searches are capped at 64 MiB; no matches return status 1 without a diagnostic.
 Directories, multiple files, stdin `-`, and unsupported options fail explicitly.
+
+`export NAME=VALUE` and `unset NAME` persistently update both shell-variable and
+exported environment state. Each accepts one literal argument and `--`; names
+must be ASCII shell identifiers, empty values are preserved, and unsetting a
+missing name succeeds. Listing, multiple names, and parameter expansion are not
+implemented yet.
+
 Interactive input, profiles, and external processes are not implemented yet.
 The regular binary enables the `human-shell` feature; `cargo build -p a3s-ash
 --no-default-features` keeps a minimal machine-only build.
@@ -80,6 +87,6 @@ logical form and cannot escape through lexical traversal, symbolic links, or
 Windows reparse points. `exec` never switches to an implicit host shell.
 
 Human-shell state instead uses native `PathBuf` and `OsString` values. `cd`,
-`ls`, `cat`, and `grep` inherit normal user filesystem authority, while native
-path units are preserved or reversibly escaped; this does not weaken or replace
-ASH/1 workspace confinement.
+`export`, `unset`, `ls`, `cat`, and `grep` inherit normal user authority, while
+native path and environment units are preserved or reversibly escaped; this
+does not weaken or replace ASH/1 workspace confinement.

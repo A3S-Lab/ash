@@ -28,8 +28,8 @@ ash 的主要 CLI 是机器接口：成功输出和错误诊断都使用稳定�
 ## 人类 Shell 检查点
 
 当前 H1 检查点针对同一份持久原生状态，顺序执行 H0 的简单命令语法。已实现 `pwd`、
-`echo`（含 `-n`）、`cd`、可移植 `ls`、原始字节 `cat` 与文本 `grep`；源码可以来自
-`-c SOURCE`、原生脚本文件路径或 stdin：
+`echo`（含 `-n`）、`cd`、字面量 `export`/`unset`、可移植 `ls`、原始字节 `cat` 与
+文本 `grep`；源码可以来自 `-c SOURCE`、原生脚本文件路径或 stdin：
 
 ```sh
 ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
@@ -46,7 +46,13 @@ UTF-8。以 `-` 开头的文件参数可写成 `ash shell -- ./-script.ash`。�
 默认使用 Rust 正则表达式；支持 `-E`/`--extended-regexp`、
 `-F`/`--fixed-strings`、`-i`/`--ignore-case`、`-n`/`--line-number`、短选项组合与
 `--`。搜索上限为 64 MiB；无匹配时不输出诊断并返回状态 1。目录、多个文件、stdin
-`-` 与不支持的选项都会明确失败。交互输入、Profile 与外部进程尚未实现。常规二进制
+`-` 与不支持的选项都会明确失败。
+
+`export NAME=VALUE` 与 `unset NAME` 会持久更新 Shell 变量和导出环境。两者各接受一个
+字面参数和 `--`；名称必须是 ASCII Shell 标识符，空值会被保留，移除不存在的名称也会
+成功。列出环境、多个名称与参数展开尚未实现。
+
+交互输入、Profile 与外部进程尚未实现。常规二进制
 启用 `human-shell` feature；`cargo build -p a3s-ash --no-default-features` 保留最小
 机器专用构建。
 
@@ -69,6 +75,6 @@ e{c}:
 文件操作受启动时工作区约束。路径必须使用规范逻辑形式，拒绝词法逃逸、符号链接或
 Windows reparse point 绕过。`exec` 也不会自动切换到隐式系统 Shell。
 
-人类 Shell 状态改用原生 `PathBuf` 与 `OsString`。`cd`、`ls`、`cat` 与 `grep` 继承
-普通用户文件系统权限，原生路径单元会被保留或可逆转义；这不会削弱或替代 ASH/1
-的工作区约束。
+人类 Shell 状态改用原生 `PathBuf` 与 `OsString`。`cd`、`export`、`unset`、`ls`、
+`cat` 与 `grep` 继承普通用户权限，原生路径和环境单元会被保留或可逆转义；这不会
+削弱或替代 ASH/1 的工作区约束。
