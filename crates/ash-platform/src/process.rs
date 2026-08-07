@@ -5,6 +5,7 @@ use std::io::{PipeReader, PipeWriter};
 use std::path::PathBuf;
 use std::process::Stdio;
 
+use futures::future::join_all;
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
 #[cfg(unix)]
@@ -230,6 +231,16 @@ pub struct NativeProcessGraph {
     parent_files: BTreeMap<ParentProcessFileId, tokio::fs::File>,
 }
 
+/// Running native members of one process graph, supervised as a single job.
+///
+/// Exit statuses retain specification order even though graph consumers spawn
+/// before their producers. A wait failure terminates and reaps every remaining
+/// process tree before it is returned. Explicit termination likewise covers all
+/// members and does not complete until their owned descendants have been reaped.
+pub struct NativeProcessJob {
+    processes: Vec<ProcessHandle>,
+}
+
 impl NativeProcessGraph {
     /// Takes one declared parent reader by its graph-local pipe identifier.
     pub fn take_pipe_reader(&mut self, id: ProcessPipeId) -> Option<tokio::fs::File> {
@@ -246,10 +257,124 @@ impl NativeProcessGraph {
         self.parent_files.remove(&id)
     }
 
+    /// Converts the constructed graph into its job-wide process supervisor.
+    ///
+    /// Any parent pipe ends or files that were not taken are closed here, before
+    /// supervision begins.
+    #[must_use]
+    pub fn into_job(self) -> NativeProcessJob {
+        NativeProcessJob {
+            processes: self.processes,
+        }
+    }
+
+    /// Terminates and reaps every native member while graph resources are still owned.
+    pub async fn terminate_and_reap(&mut self) -> Result<(), PlatformError> {
+        terminate_and_reap_processes(&mut self.processes).await
+    }
+
     /// Consumes the graph wrapper and returns process handles in specification order.
     #[must_use]
     pub fn into_processes(self) -> Vec<ProcessHandle> {
         self.processes
+    }
+}
+
+impl NativeProcessJob {
+    /// Returns the number of native members in this job.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.processes.len()
+    }
+
+    /// Returns whether this job has no native members.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.processes.is_empty()
+    }
+
+    /// Returns one member's current platform process identifier.
+    #[must_use]
+    pub fn process_id(&self, process_index: usize) -> Option<u32> {
+        self.processes
+            .get(process_index)
+            .and_then(ProcessHandle::id)
+    }
+
+    /// Takes one member's parent-facing stdin handle.
+    pub fn take_stdin(&mut self, process_index: usize) -> Option<ChildStdin> {
+        self.processes.get_mut(process_index)?.take_stdin()
+    }
+
+    /// Takes one member's parent-facing stdout handle.
+    pub fn take_stdout(&mut self, process_index: usize) -> Option<ChildStdout> {
+        self.processes.get_mut(process_index)?.take_stdout()
+    }
+
+    /// Takes one member's parent-facing stderr handle.
+    pub fn take_stderr(&mut self, process_index: usize) -> Option<ChildStderr> {
+        self.processes.get_mut(process_index)?.take_stderr()
+    }
+
+    /// Takes one member's named parent-facing capture pipe.
+    pub fn take_capture(
+        &mut self,
+        process_index: usize,
+        id: ProcessCaptureId,
+    ) -> Option<tokio::fs::File> {
+        self.processes.get_mut(process_index)?.take_capture(id)
+    }
+
+    /// Waits for every native member and returns exits in specification order.
+    ///
+    /// If any wait fails, every remaining process tree is terminated and reaped
+    /// before the original wait error is returned.
+    pub async fn wait(&mut self) -> Result<Vec<ProcessExit>, PlatformError> {
+        let results = join_all(self.processes.iter_mut().map(|process| process.wait())).await;
+        let mut exits = Vec::with_capacity(results.len());
+        let mut first_error = None;
+        for result in results {
+            match result {
+                Ok(exit) => exits.push(exit),
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            let _ = self.terminate_and_reap().await;
+            Err(error)
+        } else {
+            Ok(exits)
+        }
+    }
+
+    /// Terminates every native member and waits for all owned process trees.
+    ///
+    /// All members are asked to terminate even when one operation fails. The
+    /// first termination error in specification order takes precedence over the
+    /// first subsequent wait error.
+    pub async fn terminate_and_reap(&mut self) -> Result<(), PlatformError> {
+        terminate_and_reap_processes(&mut self.processes).await
+    }
+}
+
+async fn terminate_and_reap_processes(
+    processes: &mut [ProcessHandle],
+) -> Result<(), PlatformError> {
+    let termination_error = join_all(processes.iter_mut().map(|process| process.terminate()))
+        .await
+        .into_iter()
+        .find_map(Result::err);
+    let wait_error = join_all(processes.iter_mut().map(|process| process.wait()))
+        .await
+        .into_iter()
+        .find_map(Result::err);
+    match termination_error.or(wait_error) {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -952,7 +1077,14 @@ impl ProcessHandle {
     pub async fn terminate(&mut self) -> Result<(), PlatformError> {
         match Box::into_pin(self.child.kill()).await {
             Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                Ok(())
+            }
             Err(error) => Err(error.into()),
         }
     }
@@ -1086,6 +1218,14 @@ fn main() {
             stdout.flush().expect("flush stdout b");
             stderr.write_all(b"stderr-b\n").expect("write stderr b");
             stderr.flush().expect("flush stderr b");
+        }
+        Some("exit") => {
+            let code = arguments
+                .next()
+                .expect("exit code")
+                .parse::<i32>()
+                .expect("numeric exit code");
+            std::process::exit(code);
         }
         Some("quiet") => {}
         Some("parent") => {
@@ -2158,6 +2298,133 @@ fn main() {
         assert!(
             !directory.0.join("escaped").exists(),
             "descendant survived process-tree termination"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_process_job_supervises_ordered_exits_and_all_member_trees() {
+        let directory = TestDirectory::new();
+        let executable = directory.0.join(compile_process_tree_helper(&directory));
+        let spec = |arguments: Vec<OsString>, stdin, stdout| NativeProcessSpec {
+            executable: executable.clone().into_os_string(),
+            argv: arguments,
+            cwd: directory.0.clone(),
+            environment: vec![],
+            clear_environment: false,
+            files: Vec::new(),
+            stdin,
+            stdout,
+            stderr: ProcessStdio::Null,
+        };
+
+        let pipe = ProcessPipeId::new(41);
+        let graph = spawn_native_graph_with_parent_io(
+            &[
+                spec(
+                    vec![OsString::from("exit"), OsString::from("3")],
+                    ProcessStdio::Null,
+                    ProcessStdio::Pipe(pipe),
+                ),
+                spec(
+                    vec![OsString::from("exit"), OsString::from("7")],
+                    ProcessStdio::Pipe(pipe),
+                    ProcessStdio::Null,
+                ),
+            ],
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .expect("spawn supervised exit graph");
+        let mut job = graph.into_job();
+        assert_eq!(job.len(), 2);
+        assert!(!job.is_empty());
+        assert!(job.process_id(0).is_some());
+        assert!(job.process_id(1).is_some());
+        let exits = tokio::time::timeout(Duration::from_secs(5), job.wait())
+            .await
+            .expect("supervised exits complete")
+            .expect("wait for supervised exits");
+        assert_eq!(
+            exits.iter().map(|exit| exit.code).collect::<Vec<_>>(),
+            vec![Some(3), Some(7)],
+            "job exits must retain specification order"
+        );
+
+        let unclaimed_pipe = ProcessPipeId::new(42);
+        let mut graph = spawn_native_graph_with_parent_pipe_ends(
+            &[],
+            &[],
+            &[
+                ParentProcessPipeEnd::Reader(unclaimed_pipe),
+                ParentProcessPipeEnd::Writer(unclaimed_pipe),
+            ],
+        )
+        .expect("construct parent-only graph");
+        let mut reader = graph
+            .take_pipe_reader(unclaimed_pipe)
+            .expect("take parent-only reader");
+        let job = graph.into_job();
+        assert!(job.is_empty());
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), reader.read_to_end(&mut bytes))
+            .await
+            .expect("job conversion closes unclaimed writer")
+            .expect("read parent-only EOF");
+        assert!(bytes.is_empty());
+
+        let mut job = spawn_native_graph_with_parent_io(
+            &[
+                spec(
+                    vec![
+                        OsString::from("parent"),
+                        OsString::from("first-ready"),
+                        OsString::from("first-escaped"),
+                    ],
+                    ProcessStdio::Null,
+                    ProcessStdio::Null,
+                ),
+                spec(
+                    vec![
+                        OsString::from("parent"),
+                        OsString::from("second-ready"),
+                        OsString::from("second-escaped"),
+                    ],
+                    ProcessStdio::Null,
+                    ProcessStdio::Null,
+                ),
+            ],
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .expect("spawn supervised process trees")
+        .into_job();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !directory.0.join("first-ready").is_file()
+                || !directory.0.join("second-ready").is_file()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both supervised process trees should start");
+        tokio::time::timeout(Duration::from_secs(5), job.terminate_and_reap())
+            .await
+            .expect("job termination completes")
+            .expect("terminate every supervised process tree");
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+        assert!(
+            !directory.0.join("first-escaped").exists(),
+            "first job descendant survived termination"
+        );
+        assert!(
+            !directory.0.join("second-escaped").exists(),
+            "second job descendant survived termination"
         );
     }
 

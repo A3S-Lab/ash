@@ -2,7 +2,7 @@
   "schema": 5,
   "corpus": "benches/corpus/v1.json",
   "corpus_sha256": "a8f043656e10a1b72af64648bf111fce27024670e27b591657c853707c23bd70",
-  "workspace_lock_sha256": "38a446377f74448022139149760cfa880c998282ae173b6f3eb1bd0f06439724",
+  "workspace_lock_sha256": "3c4bd22ebc06dfad5af73fd4b94eee7acd939537a8e5f83d582f0715d6eae319",
   "tokenizers": [
     "tiktoken-rs/0.12.0:cl100k_base",
     "tiktoken-rs/0.12.0:o200k_base"

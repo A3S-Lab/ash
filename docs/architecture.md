@@ -55,12 +55,19 @@ simple commands and pipeline stages. Arguments and targets preflight before
 open, simple-command files open before parent mutation, stateful pipeline files
 join the global graph order, and redirected empty stdout closes downstream
 normally while shell diagnostics remain outside raw command stderr.
+The eleventh checkpoint converts the constructed native graph into a
+`NativeProcessJob` after parent resources are claimed. It owns every native
+member through ordered wait, all-member termination, and descendant reap;
+wait failures clean up the remaining job before surfacing. The shell polls that
+job only after portable/stateful tasks and capture drains settle successfully,
+so an in-progress native reap is never canceled. Success and failure still share
+one pipeline completion boundary while stage exits retain source order.
 Eight-megabyte parent-facing,
 child-to-child, native, mixed, and closed-reader regressions lock exact bytes,
 EOF, backpressure, and completion; ordered-output regressions lock child and
 parent file resources, capture, surviving-pipe sharing, and global file-open
-side effects. Unified job supervision, user-visible terminal streaming, WSL
-pipeline and redirection adapters, foreground interactive
+side effects. User-visible terminal streaming, WSL pipeline and redirection
+adapters, foreground interactive
 programs and job control, broader expansion and mutations, and WSL launch remain
 open.
 Release-key and platform-signing credential provisioning, the first published release, enough accumulated fuzz duration to claim a soak gate, captured real multi-model Coding Agent runs, medium/large task families, and published hardware-labelled runtime measurements remain open.
@@ -461,9 +468,9 @@ portable, or implemented stateful-builtin stages after complete expansion,
 resolution, argument, regular-expression, and redirection preflight.
 Native-to-native edges remain direct OS pipes. Boundaries involving portable
 `pwd`, `echo`, `ls`, `cat`, or `grep` retain the required async parent ends and
-poll their bounded task futures concurrently with native capture and waits. Only
-`cat -` and `grep PATTERN -` consume an incoming pipe or redirected parent file;
-a non-consuming portable stage closes that reader so the upstream producer
+poll their bounded task futures concurrently with native execution and capture.
+Only `cat -` and `grep PATTERN -` consume an incoming pipe or redirected parent
+file; a non-consuming portable stage closes that reader so the upstream producer
 observes native broken-pipe behavior. A
 stateful `cd`, `export`, `unset`, `set`, or `exit` stage also closes its reader,
 runs on an independent state clone, and closes its empty output when complete;
@@ -494,8 +501,13 @@ exposes broken-pipe behavior upstream. Stateful arguments preflight before
 files, simple-command opens precede parent mutation, and stateful pipeline files
 participate in the same graph order. Their commands emit no raw stdout or
 stderr, so source-spanned failures remain shell diagnostics. Applying a
-redirection to a WSL stage still fails before file opens or spawn. Job-wide
-supervision plus WSL pipeline and redirection adapters remain later layers.
+redirection to a WSL stage still fails before file opens or spawn. Once parent
+resources have been taken, `NativeProcessGraph` becomes a `NativeProcessJob`.
+It waits every native member in specification order and terminates plus reaps
+all owned process trees before returning a setup, capture, or wait failure. The
+shell completes in-process stages and capture drains before entering the job's
+non-cancelled ordered wait. WSL pipeline and redirection adapters remain later
+layers.
 
 Inputs include:
 
