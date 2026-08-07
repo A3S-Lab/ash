@@ -1,14 +1,15 @@
 use crate::{
-    Diagnostic, DiagnosticCode, Parameter, QuoteMode, Script, SimpleCommand, SourceSpan, Word,
-    WordPart,
+    Diagnostic, DiagnosticCode, Parameter, Pipeline, QuoteMode, Script, SimpleCommand, SourceSpan,
+    Word, WordPart,
 };
 
 /// Parses the H0 shell syntax subset.
 ///
-/// The current subset accepts foreground simple commands separated by a newline
-/// or `;`, shell comments, single and double quotes, backslash escaping, named
-/// parameters, and `$?`. Syntax reserved for later milestones is rejected with
-/// a source span instead of being reinterpreted as a literal argument.
+/// The current subset accepts foreground native-pipeline syntax with `|`, simple
+/// commands separated by a newline or `;`, shell comments, single and double
+/// quotes, backslash escaping, named parameters, and `$?`. Syntax reserved for
+/// later milestones is rejected with a source span instead of being
+/// reinterpreted as a literal argument.
 pub fn parse(source: &str) -> Result<Script, Diagnostic> {
     Parser::new(source).parse()
 }
@@ -28,6 +29,7 @@ impl<'a> Parser<'a> {
 
     fn parse(mut self) -> Result<Script, Diagnostic> {
         let mut commands = Vec::new();
+        let mut pipelines = Vec::new();
         self.skip_command_layout();
 
         while !self.is_eof() {
@@ -38,31 +40,87 @@ impl<'a> Parser<'a> {
                 ));
             }
 
-            let command_start = self.position;
-            let mut words = Vec::new();
+            let pipeline_start = self.position;
+            let first_command = commands.len();
+            let mut pipe_spans = Vec::new();
+            let pipeline_end;
             loop {
-                let separated = self.skip_horizontal();
-                match self.peek() {
-                    None | Some('\n' | ';') => break,
-                    Some('#') if separated => {
-                        self.skip_comment();
-                        break;
-                    }
-                    Some(_) => words.push(self.parse_word()?),
+                if self.peek() == Some('|') {
+                    return Err(self.diagnostic_here(
+                        DiagnosticCode::UnexpectedSeparator,
+                        "a pipeline operator must follow a command",
+                    ));
                 }
-            }
 
-            if let Some(command_end) = words.last().map(|last| last.span().end()) {
+                let command_start = self.position;
+                let mut words = Vec::new();
+                loop {
+                    let separated = self.skip_horizontal();
+                    match self.peek() {
+                        None | Some('\n' | ';' | '|') => break,
+                        Some('#') if separated => break,
+                        Some(_) => words.push(self.parse_word()?),
+                    }
+                }
+
+                let Some(command_end) = words.last().map(|last| last.span().end()) else {
+                    return Err(self.diagnostic_here(
+                        DiagnosticCode::UnexpectedSeparator,
+                        "a pipeline stage must contain a command",
+                    ));
+                };
                 commands.push(SimpleCommand::new(
                     words,
                     SourceSpan::new(command_start, command_end),
                 ));
+
+                self.skip_horizontal();
+                if self.peek() == Some('#') {
+                    self.skip_comment();
+                    pipeline_end = command_end;
+                    break;
+                }
+                match self.peek() {
+                    Some('|') => {
+                        let pipe_start = self.position;
+                        self.bump();
+                        if self.peek() == Some('|') {
+                            return Err(Diagnostic::new(
+                                DiagnosticCode::UnsupportedSyntax,
+                                "conditional OR lists are reserved for a later milestone",
+                                SourceSpan::new(pipe_start, self.position + 1),
+                            ));
+                        }
+                        let pipe_span = SourceSpan::new(pipe_start, self.position);
+                        pipe_spans.push(pipe_span);
+                        self.skip_horizontal();
+                        if matches!(self.peek(), None | Some('\n' | ';' | '|' | '#')) {
+                            return Err(Diagnostic::new(
+                                DiagnosticCode::UnexpectedSeparator,
+                                "a pipeline operator must be followed by a command on the same line",
+                                pipe_span,
+                            ));
+                        }
+                    }
+                    None | Some('\n' | ';') => {
+                        pipeline_end = command_end;
+                        break;
+                    }
+                    Some(_) => {
+                        return Err(self.diagnostic_here(
+                            DiagnosticCode::UnsupportedSyntax,
+                            "unsupported syntax follows a pipeline stage",
+                        ));
+                    }
+                }
             }
 
-            self.skip_horizontal();
-            if self.peek() == Some('#') {
-                self.skip_comment();
-            }
+            pipelines.push(Pipeline::new(
+                first_command..commands.len(),
+                pipe_spans,
+                SourceSpan::new(pipeline_start, pipeline_end),
+            ));
+
             match self.peek() {
                 None => break,
                 Some('\n' | ';') => {
@@ -72,13 +130,13 @@ impl<'a> Parser<'a> {
                 Some(_) => {
                     return Err(self.diagnostic_here(
                         DiagnosticCode::UnsupportedSyntax,
-                        "unsupported syntax follows a simple command",
+                        "unsupported syntax follows a pipeline",
                     ));
                 }
             }
         }
 
-        Ok(Script::new(self.source.to_owned(), commands))
+        Ok(Script::new(self.source.to_owned(), commands, pipelines))
     }
 
     fn parse_word(&mut self) -> Result<Word, Diagnostic> {
@@ -91,10 +149,13 @@ impl<'a> Parser<'a> {
             if matches!(character, ' ' | '\t' | '\r' | '\n' | ';') {
                 break;
             }
+            if character == '|' {
+                break;
+            }
             if is_reserved_operator(character) {
                 return Err(self.diagnostic_here(
                     DiagnosticCode::UnsupportedSyntax,
-                    "pipelines, redirections, background jobs, and subshells are reserved for a later milestone",
+                    "redirections, background jobs, and subshells are reserved for a later milestone",
                 ));
             }
             match character {
@@ -416,7 +477,7 @@ fn push_unquoted(
 }
 
 const fn is_reserved_operator(character: char) -> bool {
-    matches!(character, '|' | '&' | '<' | '>' | '(' | ')' | '`')
+    matches!(character, '&' | '<' | '>' | '(' | ')' | '`')
 }
 
 const fn is_identifier_start(character: char) -> bool {
@@ -440,6 +501,7 @@ mod tests {
     fn parses_comments_separators_and_mixed_quotes() {
         let script = parse("# heading\necho pre\"mid\"'post'\\ value; pwd\n").expect("parse");
         assert_eq!(script.commands().len(), 2);
+        assert_eq!(script.pipelines().len(), 2);
         let first = &script.commands()[0];
         assert_eq!(first.words().len(), 2);
         assert_eq!(first.words()[0].literal(), "echo");
@@ -572,10 +634,48 @@ mod tests {
     }
 
     #[test]
-    fn rejects_reserved_syntax_at_the_operator_span() {
-        let error = parse("echo ok | grep nope").expect_err("pipeline is H2");
-        assert_eq!(error.code(), DiagnosticCode::UnsupportedSyntax);
-        assert_eq!(error.span(), SourceSpan::new(8, 9));
+    fn parses_pipeline_stages_and_operator_spans_without_splitting_quotes() {
+        let script = parse("echo 'left|literal'|grep nope").expect("parse pipeline");
+        assert_eq!(script.commands().len(), 2);
+        assert_eq!(script.commands()[0].words()[1].literal(), "left|literal");
+        assert_eq!(script.commands()[1].words()[0].literal(), "grep");
+        assert_eq!(script.pipelines().len(), 1);
+        assert_eq!(script.pipelines()[0].command_range(), 0..2);
+        assert_eq!(
+            script.pipelines()[0].pipe_spans(),
+            [SourceSpan::new(19, 20)]
+        );
+        assert_eq!(script.pipelines()[0].span(), SourceSpan::new(0, 29));
+    }
+
+    #[test]
+    fn rejects_missing_pipeline_stages_and_reserved_conditional_or() {
+        for (source, code, span) in [
+            (
+                "| echo",
+                DiagnosticCode::UnexpectedSeparator,
+                SourceSpan::new(0, 1),
+            ),
+            (
+                "echo |",
+                DiagnosticCode::UnexpectedSeparator,
+                SourceSpan::new(5, 6),
+            ),
+            (
+                "echo | | grep",
+                DiagnosticCode::UnexpectedSeparator,
+                SourceSpan::new(5, 6),
+            ),
+            (
+                "echo || grep",
+                DiagnosticCode::UnsupportedSyntax,
+                SourceSpan::new(5, 7),
+            ),
+        ] {
+            let error = parse(source).expect_err("invalid pipeline");
+            assert_eq!(error.code(), code, "source={source}");
+            assert_eq!(error.span(), span, "source={source}");
+        }
     }
 
     #[test]

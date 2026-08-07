@@ -1,6 +1,6 @@
 # Portable Human Shell Architecture
 
-- Status: accepted; H1 implemented
+- Status: accepted; H1 and the first native H2 pipeline slice implemented
 - Target: post-ASH/1 version one
 - Last updated: 2026-08-07
 
@@ -23,11 +23,14 @@ persistent history, opt-in Profile startup, and `exit`, plus inline, bounded
 stdin, and native script-file sources. One persistent state executes sequential
 `pwd`, `echo`, `cd`, `export`/`unset`, portable `ls`, bounded raw-byte `cat` and
 text `grep`, source-spanned named and last-status expansion, and direct-argv
-native host commands. Pipelines, foreground interactive programs and jobs,
-streaming stdio, broader expansion, mutations, and WSL launch remain
-unimplemented. H2 has started at the lower process boundary with explicit
-per-stream modes and validated direct OS pipe graphs; current H1 execution maps
-to the standalone modes without changing its visible capture contract.
+native host commands. H2 adds explicit per-stream modes, validated direct OS
+pipe graphs, and same-line native-only pipelines of two to 32 stages. All stages
+are expanded and resolved before spawn; intermediate stdout uses direct pipes,
+final stdout and stage-ordered stderr remain bounded captures, and the last
+stage selects status. Foreground interactive programs and jobs, terminal
+streaming, redirections, `pipefail`, unified pipeline supervision, portable/WSL
+pipeline stages, broader expansion, mutations, and WSL launch remain
+unimplemented.
 
 ## 1. Executive decision
 
@@ -517,9 +520,21 @@ starts consumers before producers, attaches cloned child ends, and drops all
 parent copies before returning process handles in plan order. Graph-internal
 streams expose no parent handle. An 8 MiB producer/consumer regression requires
 exact bytes, EOF-driven completion, backpressure, and a bounded deadline without
-a parent relay task. The current shell does not lower syntax to this primitive
-yet, and each child still has its own existing ownership wrapper rather than a
-pipeline-wide supervisor.
+a parent relay task. Each child still has its own existing ownership wrapper
+rather than a pipeline-wide supervisor.
+
+The third H2 checkpoint adds the first shell lowering to that primitive. The AST
+retains flat command access plus pipeline command ranges and exact `|` spans.
+The same-line syntax accepts two to 32 stages, expands every stage, validates
+UTF-8 command names, resolves every executable, and rejects stateful/portable
+builtins, aliases, functions, and WSL before starting any child. The first stage
+uses null stdin, intermediate stdout uses `Pipe(ProcessPipeId)`, final stdout is
+piped back to the shell, and every stage's stderr is captured concurrently.
+Final stdout and all stderr share the remaining 128 MiB allowance; stderr is
+concatenated in stage order. The executor waits for every member, terminates and
+reaps all handles after capture or wait failure, and returns the final stage's
+status. A three-process 8 MiB regression locks exact bytes, backpressure, EOF,
+and deterministic stderr order.
 
 Redirections remain an ordered vector because these are observably different:
 
@@ -557,10 +572,11 @@ Pipeline construction follows this lifecycle:
 7. compute pipeline status according to the configured `pipefail` rule;
 8. reap every child and release all handles.
 
-The current platform checkpoint implements the native graph validation, pipe
-creation, consumer-first spawn, and parent-handle closure portions of this
-lifecycle. Capacity reservation, shell lowering, unified job supervision,
-status selection, portable in-process stages, and redirections remain open.
+The current checkpoint implements native graph validation, pipe creation,
+consumer-first spawn, parent-handle closure, the bounded native-only shell
+lowering, and default final-stage status selection. Capacity reservation,
+unified job supervision, `pipefail`, portable in-process stages, and
+redirections remain open.
 
 Data flows directly through OS pipes. It does not pass through ASON or the
 result store, and it is not materialized in memory before the next command
@@ -690,9 +706,10 @@ native exit are distinct diagnostic categories. Human diagnostics carry source
 spans and remediation where known. Machine errors remain stable numeric ASH/1
 records.
 
-Pipeline status defaults to the last command. A documented `pipefail` option
-returns the rightmost unsuccessful status. Backend-specific native codes remain
-available through job inspection even when the language exposes a normalized
+The current native-only pipeline slice implements the default last-command
+status. A future documented `pipefail` option returns the rightmost unsuccessful
+status. Backend-specific native codes remain available through job inspection
+once unified supervision exists, even when the language exposes a normalized
 status.
 
 ## 18. Configuration and startup
@@ -810,7 +827,7 @@ loop with the prompt, persistent-history, interruption, EOF, and `exit`
 contracts in section 18. The same entrypoint accepts `-c SOURCE`, bounded stdin,
 or one native script path. Opt-in `--profile FILE`/`ASH_PROFILE` startup uses
 the same dialect and input ceiling, while `--no-profile` remains the recovery
-route. Every source parses the H0 subset and executes sequential `pwd`, `echo`,
+route. Every source parses the current subset and executes `pwd`, `echo`,
 `cd`, expanded `export`/`unset`, portable `ls`, bounded raw-byte `cat`, bounded
 text `grep`, and native host executables against one native `ShellState`, with
 source-spanned human diagnostics and conventional status propagation. Named
@@ -821,30 +838,36 @@ and external-command operands retain native representation. `ls`, `cat`, and
 `grep` reuse the provider-neutral list/read/search services with an unconfined
 native provider and the option contracts in section 10. Native programs resolve
 from the persistent environment, launch through the owned `ash-platform`
-process boundary with exact argv/cwd/environment, and still use the bounded
-dual-stream contract in section 11. Their stdin remains closed, so foreground
-terminal programs and Ctrl+C job-tree delivery remain H4 rather than being
-claimed by this REPL checkpoint. The `human-shell` feature is enabled for the
-normal binary and can be disabled for a minimal machine-only build. Broader
-expansion, streaming stdio, mutations, pipelines, job control, and WSL launch
-remain for later increments.
+process boundary with exact argv/cwd/environment, and use the bounded capture
+contract in section 11. A same-line native-only pipeline connects two to 32
+fully preflighted stages with direct OS pipes and returns the final stage's
+status. A simple native command and the first pipeline stage still receive null
+stdin, so foreground terminal programs and Ctrl+C job-tree delivery remain H4
+rather than being claimed by this REPL checkpoint. The `human-shell` feature is
+enabled for the normal binary and can be disabled for a minimal machine-only
+build. Broader expansion, terminal streaming, redirections, `pipefail`, unified
+pipeline supervision, mutations, portable/WSL pipeline stages, job control, and
+WSL launch remain for later increments.
 
 ### H2: streaming execution
 
-- add generalized stdio endpoints;
-- implement OS pipes and ordered redirections;
-- supervise multi-process foreground pipelines;
-- add `pipefail` and exact status behavior.
+- generalized stdio endpoints and validated direct OS pipes are implemented;
+- native-only foreground pipeline lowering and final-stage status are
+  implemented;
+- ordered redirections and portable/WSL streaming adapters remain open;
+- unified multi-process supervision and `pipefail` remain open.
 
-Current checkpoint: the shared platform process boundary now requires explicit
-selection for every standard stream. Existing machine and H1 shell callers
-preserve their prior behavior through explicit `Null`, `Piped`, and `Inherit`
-mapping. A graph-only `Pipe(ProcessPipeId)` endpoint connects validated acyclic
-native process graphs directly through OS pipes, with consumers spawned first
-and parent copies closed before return. Two 8 MiB regressions lock
-parent-facing and child-to-child handle exposure, exact bytes, EOF closure,
-backpressure, and cross-platform completion. Pipeline syntax and plans, shell
-supervision, file redirection, descriptor ordering, and `pipefail` remain open.
+Current checkpoint: the shared platform process boundary requires explicit
+selection for every standard stream. Existing machine and single-command shell
+callers preserve their prior behavior through explicit `Null`, `Piped`, and
+`Inherit` mapping. A graph-only `Pipe(ProcessPipeId)` endpoint connects validated
+acyclic native process graphs directly through OS pipes, with consumers spawned
+first and parent copies closed before return. The shell now lowers same-line,
+two-to-32-stage native-only pipelines after complete preflight. Three 8 MiB
+regressions lock parent-facing, child-to-child, and shell-level exact bytes, EOF,
+backpressure, deterministic stderr order, and cross-platform completion. Unified
+shell supervision, portable/WSL stages, file redirection, descriptor ordering,
+and `pipefail` remain open.
 
 ### H3: mutations and command language
 
