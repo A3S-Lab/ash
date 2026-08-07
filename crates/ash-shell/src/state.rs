@@ -486,7 +486,7 @@ impl fmt::Display for StateError {
 
 impl std::error::Error for StateError {}
 
-fn validate_identifier(name: &str) -> Result<(), StateError> {
+pub(crate) fn validate_identifier(name: &str) -> Result<(), StateError> {
     let mut bytes = name.bytes();
     if !bytes
         .next()

@@ -8,6 +8,7 @@ use ash_ops::{
     SemanticServices,
 };
 
+use crate::state::validate_identifier;
 use crate::{
     CommandResolver, DiagnosticCode, ExecutionBackend, HostPlatform, NativeCommandLookup,
     PathCommandLookup, PortableCommand, ResolutionError, ResolvedCommand, ShellState, ShellStatus,
@@ -195,6 +196,12 @@ fn execute_command(
     match resolved {
         ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Cd) => {
             execute_cd(state, arguments, span, diagnostics)
+        }
+        ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Export) => {
+            execute_export(state, arguments, span, diagnostics)
+        }
+        ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Unset) => {
+            execute_unset(state, arguments, span, diagnostics)
         }
         ResolvedCommand::Portable(PortableCommand::Pwd) => {
             execute_pwd(state, arguments, span, stdout, diagnostics)
@@ -751,6 +758,86 @@ fn search_filesystem_failure(
     )
 }
 
+fn execute_export(
+    state: &mut ShellState,
+    arguments: &[OsString],
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    let (name, value) = match parse_export_assignment(arguments) {
+        Ok(assignment) => assignment,
+        Err(message) => return invalid_arguments(&message, span, diagnostics),
+    };
+    if let Err(error) = state.set_variable(name.clone(), value.clone()) {
+        return invalid_arguments(&format!("export: {error}"), span, diagnostics);
+    }
+    state.environment_mut().insert(name, value);
+    ShellStatus::success()
+}
+
+fn execute_unset(
+    state: &mut ShellState,
+    arguments: &[OsString],
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    let name = match parse_unset_name(arguments) {
+        Ok(name) => name,
+        Err(message) => return invalid_arguments(&message, span, diagnostics),
+    };
+    state.unset_variable(&name);
+    state.environment_mut().remove(&name);
+    ShellStatus::success()
+}
+
+fn parse_export_assignment(arguments: &[OsString]) -> Result<(String, OsString), String> {
+    let assignment = parse_single_state_argument(arguments, "export", "NAME=VALUE assignment")?;
+    let assignment = assignment
+        .to_str()
+        .ok_or_else(|| "export assignment must be valid UTF-8".to_owned())?;
+    let Some((name, value)) = assignment.split_once('=') else {
+        return Err("export requires a NAME=VALUE assignment".to_owned());
+    };
+    validate_identifier(name).map_err(|error| format!("export: {error}"))?;
+    Ok((name.to_owned(), OsString::from(value)))
+}
+
+fn parse_unset_name(arguments: &[OsString]) -> Result<String, String> {
+    let name = parse_single_state_argument(arguments, "unset", "name")?;
+    let name = name
+        .to_str()
+        .ok_or_else(|| "unset name must be valid UTF-8".to_owned())?;
+    validate_identifier(name).map_err(|error| format!("unset: {error}"))?;
+    Ok(name.to_owned())
+}
+
+fn parse_single_state_argument(
+    arguments: &[OsString],
+    command: &str,
+    description: &str,
+) -> Result<OsString, String> {
+    let arguments = if arguments.first().is_some_and(|argument| argument == "--") {
+        &arguments[1..]
+    } else {
+        if let Some(option) = arguments.first().filter(|argument| {
+            argument
+                .to_str()
+                .is_some_and(|argument| argument.starts_with('-') && argument != "-")
+        }) {
+            return Err(format!(
+                "{command} does not support option `{}`",
+                display_os_string(option)
+            ));
+        }
+        arguments
+    };
+    match arguments.len() {
+        0 => Err(format!("{command} requires exactly one {description}")),
+        1 => Ok(arguments[0].clone()),
+        _ => Err(format!("{command} accepts exactly one {description}")),
+    }
+}
+
 fn execute_cd(
     state: &mut ShellState,
     arguments: &[OsString],
@@ -945,6 +1032,7 @@ fn push_os_string(output: &mut Vec<u8>, value: &OsStr) {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1021,6 +1109,94 @@ mod tests {
     }
 
     #[test]
+    fn export_and_unset_persist_variable_environment_and_home_state() {
+        let directory = TestDirectory::new();
+        fs::create_dir(directory.0.join("child")).expect("create child");
+        let mut state = ShellState::new(&directory.0);
+
+        let exported = execute_source("export TOKEN='alpha beta=gamma'; export EMPTY=", &mut state);
+        assert!(exported.stdout().is_empty());
+        assert!(exported.diagnostics().is_empty());
+        assert_eq!(exported.status().code(), 0);
+        assert_eq!(
+            state.variable("TOKEN"),
+            Some(OsStr::new("alpha beta=gamma"))
+        );
+        assert_eq!(
+            state.environment().get("TOKEN"),
+            Some(OsStr::new("alpha beta=gamma"))
+        );
+        assert_eq!(state.variable("EMPTY"), Some(OsStr::new("")));
+        assert_eq!(state.environment().get("EMPTY"), Some(OsStr::new("")));
+
+        let overwritten = execute_source("export -- TOKEN=second", &mut state);
+        assert!(overwritten.diagnostics().is_empty());
+        assert_eq!(state.variable("TOKEN"), Some(OsStr::new("second")));
+        assert_eq!(state.environment().get("TOKEN"), Some(OsStr::new("second")));
+
+        let home = execute_source("export HOME=child; cd; pwd", &mut state);
+        let child = fs::canonicalize(directory.0.join("child")).expect("canonical child");
+        assert_eq!(home.stdout(), format!("{}\n", child.display()).as_bytes());
+        assert!(home.diagnostics().is_empty());
+        assert_eq!(state.cwd(), child);
+
+        let unset = execute_source("unset -- TOKEN; unset MISSING; unset HOME", &mut state);
+        assert!(unset.stdout().is_empty());
+        assert!(unset.diagnostics().is_empty());
+        assert_eq!(unset.status().code(), 0);
+        assert_eq!(state.variable("TOKEN"), None);
+        assert_eq!(state.environment().get("TOKEN"), None);
+        assert_eq!(state.variable("HOME"), None);
+        assert_eq!(state.environment().get("HOME"), None);
+    }
+
+    #[test]
+    fn export_and_unset_reject_options_arity_assignments_and_invalid_names() {
+        let mut state = ShellState::new(".");
+        let cases = [
+            (
+                "export",
+                "export requires exactly one NAME=VALUE assignment",
+            ),
+            (
+                "export A=1 B=2",
+                "export accepts exactly one NAME=VALUE assignment",
+            ),
+            ("export -p", "export does not support option `-p`"),
+            ("export TOKEN", "export requires a NAME=VALUE assignment"),
+            (
+                "export 1TOKEN=value",
+                "export: shell names must be non-empty ASCII identifiers beginning with a letter or underscore",
+            ),
+            ("unset", "unset requires exactly one name"),
+            ("unset A B", "unset accepts exactly one name"),
+            ("unset -f", "unset does not support option `-f`"),
+            (
+                "unset bad-name",
+                "unset: shell names must be non-empty ASCII identifiers beginning with a letter or underscore",
+            ),
+        ];
+
+        for (source, message) in cases {
+            let failure = execute_source(source, &mut state);
+            assert!(failure.stdout().is_empty(), "source={source}");
+            assert_eq!(
+                failure.diagnostics()[0].code(),
+                ExecutionDiagnosticCode::InvalidArguments,
+                "source={source}"
+            );
+            assert_eq!(
+                failure.diagnostics()[0].message(),
+                message,
+                "source={source}"
+            );
+            assert_eq!(failure.status().code(), 2, "source={source}");
+        }
+        assert_eq!(state.variable("TOKEN"), None);
+        assert_eq!(state.environment().get("TOKEN"), None);
+    }
+
+    #[test]
     fn parse_argument_filesystem_and_unsupported_failures_are_distinct() {
         let mut state = ShellState::new(".");
         let parse = execute_source("echo 'unterminated", &mut state);
@@ -1056,12 +1232,12 @@ mod tests {
         );
         assert_eq!(empty_home.status().code(), 1);
 
-        let unsupported = execute_source("export", &mut state);
+        let unsupported = execute_source("alias", &mut state);
         assert_eq!(
             unsupported.diagnostics()[0].code(),
             ExecutionDiagnosticCode::Unsupported
         );
-        assert_eq!(unsupported.diagnostics()[0].span(), SourceSpan::new(0, 6));
+        assert_eq!(unsupported.diagnostics()[0].span(), SourceSpan::new(0, 5));
         assert_eq!(unsupported.status().kind(), ShellStatusKind::Exited);
         assert_eq!(unsupported.status().code(), 2);
     }

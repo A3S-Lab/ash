@@ -19,10 +19,10 @@ resolution fixtures, and provider-neutral raw read/list/search semantic
 services. Existing ASH/1 adapters reuse those services while retaining permit,
 deadline, budget, projection, retention, and ASON ownership. H1 has started with
 a feature-gated `ash shell` route for inline plus bounded stdin and native
-script-file sources, with sequential `pwd`, `echo`, `cd`, and portable `ls`
-plus bounded raw-byte `cat` and text `grep` execution. Interactive input,
-external execution, expansion, pipelines, jobs, and WSL launch remain
-unimplemented.
+script-file sources, with sequential `pwd`, `echo`, `cd`, literal
+`export`/`unset`, and portable `ls` plus bounded raw-byte `cat` and text `grep`
+execution. Interactive input, external execution, expansion, pipelines, jobs,
+and WSL launch remain unimplemented.
 
 ## 1. Executive decision
 
@@ -351,7 +351,7 @@ The first portable command set reuses existing semantics where possible:
 | `grep` | search service | Bounded single-file literal and Rust-regex modes now. |
 | `cp`, `mv`, `rm`, `touch` | filesystem service | Preserve transactional conflict behavior. |
 | `mkdir`, `rmdir` | future directory service | Requires explicit recovery and capability design. |
-| `env`, `export`, `unset` | shell state | Host-aware environment names. |
+| `env`, `export`, `unset` | shell state | Literal single-name `export`/`unset` now; listing later. |
 
 The current executable `ls` contract accepts at most one native path and uses
 `.` by default. A directory lists only its immediate children; a file lists
@@ -381,6 +381,15 @@ MiB. No matches return status 1 without a diagnostic. Invalid regular
 expressions and argument errors return status 2; missing files, directories,
 non-UTF-8 input, and work-limit failures return status 1. Recursive search,
 multiple files, filename prefixes, stdin `-`, and streaming remain later work.
+
+The current stateful environment contract accepts exactly one literal
+`NAME=VALUE` assignment for `export` and exactly one `NAME` for `unset`. Both
+accept `--`. Names are non-empty ASCII identifiers beginning with a letter or
+underscore; `export` splits only the first `=`, preserves an empty value, and
+updates both shell-variable and exported environment state. `unset` removes
+both states and succeeds when the name is absent. Neither command emits output.
+Listing, export-without-assignment, multiple names, options, and parameter
+expansion remain unimplemented and fail explicitly where applicable.
 
 Every portable command has a versioned option contract. Common Linux spelling
 is preferred, but unsupported GNU flags fail clearly. The project must not
@@ -681,15 +690,16 @@ builtin adapters.
 
 Current checkpoint: `ash shell -c SOURCE`, `ash shell < script.ash`, and
 `ash shell script.ash` parse the H0 syntax subset, execute sequential `pwd`,
-`echo`, `cd`, portable `ls`, bounded raw-byte `cat`, and bounded text `grep`
-commands against one native `ShellState`, emit source-spanned human diagnostics,
-and return the last command status. Stdin and file sources share a 1 MiB
-valid-UTF-8 ceiling, while file operands retain native path representation.
-`ls`, `cat`, and `grep` reuse the provider-neutral list/read/search services with
-an unconfined native provider and the option contracts in section 10. The
-`human-shell` feature is enabled for the normal binary and can be disabled for a
-minimal machine-only build. Interactive input, profiles, and native process
-launch remain for later H1 increments.
+`echo`, `cd`, literal `export`/`unset`, portable `ls`, bounded raw-byte `cat`, and
+bounded text `grep` commands against one native `ShellState`, emit source-spanned
+human diagnostics, and return the last command status. Stdin and file sources
+share a 1 MiB valid-UTF-8 ceiling, while file operands retain native path
+representation. `ls`, `cat`, and `grep` reuse the provider-neutral
+list/read/search services with an unconfined native provider and the option
+contracts in section 10. The `human-shell` feature is enabled for the normal
+binary and can be disabled for a minimal machine-only build. Interactive input,
+profiles, native process launch, and parameter expansion remain for later H1
+increments.
 
 ### H2: streaming execution
 

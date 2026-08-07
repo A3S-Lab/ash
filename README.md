@@ -26,9 +26,9 @@ becomes part of the contract.
 
 The optional human frontend has entered H1 with a feature-gated,
 non-interactive `ash shell` route. It currently executes sequential `pwd`,
-`echo`, `cd`, and portable `ls`, `cat`, and `grep` commands from `-c SOURCE`, a
-native script-file path, or bounded stdin while preserving the machine
-contracts of `ash run` and `ash rpc`.
+`echo`, `cd`, `export`, `unset`, and portable `ls`, `cat`, and `grep` commands
+from `-c SOURCE`, a native script-file path, or bounded stdin while preserving
+the machine contracts of `ash run` and `ash rpc`.
 
 ## What ash covers
 
@@ -42,7 +42,7 @@ contracts of `ash run` and `ash rpc`.
 | Retained evidence    | `/ # ? - \| >`                        | Byte and line slices, search, release, ordered table projection, and capability-gated materialization                                                                  |
 | Model context        | ASON, `×N`, `×N#K`, `⋯N`              | Columnar records, path dictionaries, explicit reductions, stable merge, and references back to the full source                                                         |
 | Trust and delivery   | capabilities, permits, signed updates | Least-privilege negotiation, session/action/policy/expiry-bound one-time permits, replay rejection, transactional activation, recovery, rollback, SBOM, and provenance |
-| Human shell          | `ash shell`                           | Source-spanned parsing, native persistent state, human diagnostics, and sequential `pwd`, `echo`, `cd`, `ls`, raw-byte `cat`, and text `grep` in H1            |
+| Human shell          | `ash shell`                           | Source-spanned parsing, persistent cwd/environment, human diagnostics, and `pwd`, `echo`, `cd`, `export`, `unset`, `ls`, `cat`, and `grep` in H1              |
 
 The [complete capability map](https://a3s-lab.github.io/ash/guide/capabilities.html)
 documents guarantees, evidence, and deliberate non-goals for the full surface.
@@ -97,6 +97,12 @@ expressions by default. It supports `-E`/`--extended-regexp`,
 short options, and `--`. A search is limited to 64 MiB; no matches return status
 1 without a diagnostic. Directories, multiple files, stdin `-`, and unsupported
 options fail explicitly.
+
+`export NAME=VALUE` and `unset NAME` update both shell-variable and exported
+environment state for later commands. Each accepts one literal assignment or
+name plus `--`; names are ASCII shell identifiers, empty values are preserved,
+and unsetting a missing name succeeds. Listing, multiple names, and parameter
+expansion remain explicit non-features in this checkpoint.
 
 Interactive prompts, profiles, and external processes are not implemented yet.
 A minimal machine-only binary can be built with `--no-default-features`.
@@ -158,7 +164,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **242 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **244 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, and signed updates.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB
   retained capture crossing the 4 MiB memory ceiling and fetching only its final
