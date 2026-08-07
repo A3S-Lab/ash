@@ -10,6 +10,7 @@ use ash_store::{PathDictionaryError, StoreError};
 use thiserror::Error;
 
 use crate::authorization::AuthorizationError;
+use crate::semantic::SemanticError;
 
 #[derive(Debug, Error)]
 pub enum OperationError {
@@ -53,6 +54,18 @@ pub enum OperationError {
     WrongFileType,
     #[error("immediate response cannot fit the negotiated output budget")]
     OutputBudget,
+}
+
+impl From<SemanticError> for OperationError {
+    fn from(error: SemanticError) -> Self {
+        match error {
+            SemanticError::Platform(error) => Self::Platform(error),
+            SemanticError::Parallelism(error) => Self::Parallelism(error),
+            SemanticError::Regex(error) => Self::Regex(error),
+            SemanticError::Cancelled => Self::Cancelled,
+            SemanticError::WorkLimit => Self::WorkLimit,
+        }
+    }
 }
 
 impl OperationError {

@@ -1,6 +1,6 @@
 # Portable Human Shell Architecture
 
-- Status: accepted; H0 in progress
+- Status: accepted; H0 complete
 - Target: post-ASH/1 version one
 - Last updated: 2026-08-07
 
@@ -12,11 +12,13 @@ agent-first, typed execution boundary. The human shell is a separate frontend
 that reuses the portable execution and filesystem foundations without
 weakening their machine-facing semantics.
 
-The current source checkpoint has added the independent `a3s-ash-shell` crate
-with a source-spanned H0 simple-command parser, AST, diagnostics, persistent
-state types, deterministic command classification, and locked parser and
-resolution fixtures. Reusable raw semantic services, the `ash shell` CLI route,
-command execution, expansion, pipelines, jobs, and WSL launch remain
+The current source checkpoint has completed H0 with the independent
+`a3s-ash-shell` crate, a source-spanned simple-command parser, AST, diagnostics,
+persistent state types, deterministic command classification, locked parser and
+resolution fixtures, and provider-neutral raw read/list/search semantic
+services. Existing ASH/1 adapters reuse those services while retaining permit,
+deadline, budget, projection, retention, and ASON ownership. The `ash shell` CLI
+route, command execution, expansion, pipelines, jobs, and WSL launch remain
 unimplemented.
 
 ## 1. Executive decision
@@ -631,10 +633,11 @@ than executing a partial remainder silently.
 - refactor reusable semantic services without changing ASH/1 output;
 - lock initial parser and command-resolution fixtures.
 
-Current checkpoint: the decision, crate boundary, parser/AST/diagnostics,
-`ShellState`, deterministic command classification, and initial fixtures are
-implemented. The reusable semantic-service refactor remains before H0 is
-complete.
+Current checkpoint: every H0 item is implemented. Semantic paths use
+provider-owned `PathBuf` values plus collision-free stable ordering keys, and
+byte-exact regression fixtures prove that the ASH/1 read/list/search responses
+remain unchanged. H1 begins with the non-interactive CLI route and portable
+builtin adapters.
 
 ### H1: native non-interactive shell
 

@@ -14,6 +14,7 @@ mod read;
 mod reducer;
 mod reference;
 mod search;
+pub mod semantic;
 mod snapshot;
 
 use ash_engine::Program;
@@ -28,11 +29,18 @@ pub use reducer::{
     ErrorFocusedReduction, RepeatedBlockReduction, RepeatedLineReduction, collapse_repeated_blocks,
     collapse_repeated_lines, focus_error_output,
 };
+pub use semantic::{
+    ListQuery, ReadQuery, SearchQuery, SemanticEntry, SemanticEntryKind, SemanticError,
+    SemanticFileSystem, SemanticListFilter, SemanticListResult, SemanticPath, SemanticRead,
+    SemanticReadMode, SemanticReadResult, SemanticSearchMatch, SemanticSearchPattern,
+    SemanticSearchResult, SemanticServices, SemanticWalkOptions,
+};
 
 /// Portable operations bound to one native workspace capability.
 #[derive(Clone, Debug)]
 pub struct PortableOperations {
     workspace: Workspace,
+    semantic_services: SemanticServices<Workspace>,
     authorization: AuthorizationPolicy,
 }
 
@@ -43,6 +51,7 @@ impl PortableOperations {
     #[must_use]
     pub fn new(workspace: Workspace) -> Self {
         Self {
+            semantic_services: SemanticServices::new(workspace.clone()),
             workspace,
             authorization: AuthorizationPolicy::default(),
         }
@@ -56,9 +65,16 @@ impl PortableOperations {
     #[must_use]
     pub fn with_authorization(workspace: Workspace, authorization: AuthorizationPolicy) -> Self {
         Self {
+            semantic_services: SemanticServices::new(workspace.clone()),
             workspace,
             authorization,
         }
+    }
+
+    /// Returns the raw semantic services used by the ASH/1 adapters.
+    #[must_use]
+    pub const fn semantic_services(&self) -> &SemanticServices<Workspace> {
+        &self.semantic_services
     }
 
     #[must_use]
@@ -104,13 +120,13 @@ impl PortableOperations {
                 exec::execute(&self.workspace, request, arguments, program).await
             }
             Arguments::Read(arguments) => {
-                read::execute(&self.workspace, request, arguments, program).await
+                read::execute(&self.semantic_services, request, arguments, program).await
             }
             Arguments::List(arguments) => {
-                list::execute(&self.workspace, request, arguments, program).await
+                list::execute(&self.semantic_services, request, arguments, program).await
             }
             Arguments::Search(arguments) => {
-                search::execute(&self.workspace, request, arguments, program).await
+                search::execute(&self.semantic_services, request, arguments, program).await
             }
             Arguments::Patch(arguments) => {
                 patch::execute(&self.workspace, request, arguments, program).await
