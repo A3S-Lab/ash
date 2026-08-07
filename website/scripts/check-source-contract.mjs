@@ -179,7 +179,7 @@ for (const command of [unixCommand, windowsCommand, cargoCommand]) {
   requireIncludes(switcher, command, 'Homepage install switcher');
 }
 
-requireIncludes(home, "metricTestsValue: '293'", 'Homepage evidence');
+requireIncludes(home, "metricTestsValue: '294'", 'Homepage evidence');
 requireIncludes(
   home,
   `metricTokenValue: '${report.gates.ason_vs_record_json_cl100k_percent}%'`,
@@ -229,7 +229,7 @@ for (const document of [capabilitiesZh, capabilitiesEn]) {
   for (const operation of operationIds) {
     requireIncludes(document, operation, 'Complete capability documentation');
   }
-  for (const marker of ['4 MiB', '30', '12', '293', '22', '1,024']) {
+  for (const marker of ['4 MiB', '30', '12', '294', '22', '1,024']) {
     requireIncludes(document, marker, 'Capability evidence documentation');
   }
 }

@@ -85,8 +85,8 @@ unsuccessful native, portable, or stateful stage and `set +o pipefail` restores
 the default. Stateful stages run concurrently on independent state clones,
 close non-consumed input and empty output ends, cannot mutate the parent shell,
 and let pipeline `exit` contribute a status without stopping the parent source.
-Native and portable commands also accept source-spanned `<`, `>`, `>>`, `2>`,
-`2>>`, `2>&1`, and `1>&2`.
+Native and portable commands plus implemented stateful builtins also accept
+source-spanned `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
 Targets expand to exactly one field, relative paths resolve from persistent cwd,
 descriptor assignments apply left to right, and files attach directly to child
 handles or explicitly retained asynchronous parent-task handles. One complete
@@ -102,11 +102,15 @@ closed, or parent-owned and returns only explicitly declared readers and
 writers. A fourth entry also returns source-ordered parent files for portable
 simple commands and stages. Portable stdin and stdout may replace a pipeline
 endpoint without a relay buffer; `cat -` and `grep PATTERN -` consume redirected
-input directly. Parent-facing, child-to-child, native, mixed, portable-only,
+input directly. Stateful simple-command files open before parent mutation, and
+stateful stage files join the same global order while redirected empty stdout
+closes downstream normally. Their source-spanned failures remain shell
+diagnostics rather than raw command stderr. Parent-facing, child-to-child,
+native, mixed, portable-only,
 stateful, closed-reader, and ordered-redirection regressions lock backpressure,
 exact bytes, EOF, handle closure, cloned-state isolation, descriptor sharing,
 and global file-open order. Unified job supervision, visible terminal streaming,
-WSL pipeline adapters, stateful/WSL redirection adapters, broader expansion,
+WSL pipeline and redirection adapters, broader expansion,
 foreground interactive programs and jobs, mutations, and WSL execution remain
 staged work.
 

@@ -144,12 +144,14 @@ struct ExecutionOutput {
 /// Stateful stages execute against isolated state clones. Pipeline status
 /// defaults to the final stage and can select the rightmost failure through
 /// persistent `pipefail`; final stdout and every stage's stderr share the
-/// synchronous capture ceiling. Native and portable commands accept
+/// synchronous capture ceiling. Native and portable commands plus implemented
+/// stateful builtins accept
 /// source-ordered `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`
 /// redirections resolved against the persistent shell working directory;
-/// child and parent-task files open in one global order, and replacing internal
-/// pipeline endpoints preserves EOF and broken-pipe behavior. Unresolved
-/// backends produce explicit diagnostics without invoking a host shell.
+/// child and parent-task files open in one global order, stateful simple-command
+/// files open before parent mutation, and replacing internal pipeline endpoints
+/// preserves EOF and broken-pipe behavior. Unresolved backends produce explicit
+/// diagnostics without invoking a host shell.
 #[must_use]
 pub async fn execute_source(source: &str, state: &mut ShellState) -> ShellExecution {
     execute_source_with(source, state, &PathCommandLookup, HostPlatform::current()).await
@@ -326,9 +328,15 @@ where
             &resolved,
             ResolvedCommand::Native { .. } | ResolvedCommand::Portable(_)
         )
+        && !matches!(
+            &resolved,
+            ResolvedCommand::StatefulBuiltin(command)
+                if stateful_builtin_is_implemented(*command)
+        )
     {
         return unsupported(
-            "redirections currently require a native or portable command".to_owned(),
+            "redirections currently require a native, portable, or implemented stateful command"
+                .to_owned(),
             span,
             &mut output.diagnostics,
             ShellStatusKind::Exited,
@@ -336,20 +344,19 @@ where
         );
     }
     match resolved {
-        ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Cd) => {
-            execute_cd(state, arguments, span, &mut output.diagnostics)
-        }
-        ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Export) => {
-            execute_export(state, arguments, span, &mut output.diagnostics)
-        }
-        ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Unset) => {
-            execute_unset(state, arguments, span, &mut output.diagnostics)
-        }
-        ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Set) => {
-            execute_set(state, arguments, span, &mut output.diagnostics)
-        }
-        ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Exit) => {
-            let (status, requested) = execute_exit(state, arguments, span, &mut output.diagnostics);
+        ResolvedCommand::StatefulBuiltin(command) if stateful_builtin_is_implemented(command) => {
+            let (status, requested) = if redirections.is_empty() {
+                execute_stateful_builtin(state, command, arguments, span, &mut output.diagnostics)
+            } else {
+                execute_stateful_redirected(
+                    state,
+                    command,
+                    arguments,
+                    redirections,
+                    span,
+                    &mut output.diagnostics,
+                )
+            };
             *exit_requested = requested;
             status
         }
@@ -503,7 +510,8 @@ struct StatefulPipelineInvocation {
     arguments: Vec<OsString>,
     state: ShellState,
     span: SourceSpan,
-    stdout_pipe: ProcessPipeId,
+    files: Vec<ParentProcessFile>,
+    stdout: ParentTaskStdio,
 }
 
 enum InProcessPipelineInvocation {
@@ -696,7 +704,15 @@ async fn run_pipeline(
                 );
                 parent_files.extend(stage.files.iter().cloned());
             }
-            PipelineStageInvocation::Stateful(_) => {}
+            PipelineStageInvocation::Stateful(stage) => {
+                file_order.extend(
+                    stage
+                        .files
+                        .iter()
+                        .map(|endpoint| ProcessGraphFile::Parent(endpoint.id)),
+                );
+                parent_files.extend(stage.files.iter().cloned());
+            }
         }
     }
 
@@ -739,13 +755,11 @@ async fn run_pipeline(
                 )
             }
             PipelineStageInvocation::Stateful(invocation) => {
-                let output = graph
-                    .take_pipe_writer(invocation.stdout_pipe)
-                    .ok_or(NativeCommandError::MissingStream("stateful stage stdout"))?;
+                let output = take_parent_task_writer(&mut graph, invocation.stdout)?;
                 (
                     InProcessPipelineInvocation::Stateful(invocation),
                     None,
-                    Box::new(output) as PortablePipelineWriter,
+                    output,
                 )
             }
         };
@@ -899,47 +913,13 @@ fn execute_stateful_pipeline_stage(
 ) -> PipelineStageOutput {
     let mut state = invocation.state;
     let mut diagnostics = Vec::new();
-    let status = match invocation.command {
-        StatefulBuiltin::Cd => execute_cd(
-            &mut state,
-            &invocation.arguments,
-            invocation.span,
-            &mut diagnostics,
-        ),
-        StatefulBuiltin::Export => execute_export(
-            &mut state,
-            &invocation.arguments,
-            invocation.span,
-            &mut diagnostics,
-        ),
-        StatefulBuiltin::Unset => execute_unset(
-            &mut state,
-            &invocation.arguments,
-            invocation.span,
-            &mut diagnostics,
-        ),
-        StatefulBuiltin::Set => execute_set(
-            &mut state,
-            &invocation.arguments,
-            invocation.span,
-            &mut diagnostics,
-        ),
-        StatefulBuiltin::Exit => {
-            execute_exit(
-                &state,
-                &invocation.arguments,
-                invocation.span,
-                &mut diagnostics,
-            )
-            .0
-        }
-        StatefulBuiltin::Alias
-        | StatefulBuiltin::Jobs
-        | StatefulBuiltin::Foreground
-        | StatefulBuiltin::Background => {
-            unreachable!("unsupported stateful pipeline commands are rejected during preflight")
-        }
-    };
+    let (status, _) = execute_stateful_builtin(
+        &mut state,
+        invocation.command,
+        &invocation.arguments,
+        invocation.span,
+        &mut diagnostics,
+    );
     drop(output);
     pipeline_stage_output(stage_index, status, diagnostics)
 }
@@ -1435,11 +1415,17 @@ where
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PortableRedirectionEndpoint {
+enum ParentTaskRedirectionEndpoint {
     Null,
     Pipe(ProcessPipeId),
     File(ParentProcessFileId),
     Capture(PipelineCaptureStream),
+}
+
+struct ParentTaskRedirectionPlan {
+    files: Vec<ParentProcessFile>,
+    stdin: ParentTaskRedirectionEndpoint,
+    stdout: ParentTaskRedirectionEndpoint,
 }
 
 fn allocate_parent_capture(
@@ -1463,18 +1449,18 @@ fn allocate_parent_capture(
     pipe
 }
 
-fn materialize_portable_endpoint(
-    endpoint: PortableRedirectionEndpoint,
+fn materialize_parent_task_endpoint(
+    endpoint: ParentTaskRedirectionEndpoint,
     stage_index: usize,
     next_pipe_id: &mut u32,
     parent_pipe_ends: &mut Vec<ParentProcessPipeEnd>,
     parent_captures: &mut Vec<ParentPipelineCapture>,
 ) -> ParentTaskStdio {
     match endpoint {
-        PortableRedirectionEndpoint::Null => ParentTaskStdio::Null,
-        PortableRedirectionEndpoint::Pipe(id) => ParentTaskStdio::Pipe(id),
-        PortableRedirectionEndpoint::File(id) => ParentTaskStdio::File(id),
-        PortableRedirectionEndpoint::Capture(stream) => {
+        ParentTaskRedirectionEndpoint::Null => ParentTaskStdio::Null,
+        ParentTaskRedirectionEndpoint::Pipe(id) => ParentTaskStdio::Pipe(id),
+        ParentTaskRedirectionEndpoint::File(id) => ParentTaskStdio::File(id),
+        ParentTaskRedirectionEndpoint::Capture(stream) => {
             ParentTaskStdio::Pipe(allocate_parent_capture(
                 stage_index,
                 stream,
@@ -1486,23 +1472,14 @@ fn materialize_portable_endpoint(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn portable_pipeline_invocation(
+fn plan_parent_task_redirections(
     state: &ShellState,
-    command: PortableCommand,
-    arguments: Vec<OsString>,
     redirections: &[Redirection],
-    span: SourceSpan,
-    stage_index: usize,
-    reads_stdin: bool,
-    mut stdin: PortableRedirectionEndpoint,
-    mut stdout: PortableRedirectionEndpoint,
-    next_pipe_id: &mut u32,
+    mut stdin: ParentTaskRedirectionEndpoint,
+    mut stdout: ParentTaskRedirectionEndpoint,
+    mut stderr: ParentTaskRedirectionEndpoint,
     next_parent_file_id: &mut u32,
-    parent_pipe_ends: &mut Vec<ParentProcessPipeEnd>,
-    parent_captures: &mut Vec<ParentPipelineCapture>,
-) -> Result<PortablePipelineInvocation, RedirectionPlanError> {
-    let mut stderr = PortableRedirectionEndpoint::Capture(PipelineCaptureStream::Stderr);
+) -> Result<ParentTaskRedirectionPlan, RedirectionPlanError> {
     let mut files = Vec::with_capacity(redirections.len());
     for redirection in redirections {
         let endpoint = match redirection.target() {
@@ -1551,7 +1528,7 @@ fn portable_pipeline_invocation(
                         RedirectionFileMode::Append => NativeProcessFileMode::Append,
                     },
                 });
-                PortableRedirectionEndpoint::File(id)
+                ParentTaskRedirectionEndpoint::File(id)
             }
             RedirectionTarget::Descriptor(source) => match source {
                 RedirectionDescriptor::Stdin => stdin,
@@ -1566,12 +1543,44 @@ fn portable_pipeline_invocation(
         }
     }
 
+    Ok(ParentTaskRedirectionPlan {
+        files,
+        stdin,
+        stdout,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn portable_pipeline_invocation(
+    state: &ShellState,
+    command: PortableCommand,
+    arguments: Vec<OsString>,
+    redirections: &[Redirection],
+    span: SourceSpan,
+    stage_index: usize,
+    reads_stdin: bool,
+    stdin: ParentTaskRedirectionEndpoint,
+    stdout: ParentTaskRedirectionEndpoint,
+    next_pipe_id: &mut u32,
+    next_parent_file_id: &mut u32,
+    parent_pipe_ends: &mut Vec<ParentProcessPipeEnd>,
+    parent_captures: &mut Vec<ParentPipelineCapture>,
+) -> Result<PortablePipelineInvocation, RedirectionPlanError> {
+    let plan = plan_parent_task_redirections(
+        state,
+        redirections,
+        stdin,
+        stdout,
+        ParentTaskRedirectionEndpoint::Capture(PipelineCaptureStream::Stderr),
+        next_parent_file_id,
+    )?;
+
     let stdin = if reads_stdin {
-        match stdin {
-            PortableRedirectionEndpoint::Null => ParentTaskStdio::Null,
-            PortableRedirectionEndpoint::Pipe(id) => ParentTaskStdio::Pipe(id),
-            PortableRedirectionEndpoint::File(id) => ParentTaskStdio::File(id),
-            PortableRedirectionEndpoint::Capture(_) => {
+        match plan.stdin {
+            ParentTaskRedirectionEndpoint::Null => ParentTaskStdio::Null,
+            ParentTaskRedirectionEndpoint::Pipe(id) => ParentTaskStdio::Pipe(id),
+            ParentTaskRedirectionEndpoint::File(id) => ParentTaskStdio::File(id),
+            ParentTaskRedirectionEndpoint::Capture(_) => {
                 return Err(RedirectionPlanError {
                     message: "portable stdin cannot use an output capture".to_owned(),
                     span,
@@ -1581,8 +1590,8 @@ fn portable_pipeline_invocation(
     } else {
         ParentTaskStdio::Null
     };
-    let stdout = materialize_portable_endpoint(
-        stdout,
+    let stdout = materialize_parent_task_endpoint(
+        plan.stdout,
         stage_index,
         next_pipe_id,
         parent_pipe_ends,
@@ -1593,9 +1602,47 @@ fn portable_pipeline_invocation(
         arguments,
         state: state.clone(),
         span,
-        files,
+        files: plan.files,
         stdin,
         stdout,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stateful_pipeline_invocation(
+    state: &ShellState,
+    command: StatefulBuiltin,
+    arguments: Vec<OsString>,
+    redirections: &[Redirection],
+    span: SourceSpan,
+    stage_index: usize,
+    stdout: ParentTaskRedirectionEndpoint,
+    next_pipe_id: &mut u32,
+    next_parent_file_id: &mut u32,
+    parent_pipe_ends: &mut Vec<ParentProcessPipeEnd>,
+    parent_captures: &mut Vec<ParentPipelineCapture>,
+) -> Result<StatefulPipelineInvocation, RedirectionPlanError> {
+    let plan = plan_parent_task_redirections(
+        state,
+        redirections,
+        ParentTaskRedirectionEndpoint::Null,
+        stdout,
+        ParentTaskRedirectionEndpoint::Capture(PipelineCaptureStream::Stderr),
+        next_parent_file_id,
+    )?;
+    Ok(StatefulPipelineInvocation {
+        command,
+        arguments,
+        state: state.clone(),
+        span,
+        files: plan.files,
+        stdout: materialize_parent_task_endpoint(
+            plan.stdout,
+            stage_index,
+            next_pipe_id,
+            parent_pipe_ends,
+            parent_captures,
+        ),
     })
 }
 
@@ -1696,43 +1743,44 @@ where
                 }
             }
             Ok(ResolvedCommand::StatefulBuiltin(builtin))
-                if stateful_pipeline_builtin_is_implemented(builtin) =>
+                if stateful_builtin_is_implemented(builtin) =>
             {
-                if !command.redirections().is_empty() {
-                    return unsupported(
-                        "redirections currently require a native or portable command".to_owned(),
-                        command.span(),
-                        &mut output.diagnostics,
-                        ShellStatusKind::Exited,
-                        2,
-                    );
-                }
                 let arguments = words[1..].to_vec();
                 if let Err(error) = validate_stateful_pipeline_arguments(builtin, &arguments, state)
                 {
                     return invalid_arguments(&error, command.span(), &mut output.diagnostics);
                 }
-                stages.push(PipelineStageInvocation::Stateful(
-                    StatefulPipelineInvocation {
-                        command: builtin,
-                        arguments,
-                        state: state.clone(),
-                        span: command.span(),
-                        stdout_pipe: if index + 1 == commands.len() {
-                            allocate_parent_capture(
-                                index,
-                                PipelineCaptureStream::Stdout,
-                                &mut next_pipe_id,
-                                &mut parent_pipe_ends,
-                                &mut parent_captures,
-                            )
-                        } else {
-                            ProcessPipeId::new(
-                                u32::try_from(index).expect("pipeline stage ceiling fits u32"),
-                            )
-                        },
-                    },
-                ));
+                let stdout = if index + 1 == commands.len() {
+                    ParentTaskRedirectionEndpoint::Capture(PipelineCaptureStream::Stdout)
+                } else {
+                    ParentTaskRedirectionEndpoint::Pipe(ProcessPipeId::new(
+                        u32::try_from(index).expect("pipeline stage ceiling fits u32"),
+                    ))
+                };
+                match stateful_pipeline_invocation(
+                    state,
+                    builtin,
+                    arguments,
+                    command.redirections(),
+                    command.span(),
+                    index,
+                    stdout,
+                    &mut next_pipe_id,
+                    &mut next_parent_file_id,
+                    &mut parent_pipe_ends,
+                    &mut parent_captures,
+                ) {
+                    Ok(invocation) => {
+                        stages.push(PipelineStageInvocation::Stateful(invocation));
+                    }
+                    Err(error) => {
+                        return redirection_failure(
+                            error.message,
+                            error.span,
+                            &mut output.diagnostics,
+                        );
+                    }
+                }
             }
             Ok(ResolvedCommand::StatefulBuiltin(builtin)) => {
                 return unsupported_pipeline_stage(
@@ -1750,16 +1798,16 @@ where
                     }
                 };
                 let stdin = if index == 0 {
-                    PortableRedirectionEndpoint::Null
+                    ParentTaskRedirectionEndpoint::Null
                 } else {
-                    PortableRedirectionEndpoint::Pipe(ProcessPipeId::new(
+                    ParentTaskRedirectionEndpoint::Pipe(ProcessPipeId::new(
                         u32::try_from(index - 1).expect("pipeline stage ceiling fits u32"),
                     ))
                 };
                 let stdout = if index + 1 == commands.len() {
-                    PortableRedirectionEndpoint::Capture(PipelineCaptureStream::Stdout)
+                    ParentTaskRedirectionEndpoint::Capture(PipelineCaptureStream::Stdout)
                 } else {
-                    PortableRedirectionEndpoint::Pipe(ProcessPipeId::new(
+                    ParentTaskRedirectionEndpoint::Pipe(ProcessPipeId::new(
                         u32::try_from(index).expect("pipeline stage ceiling fits u32"),
                     ))
                 };
@@ -1826,8 +1874,11 @@ where
                 }
             }
             PipelineStageInvocation::Stateful(stage) => {
-                debug_assert_eq!(stage.stdout_pipe, pipe_id);
-                parent_pipe_ends.push(ParentProcessPipeEnd::Writer(pipe_id));
+                if stage.stdout == ParentTaskStdio::Pipe(pipe_id) {
+                    parent_pipe_ends.push(ParentProcessPipeEnd::Writer(pipe_id));
+                } else {
+                    closed_pipe_ends.push(ClosedProcessPipeEnd::Writer(pipe_id));
+                }
             }
         }
         match &stages[index + 1] {
@@ -1906,6 +1957,55 @@ where
     }
 }
 
+fn execute_stateful_redirected(
+    state: &mut ShellState,
+    command: StatefulBuiltin,
+    arguments: &[OsString],
+    redirections: &[Redirection],
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> (ShellStatus, Option<i64>) {
+    if let Err(error) = validate_stateful_pipeline_arguments(command, arguments, state) {
+        return (invalid_arguments(&error, span, diagnostics), None);
+    }
+    let mut next_parent_file_id = 0_u32;
+    let plan = match plan_parent_task_redirections(
+        state,
+        redirections,
+        ParentTaskRedirectionEndpoint::Null,
+        ParentTaskRedirectionEndpoint::Null,
+        ParentTaskRedirectionEndpoint::Null,
+        &mut next_parent_file_id,
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return (
+                redirection_failure(error.message, error.span, diagnostics),
+                None,
+            );
+        }
+    };
+    let file_order = plan
+        .files
+        .iter()
+        .map(|endpoint| ProcessGraphFile::Parent(endpoint.id))
+        .collect::<Vec<_>>();
+    match spawn_native_graph_with_parent_io(&[], &[], &[], &plan.files, &file_order) {
+        Ok(graph) => drop(graph),
+        Err(error) => {
+            return (
+                redirection_failure(
+                    format!("cannot apply stateful redirection: {error}"),
+                    span,
+                    diagnostics,
+                ),
+                None,
+            );
+        }
+    }
+    execute_stateful_builtin(state, command, arguments, span, diagnostics)
+}
+
 async fn execute_portable_redirected<R>(
     state: &ShellState,
     command: PortableCommand,
@@ -1934,8 +2034,8 @@ where
         span,
         0,
         reads_stdin,
-        PortableRedirectionEndpoint::Null,
-        PortableRedirectionEndpoint::Capture(PipelineCaptureStream::Stdout),
+        ParentTaskRedirectionEndpoint::Null,
+        ParentTaskRedirectionEndpoint::Capture(PipelineCaptureStream::Stdout),
         &mut next_pipe_id,
         &mut next_parent_file_id,
         &mut parent_pipe_ends,
@@ -2211,7 +2311,7 @@ fn select_pipeline_exit(exits: &[ProcessExit], pipefail: bool) -> Option<Process
     }
 }
 
-const fn stateful_pipeline_builtin_is_implemented(command: StatefulBuiltin) -> bool {
+const fn stateful_builtin_is_implemented(command: StatefulBuiltin) -> bool {
     matches!(
         command,
         StatefulBuiltin::Cd
@@ -2220,6 +2320,29 @@ const fn stateful_pipeline_builtin_is_implemented(command: StatefulBuiltin) -> b
             | StatefulBuiltin::Set
             | StatefulBuiltin::Exit
     )
+}
+
+fn execute_stateful_builtin(
+    state: &mut ShellState,
+    command: StatefulBuiltin,
+    arguments: &[OsString],
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> (ShellStatus, Option<i64>) {
+    let status = match command {
+        StatefulBuiltin::Cd => execute_cd(state, arguments, span, diagnostics),
+        StatefulBuiltin::Export => execute_export(state, arguments, span, diagnostics),
+        StatefulBuiltin::Unset => execute_unset(state, arguments, span, diagnostics),
+        StatefulBuiltin::Set => execute_set(state, arguments, span, diagnostics),
+        StatefulBuiltin::Exit => return execute_exit(state, arguments, span, diagnostics),
+        StatefulBuiltin::Alias
+        | StatefulBuiltin::Jobs
+        | StatefulBuiltin::Foreground
+        | StatefulBuiltin::Background => {
+            unreachable!("unsupported stateful commands are rejected before execution")
+        }
+    };
+    (status, None)
 }
 
 fn validate_stateful_pipeline_arguments(
@@ -3830,17 +3953,6 @@ fn main() {
                 .is_empty()
         );
 
-        let initial_cwd = state.cwd().to_owned();
-        let builtin = execute_source("cd nowhere >builtin.log", &mut state).await;
-        assert_eq!(builtin.status().code(), 2);
-        assert_eq!(builtin.diagnostics().len(), 1);
-        assert_eq!(
-            builtin.diagnostics()[0].code(),
-            ExecutionDiagnosticCode::Unsupported
-        );
-        assert_eq!(state.cwd(), initial_cwd);
-        assert!(!directory.0.join("builtin.log").exists());
-
         state
             .set_variable("REDIRECT", "one two")
             .expect("redirection variable");
@@ -3868,6 +3980,111 @@ fn main() {
             ExecutionDiagnosticCode::Redirection
         );
         assert!(missing.diagnostics()[0].message().contains("missing.bin"));
+    }
+
+    #[tokio::test]
+    async fn stateful_redirections_open_before_parent_mutation_and_keep_shell_diagnostics() {
+        let directory = TestDirectory::new();
+        fs::create_dir(directory.0.join("child")).expect("create child directory");
+        fs::write(directory.0.join("first.log"), b"stale").expect("seed first target");
+        fs::write(directory.0.join("append.log"), b"preserved").expect("seed append target");
+        fs::write(directory.0.join("stateful-input"), b"ignored").expect("seed stateful input");
+        let mut state = ShellState::new(&directory.0);
+
+        let sequential = execute_source(
+            "export STATEFUL=value <stateful-input >first.log >export.log; \
+             set -o pipefail >>append.log; \
+             cd child >before-cd.log; pwd",
+            &mut state,
+        )
+        .await;
+
+        let child = fs::canonicalize(directory.0.join("child")).expect("canonical child");
+        assert_eq!(
+            sequential.stdout(),
+            format!("{}\n", child.display()).as_bytes()
+        );
+        assert!(sequential.stderr().is_empty());
+        assert!(sequential.diagnostics().is_empty());
+        assert_eq!(state.cwd(), child);
+        assert_eq!(
+            state.environment().get("STATEFUL"),
+            Some(OsStr::new("value"))
+        );
+        assert!(state.options().pipefail());
+        assert!(
+            fs::read(directory.0.join("first.log"))
+                .expect("superseded stateful target")
+                .is_empty()
+        );
+        assert!(
+            fs::read(directory.0.join("export.log"))
+                .expect("final stateful target")
+                .is_empty()
+        );
+        assert_eq!(
+            fs::read(directory.0.join("append.log")).expect("stateful append target"),
+            b"preserved"
+        );
+        assert!(
+            fs::read(directory.0.join("before-cd.log"))
+                .expect("pre-cd target")
+                .is_empty(),
+            "the redirection path must resolve before cd changes cwd"
+        );
+
+        let failed_cd = execute_source("cd missing 2>diagnostic.log", &mut state).await;
+        assert_eq!(failed_cd.status().code(), 1);
+        assert_eq!(failed_cd.diagnostics().len(), 1);
+        assert_eq!(
+            failed_cd.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Filesystem
+        );
+        assert_eq!(
+            failed_cd.stderr(),
+            failed_cd.diagnostics()[0].render().as_bytes()
+        );
+        assert!(
+            fs::read(child.join("diagnostic.log"))
+                .expect("stateful diagnostic target")
+                .is_empty(),
+            "source-spanned shell diagnostics are not raw command stderr"
+        );
+        assert_eq!(state.cwd(), child);
+
+        let invalid = execute_source("export INVALID >invalid.log", &mut state).await;
+        assert_eq!(invalid.status().code(), 2);
+        assert_eq!(
+            invalid.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::InvalidArguments
+        );
+        assert!(
+            !child.join("invalid.log").exists(),
+            "invalid stateful arguments must fail before file-open side effects"
+        );
+
+        let failed_open =
+            execute_source("export BLOCKED=value >missing/output.log", &mut state).await;
+        assert_eq!(
+            failed_open.status().kind(),
+            ShellStatusKind::RedirectionError
+        );
+        assert_eq!(
+            failed_open.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Redirection
+        );
+        assert!(state.environment().get("BLOCKED").is_none());
+
+        let exited = execute_source("exit 7 >exit.log; echo unreachable", &mut state).await;
+        assert_eq!(exited.status().code(), 7);
+        assert_eq!(exited.exit_requested(), Some(7));
+        assert!(exited.stdout().is_empty());
+        assert!(exited.diagnostics().is_empty());
+        assert!(
+            fs::read(child.join("exit.log"))
+                .expect("stateful exit target")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -3994,6 +4211,39 @@ fn main() {
         assert!(
             !directory.0.join("must-stay-unopened.log").exists(),
             "the later portable file must not open after an earlier native failure"
+        );
+
+        let stateful_first = execute_source_with(
+            "export GLOBAL_ORDER=value >stateful-opened-first.log | native:consumer <missing-input",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+        )
+        .await;
+        assert_eq!(
+            stateful_first.status().kind(),
+            ShellStatusKind::RedirectionError
+        );
+        assert!(directory.0.join("stateful-opened-first.log").exists());
+        assert!(
+            state.environment().get("GLOBAL_ORDER").is_none(),
+            "pipeline stateful stages must not mutate parent state"
+        );
+
+        let native_before_stateful = execute_source_with(
+            "native:consumer <missing-input | export GLOBAL_ORDER=value >stateful-must-stay-unopened.log",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+        )
+        .await;
+        assert_eq!(
+            native_before_stateful.status().kind(),
+            ShellStatusKind::RedirectionError
+        );
+        assert!(
+            !directory.0.join("stateful-must-stay-unopened.log").exists(),
+            "the later stateful file must not open after an earlier native failure"
         );
     }
 
@@ -4471,7 +4721,8 @@ fn main() {
         assert_eq!(cd.command, crate::StatefulBuiltin::Cd);
         assert_eq!(cd.arguments, [OsString::from("child")]);
         assert_eq!(cd.state.cwd(), state.cwd());
-        assert_eq!(cd.stdout_pipe, ProcessPipeId::new(0));
+        assert_eq!(cd.stdout, ParentTaskStdio::Pipe(ProcessPipeId::new(0)));
+        assert!(cd.files.is_empty());
         assert_eq!(native.stdin, ProcessStdio::Pipe(ProcessPipeId::new(0)));
         assert_eq!(
             stateful_invocation.parent_pipe_ends,
@@ -4627,27 +4878,55 @@ fn main() {
         let stateful_redirection_runner =
             RecordingPipelineRunner::new(successful_pipeline_output(2));
         let stateful_redirection = execute_source_with_runner(
-            "export CHILD=value >stateful.log | native:second",
+            "export CHILD=value >stateful-first.log 2>stateful.log 1>&2 | native:second",
             &mut preflight_state,
             &lookup,
             HostPlatform::Linux,
             &stateful_redirection_runner,
         )
         .await;
-        assert_eq!(stateful_redirection.status().code(), 2);
-        assert_eq!(stateful_redirection.diagnostics().len(), 1);
+        assert_eq!(stateful_redirection.status().code(), 0);
+        assert!(stateful_redirection.diagnostics().is_empty());
+        let stateful_redirection_invocation = stateful_redirection_runner
+            .invocation
+            .lock()
+            .expect("stateful redirection invocation lock")
+            .clone()
+            .expect("stateful redirection invocation");
+        let [
+            PipelineStageInvocation::Stateful(stateful),
+            PipelineStageInvocation::Native(native),
+        ] = stateful_redirection_invocation.stages.as_slice()
+        else {
+            panic!("expected redirected stateful-to-native stages");
+        };
+        let first_parent_file = ParentProcessFileId::new(0);
+        let final_parent_file = ParentProcessFileId::new(1);
+        assert_eq!(stateful.command, crate::StatefulBuiltin::Export);
+        assert_eq!(stateful.arguments, [OsString::from("CHILD=value")]);
+        assert_eq!(stateful.stdout, ParentTaskStdio::File(final_parent_file));
+        assert_eq!(stateful.files.len(), 2);
+        assert_eq!(stateful.files[0].id, first_parent_file);
+        assert_eq!(stateful.files[1].id, final_parent_file);
+        assert_eq!(stateful.files[0].mode, NativeProcessFileMode::Write);
+        assert_eq!(stateful.files[1].mode, NativeProcessFileMode::Write);
         assert_eq!(
-            stateful_redirection.diagnostics()[0].code(),
-            ExecutionDiagnosticCode::Unsupported
+            stateful.files[0].path,
+            preflight_directory.0.join("stateful-first.log")
         );
-        assert!(
-            stateful_redirection_runner
-                .invocation
-                .lock()
-                .expect("stateful redirection invocation lock")
-                .is_none(),
-            "stateful redirection must fail before spawn"
+        assert_eq!(
+            stateful.files[1].path,
+            preflight_directory.0.join("stateful.log")
         );
+        assert_eq!(native.stdin, ProcessStdio::Pipe(ProcessPipeId::new(0)));
+        assert_eq!(
+            stateful_redirection_invocation.closed_pipe_ends,
+            [ClosedProcessPipeEnd::Writer(ProcessPipeId::new(0))]
+        );
+        assert!(stateful_redirection_invocation.parent_pipe_ends.is_empty());
+        assert!(stateful_redirection_invocation.parent_captures.is_empty());
+        assert!(preflight_state.environment().get("CHILD").is_none());
+        assert!(!preflight_directory.0.join("stateful-first.log").exists());
         assert!(!preflight_directory.0.join("stateful.log").exists());
 
         let too_many = std::iter::repeat_n("native:first", super::MAX_NATIVE_PIPELINE_STAGES + 1)
@@ -4808,6 +5087,49 @@ fn main() {
         assert_eq!(
             state.environment().get("PIPE_VALUE"),
             Some(OsStr::new("parent"))
+        );
+
+        let redirected_output = execute_source(
+            &format!(
+                "export PIPE_VALUE=child >stateful-stage.log | {executable} copy stateful-redirected"
+            ),
+            &mut state,
+        )
+        .await;
+        assert_eq!(redirected_output.status().code(), 0);
+        assert!(redirected_output.stdout().is_empty());
+        assert_eq!(redirected_output.stderr(), b"stateful-redirected-stderr\n");
+        assert!(redirected_output.diagnostics().is_empty());
+        assert!(
+            fs::read(directory.0.join("stateful-stage.log"))
+                .expect("redirected stateful output")
+                .is_empty()
+        );
+        assert_eq!(
+            state.environment().get("PIPE_VALUE"),
+            Some(OsStr::new("parent"))
+        );
+
+        let redirected_diagnostic = execute_source(
+            "cd missing 2>stateful-pipeline-diagnostic.log | echo continued",
+            &mut state,
+        )
+        .await;
+        assert_eq!(redirected_diagnostic.status().code(), 1);
+        assert_eq!(redirected_diagnostic.stdout(), b"continued\n");
+        assert_eq!(redirected_diagnostic.diagnostics().len(), 1);
+        assert_eq!(
+            redirected_diagnostic.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Filesystem
+        );
+        assert_eq!(
+            redirected_diagnostic.stderr(),
+            redirected_diagnostic.diagnostics()[0].render().as_bytes()
+        );
+        assert!(
+            fs::read(directory.0.join("stateful-pipeline-diagnostic.log"))
+                .expect("stateful pipeline diagnostic target")
+                .is_empty()
         );
     }
 
