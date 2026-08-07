@@ -11,8 +11,8 @@ mod workspace;
 pub use identity::FileIdentity;
 pub use mutation::{MutationGuard, ReplaceOutcome};
 pub use process::{
-    EnvironmentChange, NativeProcessSpec, ProcessExit, ProcessHandle, ProcessSpec, ProcessStdio,
-    spawn_native,
+    EnvironmentChange, NativeProcessSpec, ProcessExit, ProcessHandle, ProcessPipeId, ProcessSpec,
+    ProcessStdio, spawn_native, spawn_native_graph,
 };
 pub use transaction::{
     FileAction, FileActionKind, FileActionOutcome, FileActionState, FileTransactionFailure,
@@ -37,6 +37,8 @@ pub enum PlatformError {
     NonUtf8Path,
     #[error("process environment contains an invalid name or NUL value")]
     InvalidEnvironment,
+    #[error("process pipe endpoints do not form a complete acyclic graph")]
+    InvalidProcessGraph,
     #[error("mutation target must be a regular file without symlink or reparse traversal")]
     InvalidMutationTarget,
     #[error("path is reserved for ash workspace state")]
