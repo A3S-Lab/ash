@@ -50,12 +50,17 @@ stages now accept the same ordered redirection syntax: `cat -` and
 `grep PATTERN -` can read a redirected file, portable stdout can stream directly
 to write/append files or the original stderr capture, and replaced internal
 endpoints retain the existing EOF, broken-pipe, and `pipefail` behavior.
+The tenth checkpoint reuses those parent-task plans for implemented stateful
+simple commands and pipeline stages. Arguments and targets preflight before
+open, simple-command files open before parent mutation, stateful pipeline files
+join the global graph order, and redirected empty stdout closes downstream
+normally while shell diagnostics remain outside raw command stderr.
 Eight-megabyte parent-facing,
 child-to-child, native, mixed, and closed-reader regressions lock exact bytes,
 EOF, backpressure, and completion; ordered-output regressions lock child and
 parent file resources, capture, surviving-pipe sharing, and global file-open
 side effects. Unified job supervision, user-visible terminal streaming, WSL
-pipeline adapters, stateful/WSL redirection adapters, foreground interactive
+pipeline and redirection adapters, foreground interactive
 programs and job control, broader expansion and mutations, and WSL launch remain
 open.
 Release-key and platform-signing credential provisioning, the first published release, enough accumulated fuzz duration to claim a soak gate, captured real multi-model Coding Agent runs, medium/large task families, and published hardware-labelled runtime measurements remain open.
@@ -470,24 +475,27 @@ Status defaults to the final stage; persistent `set -o pipefail` instead selects
 the rightmost unsuccessful native, portable, or stateful exit, while
 `set +o pipefail` restores the default.
 
-Native and portable shell commands lower `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`
-from left to right after assigning default capture or pipeline endpoints. A file
+Native and portable shell commands plus implemented stateful builtins lower
+`<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2` from left to right after
+assigning default capture or pipeline endpoints. A file
 target must expand to exactly one native field and is resolved against the
 persistent shell cwd. The platform validates the complete graph and every
 redirection resource plan before file-open side effects, then uses one graph
-order to interleave native child and portable parent-task files before any child
-starts. This intentionally creates or truncates superseded targets while final
+order to interleave native child and portable/stateful parent-task files before
+any child starts. This intentionally creates or truncates superseded targets while final
 descriptors reference only their last assignment. File output bypasses shell
-memory; shared file or capture IDs retain kernel ordering. Any native or
-portable pipeline stage may replace stdin, stdout, or stderr.
+memory; shared file or capture IDs retain kernel ordering. Any native, portable,
+or implemented stateful pipeline stage may replace stdin, stdout, or stderr.
 After ordered lowering, ash marks an internal writer closed only when neither
 final stdout nor stderr still references that pipe, so
 `producer 2>&1 >out | consumer` correctly keeps stderr connected. Replacing an
 internal producer endpoint delivers EOF downstream; replacing a consumer stdin
-exposes broken-pipe behavior upstream. Applying a redirection to a stateful
-builtin or WSL stage still fails before file opens or spawn. Job-wide
-supervision, WSL pipeline adapters, and stateful/WSL redirection adapters remain
-later layers.
+exposes broken-pipe behavior upstream. Stateful arguments preflight before
+files, simple-command opens precede parent mutation, and stateful pipeline files
+participate in the same graph order. Their commands emit no raw stdout or
+stderr, so source-spanned failures remain shell diagnostics. Applying a
+redirection to a WSL stage still fails before file opens or spawn. Job-wide
+supervision plus WSL pipeline and redirection adapters remain later layers.
 
 Inputs include:
 

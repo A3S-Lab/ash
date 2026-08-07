@@ -34,7 +34,8 @@ a terminal and executes the current command and pipeline syntax sequentially
 against one persistent native state. It implements `pwd`, `echo` (with `-n`),
 `cd`, expanded `export`/`unset`, `set` pipefail control, `exit`, portable `ls`,
 raw-byte `cat`, text `grep`, named and last-status parameter expansion, native host executables, and
-same-line native/portable pipelines with ordered native and portable redirections. Source may also come from `-c SOURCE`, a native
+same-line native/portable/stateful pipelines with ordered native, portable, and
+stateful redirections. Source may also come from `-c SOURCE`, a native
 script-file path, or stdin:
 
 ```sh
@@ -119,18 +120,21 @@ part of H4 job control rather than this line-edited REPL. Stdout and stderr shar
 the remaining 128 MiB capture allowance, and a normal nonzero native exit
 becomes the command status without an added diagnostic.
 
-Native and portable commands accept `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
+Native and portable commands plus implemented stateful builtins accept `<`, `>`,
+`>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
 Assignments apply from left to right: `command >out 2>&1` merges both streams
 into `out`, while `command 2>&1 >out` leaves stderr on the original stdout
 capture. Every file target must expand to exactly one native field; relative
 paths resolve against persistent cwd. Files connect directly to child or
 parent-task OS handles, so redirected output does not consume the synchronous
-capture allowance. One validated graph order interleaves native and portable
-files by stage and redirection source order; superseded targets are still
+capture allowance. One validated graph order interleaves native, portable, and
+stateful files by stage and redirection source order; superseded targets are still
 opened. Missing, ambiguous, or unopenable targets return status 1 with a
 redirection diagnostic. Source-spanned shell diagnostics remain shell stderr,
-not raw command stderr. Stateful and WSL commands reject redirections before
-execution or filesystem side effects.
+not raw command stderr. Stateful arguments and targets preflight before opens;
+simple-command files open before parent mutation, and failed opens block the
+mutation or `exit` request. WSL commands reject redirections before execution or
+filesystem side effects.
 
 A same-line `|` forms a pipeline of two to 32 stages. Each may be a native host
 command, portable `pwd`, `echo`, `ls`, `cat`, or `grep`, or implemented stateful
@@ -150,19 +154,21 @@ Stateful stages never consume stdin, execute against independent `ShellState`
 clones, and close their empty stdout on completion. The parent cwd, variables,
 environment, options, and exit request remain unchanged; downstream readers see
 EOF, and pipeline `exit` contributes only an ordinary stage status.
-Any native or portable stage may redirect stdin, stdout, or stderr, with descriptor
-duplication still applied in source order. If a producer no longer references
+Any native, portable, or implemented stateful stage may redirect stdin, stdout,
+or stderr, with descriptor duplication still applied in source order. If a producer no longer references
 an internal pipe, ash closes its parent writer and the downstream reader sees
 EOF. If a consumer replaces its pipe stdin, ash closes the parent reader and the
 upstream writer sees native broken-pipe behavior. Final-stage or `pipefail`
 selection then determines the visible status. A descriptor copy that still
 references the pipe remains connected even if the original descriptor is later
-redirected. Stateful and WSL stage redirections remain unsupported and fail
+redirected. Stateful files participate in the same global open order; these
+builtins emit no raw command output, and redirecting their empty stdout closes
+an outgoing pipe normally. WSL stage redirections remain unsupported and fail
 before runner or file side effects.
 
 Broader expansion (including command substitution and globbing), mutations,
 terminal streaming, unified job supervision, WSL pipeline adapters,
-stateful/WSL redirection adapters, foreground interactive programs and
+WSL redirection adapters, foreground interactive programs and
 jobs, and WSL execution are not implemented yet. The regular binary enables the
 `human-shell`
 feature;

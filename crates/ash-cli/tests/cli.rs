@@ -899,6 +899,63 @@ fn shell_command_launches_native_argv_with_persistent_cwd_and_environment() {
             .expect("portable EOF output")
             .is_empty()
     );
+
+    fs::write(directory.0.join("stateful-append.log"), b"preserved")
+        .expect("seed stateful append target");
+    let stateful_redirection_source = format!(
+        "export PATH=bin; \
+         export CLI_STATE=parent >stateful-first.log >stateful-simple.log; \
+         export CLI_STATE=child 2>stateful-stage.log 1>&2 | {executable} --copy >stateful-eof.log; \
+         set -o pipefail >>stateful-append.log; echo \"$CLI_STATE\""
+    );
+    let stateful_redirected = run_in(
+        &directory,
+        &["shell", "--no-profile", "-c", &stateful_redirection_source],
+        b"",
+    );
+    assert!(
+        stateful_redirected.status.success(),
+        "stderr={:?}",
+        stateful_redirected.stderr
+    );
+    assert_eq!(stateful_redirected.stdout, b"parent\n");
+    assert!(stateful_redirected.stderr.is_empty());
+    for target in [
+        "stateful-first.log",
+        "stateful-simple.log",
+        "stateful-stage.log",
+        "stateful-eof.log",
+    ] {
+        assert!(
+            fs::read(directory.0.join(target))
+                .unwrap_or_else(|error| panic!("read {target}: {error}"))
+                .is_empty(),
+            "stateful target {target} must contain no raw command output"
+        );
+    }
+    assert_eq!(
+        fs::read(directory.0.join("stateful-append.log")).expect("stateful append output"),
+        b"preserved"
+    );
+
+    let stateful_exit = run_in(
+        &directory,
+        &[
+            "shell",
+            "--no-profile",
+            "-c",
+            "exit 9 >stateful-exit.log; echo unreachable",
+        ],
+        b"",
+    );
+    assert_eq!(stateful_exit.status.code(), Some(9));
+    assert!(stateful_exit.stdout.is_empty());
+    assert!(stateful_exit.stderr.is_empty());
+    assert!(
+        fs::read(directory.0.join("stateful-exit.log"))
+            .expect("stateful exit output")
+            .is_empty()
+    );
 }
 
 #[cfg(feature = "human-shell")]

@@ -108,7 +108,7 @@ ARM64, with checksums, SBOMs, and provenance.
 
 ## Evidence behind the claims
 
-- 293 Rust workspace tests cover typed schemas, RPC, operations, store,
+- 294 Rust workspace tests cover typed schemas, RPC, operations, store,
   transactions, recovery, cancellation, updates, deterministic scheduling, and
   the human shell.
 - The schema-14 runtime harness contains 22 scenarios across worker matrices,
@@ -158,20 +158,23 @@ downstream, and cannot mutate the parent shell; pipeline `exit` contributes only
 its stage status. Final in-process output joins the bounded capture path. Status
 defaults to the final stage; `set -o pipefail` selects the rightmost native,
 portable, or stateful failure, while `set +o pipefail` restores the default.
-Native and portable commands also accept
+Native and portable commands plus implemented stateful builtins also accept
 source-ordered `<`, `>`, `>>`, `2>`,
 `2>>`, `2>&1`, and `1>&2`. File targets expand to exactly one field, relative
 paths resolve against persistent cwd, and files attach directly to child or
-parent-task OS handles. One graph order interleaves native and portable file
-opens; shared files or captures preserve real descriptor write order. Parent-facing,
+parent-task OS handles. One graph order interleaves native, portable, and
+stateful file opens; shared files or captures preserve real descriptor write order. Parent-facing,
 parent-to-parent, direct
 child-to-child, native, mixed, portable-only, stateful, closed-reader, and
 ordered-redirection regressions lock backpressure, exact bytes, EOF closure,
 broken-pipe behavior, cloned-state isolation, handle exposure, and side-effect
-ordering across platforms. Ordered lowering may replace any native or portable stage's internal stdin or
-stdout: explicit parent-closed ends deliver EOF downstream or native
+ordering across platforms. Stateful arguments preflight before opens; simple
+stateful files open before parent mutation, while pipeline files join the graph
+order and redirected empty stdout closes downstream normally. Shell diagnostics
+remain outside raw command stderr. Ordered lowering may replace any native,
+portable, or implemented stateful stage's internal stdin or stdout: explicit parent-closed ends deliver EOF downstream or native
 broken-pipe behavior upstream, while a descriptor copy that still names the
 pipe remains connected. Unified job supervision, visible terminal streaming,
-WSL pipeline adapters, and stateful/WSL redirection adapters remain later slices.
+and WSL pipeline/redirection adapters remain later slices.
 
 For Agent adoption, continue with [Coding Agent integration](/guide/coding-agents).
