@@ -26,9 +26,9 @@ becomes part of the contract.
 
 The optional human frontend has entered H1 with a feature-gated,
 non-interactive `ash shell` route. It currently executes sequential `pwd`,
-`echo`, `cd`, and portable `ls` commands from `-c SOURCE`, a native script-file
-path, or bounded stdin while preserving the machine contracts of `ash run` and
-`ash rpc`.
+`echo`, `cd`, and portable `ls` and `cat` commands from `-c SOURCE`, a native
+script-file path, or bounded stdin while preserving the machine contracts of
+`ash run` and `ash rpc`.
 
 ## What ash covers
 
@@ -42,7 +42,7 @@ path, or bounded stdin while preserving the machine contracts of `ash run` and
 | Retained evidence    | `/ # ? - \| >`                        | Byte and line slices, search, release, ordered table projection, and capability-gated materialization                                                                  |
 | Model context        | ASON, `×N`, `×N#K`, `⋯N`              | Columnar records, path dictionaries, explicit reductions, stable merge, and references back to the full source                                                         |
 | Trust and delivery   | capabilities, permits, signed updates | Least-privilege negotiation, session/action/policy/expiry-bound one-time permits, replay rejection, transactional activation, recovery, rollback, SBOM, and provenance |
-| Human shell          | `ash shell`                           | Source-spanned parsing, native persistent state, human diagnostics, and sequential `pwd`, `echo`, `cd`, and portable `ls` in the current H1 subset              |
+| Human shell          | `ash shell`                           | Source-spanned parsing, native persistent state, human diagnostics, and sequential `pwd`, `echo`, `cd`, `ls`, and raw-byte `cat` in the current H1 subset        |
 
 The [complete capability map](https://a3s-lab.github.io/ash/guide/capabilities.html)
 documents guarantees, evidence, and deliberate non-goals for the full surface.
@@ -77,7 +77,7 @@ The current non-interactive H1 subset accepts source directly, from a native
 script-file path, or through stdin:
 
 ```sh
-ash shell -c 'pwd; ls -a; cd crates; ls -d ash-shell'
+ash shell -c 'pwd; ls -a; cat crates/ash-shell/Cargo.toml'
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ```
@@ -87,8 +87,12 @@ Every file or stdin source is limited to 1 MiB of valid UTF-8. Use
 Portable `ls` lists one path (default `.`), emits one stable native name per
 line, and supports `-a`/`--all`, `-d`/`--directory`, `-1`, combined short
 options, and `--`. Unsupported GNU options fail clearly.
+Portable `cat` requires one file path, writes its bytes without conversion or
+an added newline, accepts `--`, and shares the 128 MiB semantic read/capture
+ceiling. Options, multiple files, and the stdin operand `-` remain explicit
+errors until streaming stdio lands.
 
-Interactive prompts, profiles, external processes, and portable `cat`/`grep`
+Interactive prompts, profiles, external processes, and portable `grep`
 execution are not implemented yet. A minimal machine-only binary can be built
 with `--no-default-features`.
 
@@ -149,7 +153,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **238 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **240 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, and signed updates.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB
   retained capture crossing the 4 MiB memory ceiling and fetching only its final

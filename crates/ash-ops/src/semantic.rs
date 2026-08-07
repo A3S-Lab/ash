@@ -7,7 +7,8 @@ use ash_platform::{EntryKind, PlatformError, ResolvedPath, WalkOptions, Workspac
 use regex::{Regex, RegexBuilder};
 use thiserror::Error;
 
-const MAX_READ_FILE_BYTES: u64 = 128 * 1024 * 1024;
+/// Maximum bytes read from one file by the portable semantic read service.
+pub const MAX_READ_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 1_000_000;
 const MAX_SEARCH_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SEARCH_MATCHES: usize = 1_000_000;
@@ -627,17 +628,14 @@ where
                 if worker_cancellation.is_cancelled() {
                     return Ok(None);
                 }
-                let bytes = filesystem.read_limited(path, max_bytes)?;
-                let digest = blake3::hash(&bytes).to_hex().to_string();
-                let (slice, actual_offset, actual_length) =
-                    select_range(&bytes, mode, offset, length);
-                Ok::<_, SemanticError>(Some(SemanticRead {
-                    path: filesystem.semantic_path(path),
-                    digest,
-                    bytes: slice.to_vec(),
-                    offset: actual_offset,
-                    length: actual_length,
-                }))
+                Ok::<_, SemanticError>(Some(read_resolved(
+                    &filesystem,
+                    path,
+                    mode,
+                    offset,
+                    length,
+                    max_bytes,
+                )?))
             })
             .await?;
         let mut reads = Vec::with_capacity(results.len());
@@ -648,6 +646,43 @@ where
             reads.push(read);
         }
         check_cancelled(cancellation)?;
+        Ok(SemanticReadResult { reads })
+    }
+
+    /// Executes read semantics serially for the current synchronous human
+    /// frontend. This retains the same provider bound, digest, and range
+    /// selection as [`Self::read`] but has no compute-pool scheduling or
+    /// built-in cancellation point.
+    pub fn read_serial(&self, query: &ReadQuery) -> Result<SemanticReadResult, SemanticError> {
+        self.read_serial_limited(query, self.limits.max_read_file_bytes)
+    }
+
+    /// Executes a serial read with a caller-selected per-file ceiling no larger
+    /// than the semantic service ceiling.
+    pub fn read_serial_limited(
+        &self,
+        query: &ReadQuery,
+        max_bytes: u64,
+    ) -> Result<SemanticReadResult, SemanticError> {
+        let resolved = query
+            .paths
+            .iter()
+            .map(|path| self.filesystem.resolve_existing(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let max_bytes = max_bytes.min(self.limits.max_read_file_bytes);
+        let reads = resolved
+            .iter()
+            .map(|path| {
+                read_resolved(
+                    &self.filesystem,
+                    path,
+                    query.mode,
+                    query.offset,
+                    query.length,
+                    max_bytes,
+                )
+            })
+            .collect::<Result<_, _>>()?;
         Ok(SemanticReadResult { reads })
     }
 
@@ -793,6 +828,37 @@ where
             partial,
         })
     }
+}
+
+fn read_resolved<F>(
+    filesystem: &F,
+    path: &F::ResolvedPath,
+    mode: SemanticReadMode,
+    offset: u64,
+    length: u64,
+    max_bytes: u64,
+) -> Result<SemanticRead, SemanticError>
+where
+    F: SemanticFileSystem,
+{
+    let bytes = filesystem.read_limited(path, max_bytes)?;
+    let digest = blake3::hash(&bytes).to_hex().to_string();
+    let (slice, actual_offset, actual_length) = select_range(&bytes, mode, offset, length);
+    let selected = if mode == SemanticReadMode::Bytes
+        && actual_offset == 0
+        && actual_length == bytes.len() as u64
+    {
+        bytes
+    } else {
+        slice.to_vec()
+    };
+    Ok(SemanticRead {
+        path: filesystem.semantic_path(path),
+        digest,
+        bytes: selected,
+        offset: actual_offset,
+        length: actual_length,
+    })
 }
 
 fn extend_list_entries(
@@ -1063,6 +1129,14 @@ mod tests {
             )
             .await
             .expect("bounded read");
+        let serial = services
+            .read_serial(&ReadQuery::new(
+                vec![PathBuf::from("sample.txt")],
+                SemanticReadMode::Bytes,
+                0,
+                u64::MAX,
+            ))
+            .expect("serial read");
 
         assert_eq!(bytes.reads[0].bytes, b"two");
         assert_eq!((bytes.reads[0].offset, bytes.reads[0].length), (4, 3));
@@ -1074,6 +1148,8 @@ mod tests {
             (contents.len() as u64, 0)
         );
         assert_eq!(bytes.reads[0].digest, lines.reads[0].digest);
+        assert_eq!(serial.reads[0].bytes, contents);
+        assert_eq!(serial.reads[0].digest, bytes.reads[0].digest);
         assert_eq!(
             bytes.reads[0].digest,
             blake3::hash(contents).to_hex().to_string()
@@ -1397,6 +1473,33 @@ mod tests {
         assert!(matches!(
             error,
             SemanticError::Platform(PlatformError::InputTooLarge { .. })
+        ));
+        let error = services
+            .read_serial(&ReadQuery::new(
+                vec![PathBuf::from("src/a.txt")],
+                SemanticReadMode::Bytes,
+                0,
+                1,
+            ))
+            .expect_err("oversized serial read");
+        assert!(matches!(
+            error,
+            SemanticError::Platform(PlatformError::InputTooLarge { .. })
+        ));
+        let error = services
+            .read_serial_limited(
+                &ReadQuery::new(
+                    vec![PathBuf::from("src/b.txt")],
+                    SemanticReadMode::Bytes,
+                    0,
+                    1,
+                ),
+                0,
+            )
+            .expect_err("caller-limited serial read");
+        assert!(matches!(
+            error,
+            SemanticError::Platform(PlatformError::InputTooLarge { size: 1, max: 0 })
         ));
 
         let services = SemanticServices {
