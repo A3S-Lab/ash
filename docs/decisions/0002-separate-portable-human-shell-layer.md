@@ -105,12 +105,18 @@ endpoint without a relay buffer; `cat -` and `grep PATTERN -` consume redirected
 input directly. Stateful simple-command files open before parent mutation, and
 stateful stage files join the same global order while redirected empty stdout
 closes downstream normally. Their source-spanned failures remain shell
-diagnostics rather than raw command stderr. Parent-facing, child-to-child,
+diagnostics rather than raw command stderr. After parent resources are claimed,
+the graph converts to one `NativeProcessJob` that waits in specification order
+and terminates plus reaps every native member's owned process tree on a setup,
+capture, or wait failure. The shell completes its in-process stages and capture
+drains before the job's non-cancelled ordered wait, under one pipeline
+completion boundary.
+Parent-facing, child-to-child,
 native, mixed, portable-only,
 stateful, closed-reader, and ordered-redirection regressions lock backpressure,
 exact bytes, EOF, handle closure, cloned-state isolation, descriptor sharing,
-and global file-open order. Unified job supervision, visible terminal streaming,
-WSL pipeline and redirection adapters, broader expansion,
+and global file-open order. Visible terminal streaming, WSL pipeline and
+redirection adapters, broader expansion,
 foreground interactive programs and jobs, mutations, and WSL execution remain
 staged work.
 

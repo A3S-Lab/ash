@@ -12,6 +12,7 @@ homepage.workspace = true
 [dependencies]
 atomicwrites.workspace = true
 blake3.workspace = true
+futures.workspace = true
 process-wrap.workspace = true
 same-file.workspace = true
 thiserror.workspace = true

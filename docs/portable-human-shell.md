@@ -1,6 +1,6 @@
 # Portable Human Shell Architecture
 
-- Status: accepted; H1 plus nine H2 checkpoints implemented
+- Status: accepted; H1 plus eleven H2 checkpoints implemented
 - Target: post-ASH/1 version one
 - Last updated: 2026-08-08
 
@@ -31,8 +31,13 @@ expanded and resolved before execution; native pairs use direct pipes, while
 in-process boundaries retain explicit async parent pipe/file handles and run as
 concurrent bounded tasks. Unredirected final stdout and stage-ordered native
 stderr remain bounded captures. Mixed native/portable/stateful file resources
-open in one global source order. Foreground interactive programs and jobs,
-terminal streaming, unified job supervision, WSL pipeline and redirection
+open in one global source order. Native members convert from the construction
+graph into one `NativeProcessJob`; it preserves specification-ordered exits and
+terminates plus reaps every native process tree on a setup, capture, or wait
+failure while the shell polls in-process stages and captures under the same
+completion boundary.
+Foreground interactive programs and jobs,
+terminal streaming, WSL pipeline and redirection
 adapters, broader expansion, mutations, and WSL launch remain unimplemented.
 
 ## 1. Executive decision
@@ -620,8 +625,9 @@ parent-to-parent pipe captured concurrently with native stderr. `cat` copies
 bytes asynchronously under its 128 MiB ceiling. Streaming `grep` preserves
 UTF-8, CRLF, regex/fixed-string, case, line-number, 64 MiB input, 128 MiB output,
 and no-match status semantics. The runner polls portable tasks, native captures,
-and native waits together, merges portable diagnostics in stage order, and
-feeds every stage exit into the existing final-stage or `pipefail` selection.
+and native execution together, then completes native waits without canceling an
+in-progress reap. It merges portable diagnostics in stage order and feeds every
+stage exit into the existing final-stage or `pipefail` selection.
 Mixed and portable-only regressions lock exact bytes across an 8 MiB
 native-to-portable-to-native path, final portable capture, early EOF,
 broken-pipe status, and CLI execution.
@@ -698,6 +704,24 @@ behavior, append and superseded-file effects, cross-stage global ordering,
 diagnostic routing, and replaced pipeline endpoints. WSL streaming and WSL
 redirection adapters remain open.
 
+The eleventh H2 checkpoint adds graph-wide native job supervision. After every
+declared parent pipe end and file has been taken, `NativeProcessGraph::into_job`
+closes any unclaimed parent resources and transfers the native members to one
+`NativeProcessJob`. Its wait result retains specification order despite
+consumer-first spawn. A wait failure triggers all-member termination and reap
+before surfacing; explicit termination attempts every member and waits for each
+owned descendant tree before completing.
+
+The shell first polls all portable/stateful stage futures and stdout/stderr
+capture drains together, then enters the native job's ordered wait without
+canceling it mid-reap. Setup, capture-limit, capture-I/O, or native-wait failures
+use the same cleanup boundary. Each native member still owns its existing Unix
+process group or Windows Job Object; this checkpoint does not claim terminal
+foreground placement, signal delivery, or background-job control.
+Cross-platform regressions lock ordered multi-member exits and cleanup of
+multiple independently owned descendant trees, while existing 8 MiB tests retain
+the end-to-end EOF and backpressure contract.
+
 ## 12. Streaming pipelines
 
 Add a dedicated platform-neutral I/O model:
@@ -732,8 +756,11 @@ configurable rightmost-failure selection. It also implements ordered native,
 portable, and stateful file/descriptor redirections, whole-plan validation before globally
 ordered child/parent file opens, shared OS file/capture resources, and endpoint
 ownership that preserves OS EOF, broken-pipe, and backpressure semantics across
-native and in-process boundaries. Capacity reservation, unified job supervision,
-WSL streaming, and WSL redirection adapters remain open.
+native and in-process boundaries. It converts the native construction graph to
+a `NativeProcessJob` that waits in specification order and terminates plus reaps
+all member trees on a setup, capture, or wait failure. The shell finishes
+in-process stages and capture drains before entering its non-cancelled wait.
+Capacity reservation, WSL streaming, and WSL redirection adapters remain open.
 
 Data flows directly through OS pipes. It does not pass through ASON or the
 result store, and it is not materialized in memory before the next command
@@ -869,8 +896,9 @@ The current native/portable pipeline slice defaults to last-command status.
 `set -o pipefail` persistently selects the rightmost unsuccessful native or
 portable status; `set +o pipefail` restores the default, and all-success
 pipelines still use the last command. Signals map to `128 + signal`.
-Backend-specific native codes remain available through job inspection once
-unified supervision exists, even when the language exposes a normalized status.
+The unified supervisor preserves backend-specific native exits in source order,
+even when the language exposes a normalized status. User-visible job inspection
+remains part of the later interactive-job work.
 
 ## 18. Configuration and startup
 
@@ -1011,8 +1039,8 @@ command and an unredirected first pipeline stage still receive null stdin, so
 foreground terminal programs and Ctrl+C job-tree delivery remain H4 rather
 than being claimed by this REPL checkpoint. The `human-shell` feature is enabled
 for the normal binary and can be disabled for a minimal machine-only build.
-Broader expansion, terminal streaming, unified job supervision, mutations,
-WSL pipeline and redirection adapters, job control, and WSL launch
+Broader expansion, terminal streaming, mutations, WSL pipeline and redirection
+adapters, job control, and WSL launch
 remain for later increments.
 
 ### H2: streaming execution
@@ -1029,8 +1057,9 @@ remain for later increments.
   implemented;
 - parent-owned files plus global mixed-stage file-open order are implemented;
 - stateful simple-command and pipeline redirection adapters are implemented;
-- WSL streaming plus WSL redirection adapters remain open;
-- unified multi-process supervision remains open.
+- unified multi-process supervision with ordered wait and all-member native
+  process-tree cleanup is implemented;
+- WSL streaming plus WSL redirection adapters remain open.
 
 Current checkpoint: the shared platform process boundary requires explicit
 selection for every standard stream. Machine callers preserve their behavior
@@ -1054,15 +1083,17 @@ open parent-task files in the same global order, close incoming stdin, execute
 on independent state clones, close or redirect empty stdout on completion, and
 contribute status without mutating the parent shell or honoring a pipeline
 `exit` as a parent exit request. Simple stateful commands open validated files
-before parent mutation. The
+before parent mutation. After parent resources are claimed, the graph converts
+to one `NativeProcessJob`; ordered wait and failure cleanup cover every native
+member tree after the shell concurrently completes in-process tasks and capture
+drains. The
 8 MiB regressions lock parent-facing, parent-to-parent, child-to-child,
 file-to-pipe, pipe-to-file, native, mixed, stateful, and closed-reader exact
 bytes, EOF, backpressure, deterministic stderr order, and cross-platform
 completion; additional regressions lock portable-only execution, superseded-file
 effects, descriptor sharing, global file order, relative input, append behavior,
 endpoint validation, stateful mutation/open ordering, and preflight rejection.
-Unified job supervision, WSL streaming, and WSL redirection adapters remain
-open.
+WSL streaming and WSL redirection adapters remain open.
 
 ### H3: mutations and command language
 

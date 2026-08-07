@@ -108,7 +108,7 @@ ARM64, with checksums, SBOMs, and provenance.
 
 ## Evidence behind the claims
 
-- 294 Rust workspace tests cover typed schemas, RPC, operations, store,
+- 296 Rust workspace tests cover typed schemas, RPC, operations, store,
   transactions, recovery, cancellation, updates, deterministic scheduling, and
   the human shell.
 - The schema-14 runtime harness contains 22 scenarios across worker matrices,
@@ -174,7 +174,11 @@ order and redirected empty stdout closes downstream normally. Shell diagnostics
 remain outside raw command stderr. Ordered lowering may replace any native,
 portable, or implemented stateful stage's internal stdin or stdout: explicit parent-closed ends deliver EOF downstream or native
 broken-pipe behavior upstream, while a descriptor copy that still names the
-pipe remains connected. Unified job supervision, visible terminal streaming,
-and WSL pipeline/redirection adapters remain later slices.
+pipe remains connected. After parent resources are claimed, the native graph
+becomes one job supervisor: waits preserve specification order, and setup,
+capture, or wait failures terminate plus reap every native member's owned
+process tree. In-process stages and captures share that pipeline completion
+boundary. Visible terminal streaming and WSL pipeline/redirection adapters
+remain later slices.
 
 For Agent adoption, continue with [Coding Agent integration](/guide/coding-agents).

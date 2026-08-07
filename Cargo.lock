@@ -75,6 +75,7 @@ version = "0.1.0"
 dependencies = [
  "atomicwrites",
  "blake3",
+ "futures",
  "process-wrap",
  "same-file",
  "thiserror",

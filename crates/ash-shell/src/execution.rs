@@ -12,9 +12,9 @@ use ash_ops::{
 };
 use ash_platform::{
     ClosedProcessPipeEnd, EnvironmentChange, NativeProcessFile, NativeProcessFileMode,
-    NativeProcessSpec, ParentProcessFile, ParentProcessFileId, ParentProcessPipeEnd, PlatformError,
-    ProcessCaptureId, ProcessExit, ProcessFileId, ProcessGraphFile, ProcessHandle, ProcessPipeId,
-    ProcessStdio, spawn_native, spawn_native_graph_with_parent_io,
+    NativeProcessGraph, NativeProcessSpec, ParentProcessFile, ParentProcessFileId,
+    ParentProcessPipeEnd, PlatformError, ProcessCaptureId, ProcessExit, ProcessFileId,
+    ProcessGraphFile, ProcessPipeId, ProcessStdio, spawn_native, spawn_native_graph_with_parent_io,
 };
 use futures::future::{join_all, try_join_all};
 use regex::{Regex, RegexBuilder};
@@ -729,12 +729,16 @@ async fn run_pipeline(
     let mut stderr_streams: Vec<Option<tokio::fs::File>> =
         std::iter::repeat_with(|| None).take(stage_count).collect();
     for capture in parent_captures {
-        let reader =
-            graph
-                .take_pipe_reader(capture.pipe)
-                .ok_or(NativeCommandError::MissingStream(
-                    "in-process stage capture",
-                ))?;
+        let reader = match graph.take_pipe_reader(capture.pipe) {
+            Some(reader) => reader,
+            None => {
+                return Err(cleanup_graph_setup_error(
+                    &mut graph,
+                    NativeCommandError::MissingStream("in-process stage capture"),
+                )
+                .await);
+            }
+        };
         match capture.stream {
             PipelineCaptureStream::Stdout => stdout_streams[capture.stage_index] = Some(reader),
             PipelineCaptureStream::Stderr => stderr_streams[capture.stage_index] = Some(reader),
@@ -746,8 +750,18 @@ async fn run_pipeline(
         let (invocation, input, output) = match stage {
             PipelineStageInvocation::Native(_) => continue,
             PipelineStageInvocation::Portable(invocation) => {
-                let input = take_parent_task_reader(&mut graph, invocation.stdin)?;
-                let output = take_parent_task_writer(&mut graph, invocation.stdout)?;
+                let input = match take_parent_task_reader(&mut graph, invocation.stdin) {
+                    Ok(input) => input,
+                    Err(error) => {
+                        return Err(cleanup_graph_setup_error(&mut graph, error).await);
+                    }
+                };
+                let output = match take_parent_task_writer(&mut graph, invocation.stdout) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        return Err(cleanup_graph_setup_error(&mut graph, error).await);
+                    }
+                };
                 (
                     InProcessPipelineInvocation::Portable(invocation),
                     Some(input),
@@ -755,7 +769,12 @@ async fn run_pipeline(
                 )
             }
             PipelineStageInvocation::Stateful(invocation) => {
-                let output = take_parent_task_writer(&mut graph, invocation.stdout)?;
+                let output = match take_parent_task_writer(&mut graph, invocation.stdout) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        return Err(cleanup_graph_setup_error(&mut graph, error).await);
+                    }
+                };
                 (
                     InProcessPipelineInvocation::Stateful(invocation),
                     None,
@@ -771,21 +790,20 @@ async fn run_pipeline(
         ));
     }
 
-    let mut processes = graph.into_processes();
-    for ((process, spec), &stage_index) in
-        processes.iter_mut().zip(&specs).zip(&native_stage_indices)
+    let mut job = graph.into_job();
+    for ((process_index, spec), &stage_index) in specs.iter().enumerate().zip(&native_stage_indices)
     {
         let captures_stdout = spec_uses_capture(spec, STDOUT_CAPTURE);
-        let stdout = process.take_capture(STDOUT_CAPTURE);
+        let stdout = job.take_capture(process_index, STDOUT_CAPTURE);
         if captures_stdout && stdout.is_none() {
-            terminate_and_reap(&mut processes).await;
+            let _ = job.terminate_and_reap().await;
             return Err(NativeCommandError::MissingStream("stage stdout"));
         }
         stdout_streams[stage_index] = stdout;
         let captures_stderr = spec_uses_capture(spec, STDERR_CAPTURE);
-        let stderr = process.take_capture(STDERR_CAPTURE);
+        let stderr = job.take_capture(process_index, STDERR_CAPTURE);
         if captures_stderr && stderr.is_none() {
-            terminate_and_reap(&mut processes).await;
+            let _ = job.terminate_and_reap().await;
             return Err(NativeCommandError::MissingStream("stage stderr"));
         }
         stderr_streams[stage_index] = stderr;
@@ -798,42 +816,37 @@ async fn run_pipeline(
     let stderr_capture = try_join_all(stderr_streams.into_iter().map(|stderr| {
         capture_optional_process_stream(stderr, Arc::clone(&captured), capture_limit)
     }));
-    let wait_all = async {
-        try_join_all(processes.iter_mut().map(|process| async move {
-            process.wait().await.map_err(NativeCommandError::Platform)
-        }))
-        .await
-    };
     let in_process_all = async { Ok::<_, NativeCommandError>(join_all(in_process_tasks).await) };
-    match tokio::try_join!(stdout_capture, stderr_capture, in_process_all, wait_all) {
-        Ok((stdout, stderr, in_process, native_exits)) => {
-            let mut exits = std::iter::repeat_with(|| None)
-                .take(stage_count)
-                .collect::<Vec<_>>();
-            for (&stage_index, exit) in native_stage_indices.iter().zip(native_exits) {
-                exits[stage_index] = Some(exit);
+    let (stdout, stderr, in_process) =
+        match tokio::try_join!(stdout_capture, stderr_capture, in_process_all) {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = job.terminate_and_reap().await;
+                return Err(error);
             }
-            let mut diagnostics = Vec::new();
-            for output in in_process {
-                exits[output.stage_index] = Some(output.exit);
-                diagnostics.extend(output.diagnostics);
-            }
-            let exits = exits
-                .into_iter()
-                .collect::<Option<Vec<_>>>()
-                .ok_or(NativeCommandError::MissingStream("pipeline stage status"))?;
-            Ok(PipelineOutput {
-                stdout: stdout.into_iter().flatten().collect(),
-                stderr: stderr.into_iter().flatten().collect(),
-                exits,
-                diagnostics,
-            })
-        }
-        Err(error) => {
-            terminate_and_reap(&mut processes).await;
-            Err(error)
-        }
+        };
+    let native_exits = job.wait().await.map_err(NativeCommandError::Platform)?;
+    let mut exits = std::iter::repeat_with(|| None)
+        .take(stage_count)
+        .collect::<Vec<_>>();
+    for (&stage_index, exit) in native_stage_indices.iter().zip(native_exits) {
+        exits[stage_index] = Some(exit);
     }
+    let mut diagnostics = Vec::new();
+    for output in in_process {
+        exits[output.stage_index] = Some(output.exit);
+        diagnostics.extend(output.diagnostics);
+    }
+    let exits = exits
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or(NativeCommandError::MissingStream("pipeline stage status"))?;
+    Ok(PipelineOutput {
+        stdout: stdout.into_iter().flatten().collect(),
+        stderr: stderr.into_iter().flatten().collect(),
+        exits,
+        diagnostics,
+    })
 }
 
 type PortablePipelineReader = Box<dyn AsyncRead + Send + Unpin>;
@@ -1343,13 +1356,12 @@ fn pipeline_stage_output(
     }
 }
 
-async fn terminate_and_reap(processes: &mut [ProcessHandle]) {
-    for process in &mut *processes {
-        let _ = process.terminate().await;
-    }
-    for process in processes {
-        let _ = process.wait().await;
-    }
+async fn cleanup_graph_setup_error(
+    graph: &mut NativeProcessGraph,
+    error: NativeCommandError,
+) -> NativeCommandError {
+    let _ = graph.terminate_and_reap().await;
+    error
 }
 
 fn classify_native_spawn_error(error: PlatformError) -> NativeCommandError {
@@ -3315,8 +3327,9 @@ mod tests {
     use super::{
         ExecutionDiagnosticCode, NativeCommandError, NativeCommandOutput, NativeCommandRunner,
         NativeInvocation, ParentPipelineCapture, ParentTaskStdio, PipelineCaptureStream,
-        PipelineInvocation, PipelineOutput, PipelineStageInvocation, execute_source,
-        execute_source_with, execute_source_with_runner,
+        PipelineInvocation, PipelineOutput, PipelineStageInvocation, STDERR_CAPTURE,
+        STDOUT_CAPTURE, execute_source, execute_source_with, execute_source_with_runner,
+        run_pipeline,
     };
     use crate::{HostPlatform, ShellState, ShellStatusKind, SourceSpan};
 
@@ -3347,7 +3360,28 @@ mod tests {
         fs::write(
             &source,
             r#"
-use std::{convert::TryFrom, env, io, io::Write, process};
+use std::{
+    convert::TryFrom,
+    env, fs,
+    io::{self, Read, Write},
+    process, thread,
+    time::Duration,
+};
+
+fn write_payload(length: usize) {
+    let mut output = io::stdout().lock();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut offset = 0_usize;
+    while offset < length {
+        let count = (length - offset).min(buffer.len());
+        for (index, byte) in buffer[..count].iter_mut().enumerate() {
+            *byte = u8::try_from((offset + index) % 251).expect("bounded byte");
+        }
+        output.write_all(&buffer[..count]).expect("write payload");
+        offset += count;
+    }
+    output.flush().expect("flush payload");
+}
 
 fn main() {
     let mut arguments = env::args().skip(1);
@@ -3358,19 +3392,21 @@ fn main() {
                 .expect("payload length")
                 .parse::<usize>()
                 .expect("numeric payload length");
-            let mut output = io::stdout().lock();
-            let mut buffer = vec![0_u8; 64 * 1024];
-            let mut offset = 0_usize;
-            while offset < length {
-                let count = (length - offset).min(buffer.len());
-                for (index, byte) in buffer[..count].iter_mut().enumerate() {
-                    *byte = u8::try_from((offset + index) % 251).expect("bounded byte");
-                }
-                output.write_all(&buffer[..count]).expect("write payload");
-                offset += count;
-            }
-            output.flush().expect("flush payload");
+            write_payload(length);
             eprintln!("producer-stderr");
+        }
+        Some("produce-after-input") => {
+            let length = arguments
+                .next()
+                .expect("payload length")
+                .parse::<usize>()
+                .expect("numeric payload length");
+            let mut byte = [0_u8; 1];
+            io::stdin()
+                .lock()
+                .read_exact(&mut byte)
+                .expect("read producer gate");
+            write_payload(length);
         }
         Some("produce-soft") => {
             let length = arguments
@@ -3416,6 +3452,26 @@ fn main() {
             stdout.flush().expect("flush stdout b");
             stderr.write_all(b"stderr-b\n").expect("write stderr b");
             stderr.flush().expect("flush stderr b");
+        }
+        Some("hold") => {
+            let ready = arguments.next().expect("ready path");
+            let escaped = arguments.next().expect("escaped path");
+            let _child = process::Command::new(env::current_exe().expect("current executable"))
+                .arg("child")
+                .arg(escaped)
+                .spawn()
+                .expect("spawn descendant");
+            fs::write(ready, b"ready").expect("write ready marker");
+            let mut output = io::stdout().lock();
+            output.write_all(b"x").expect("open producer gate");
+            output.flush().expect("flush producer gate");
+            thread::sleep(Duration::from_secs(10));
+        }
+        Some("child") => {
+            let escaped = arguments.next().expect("escaped path");
+            thread::sleep(Duration::from_secs(1));
+            fs::write(escaped, b"escaped").expect("write escaped marker");
+            thread::sleep(Duration::from_secs(10));
         }
         _ => process::exit(2),
     }
@@ -5324,6 +5380,70 @@ fn main() {
             format!("{}\n9\n", state.cwd().display()).as_bytes()
         );
         assert!(broken_pipe.stderr().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pipeline_capture_failure_reaps_every_supervised_process_tree() {
+        let directory = TestDirectory::new();
+        let executable_name = compile_pipeline_helper(&directory);
+        let executable = directory.0.join("bin").join(executable_name);
+        let pipe = ProcessPipeId::new(0);
+        let invocation = |arguments: Vec<OsString>, stdin, stdout, stderr| NativeInvocation {
+            executable: executable.clone(),
+            arguments,
+            cwd: directory.0.clone(),
+            environment: Vec::new(),
+            capture_limit: 64,
+            files: Vec::new(),
+            stdin,
+            stdout,
+            stderr,
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_pipeline(PipelineInvocation {
+                stages: vec![
+                    PipelineStageInvocation::Native(invocation(
+                        vec![
+                            OsString::from("hold"),
+                            OsString::from("ready"),
+                            OsString::from("escaped"),
+                        ],
+                        ProcessStdio::Null,
+                        ProcessStdio::Pipe(pipe),
+                        ProcessStdio::Null,
+                    )),
+                    PipelineStageInvocation::Native(invocation(
+                        vec![
+                            OsString::from("produce-after-input"),
+                            OsString::from("4096"),
+                        ],
+                        ProcessStdio::Pipe(pipe),
+                        ProcessStdio::Capture(STDOUT_CAPTURE),
+                        ProcessStdio::Capture(STDERR_CAPTURE),
+                    )),
+                ],
+                closed_pipe_ends: Vec::new(),
+                parent_pipe_ends: Vec::new(),
+                parent_captures: Vec::new(),
+                capture_limit: 64,
+            }),
+        )
+        .await
+        .expect("capture failure cleanup completes");
+        assert!(matches!(
+            result,
+            Err(NativeCommandError::CaptureLimit { max: 64 })
+        ));
+        assert!(
+            directory.0.join("ready").is_file(),
+            "the supervised process tree must start before capture failure"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        assert!(
+            !directory.0.join("escaped").exists(),
+            "a descendant survived capture-failure cleanup"
+        );
     }
 
     #[tokio::test]

@@ -40,7 +40,10 @@ in-process boundaries use explicit parent-owned asynchronous pipe and file
 handles and preserve OS backpressure. Mixed-stage files open in global source
 order before spawn. Replaced or non-consuming internal endpoints still deliver
 EOF or native broken-pipe behavior. Final stdout and native stderr share the
-remaining bounded capture allowance.
+remaining bounded capture allowance. After parent resources are claimed, the
+native graph becomes one `NativeProcessJob`: waits preserve specification order,
+and any post-spawn setup, capture, or wait failure terminates and reaps every
+native member's owned process tree before returning.
 
 ## What ash covers
 
@@ -54,7 +57,7 @@ remaining bounded capture allowance.
 | Retained evidence    | `/ # ? - \| >`                        | Byte and line slices, search, release, ordered table projection, and capability-gated materialization                                                                  |
 | Model context        | ASON, `×N`, `×N#K`, `⋯N`              | Columnar records, path dictionaries, explicit reductions, stable merge, and references back to the full source                                                         |
 | Trust and delivery   | capabilities, permits, signed updates | Least-privilege negotiation, session/action/policy/expiry-bound one-time permits, replay rejection, transactional activation, recovery, rollback, SBOM, and provenance |
-| Human shell          | `ash shell`                           | H1 REPL lifecycle and commands plus H2 native/portable/stateful pipelines, configurable `pipefail`, ordered native/portable/stateful redirections, and endpoint replacement |
+| Human shell          | `ash shell`                           | H1 REPL lifecycle and commands plus H2 native/portable/stateful pipelines, configurable `pipefail`, ordered redirections, endpoint replacement, and unified pipeline supervision |
 
 The [complete capability map](https://a3s-lab.github.io/ash/guide/capabilities.html)
 documents guarantees, evidence, and deliberate non-goals for the full surface.
@@ -183,7 +186,7 @@ implemented stateful `cd`, `export`, `unset`, `set`, or `exit`; aliases,
 functions, unimplemented stateful commands, and WSL stages still fail during
 complete preflight. Native-to-native edges remain direct OS pipes. An in-process
 boundary retains only the explicitly declared parent reader or writer and runs
-the stage concurrently with native capture and waits. Native streams and
+the stage concurrently with native execution and capture. Native streams and
 portable `cat`/`grep` streams are not materialized as a whole before the next
 stage, and normal OS backpressure applies. Only
 `cat -` and `grep PATTERN -` consume incoming stdin. Other portable forms close
@@ -194,6 +197,12 @@ they cannot mutate the parent and downstream readers receive EOF. Pipeline
 `exit` contributes only its stage status and never stops the parent source. A
 final in-process stage is captured concurrently under the same 128 MiB aggregate
 allowance; native stderr is captured in stage order.
+All native members remain owned by one graph-level job supervisor while
+portable/stateful futures and capture drains are polled together. Once those
+settle successfully, the supervisor completes every native wait without
+canceling an in-progress reap. A setup, capture, or wait failure terminates and
+reaps every native process tree; successful exits remain aligned with source
+stage order.
 
 Pipeline status defaults to the final stage. With `set -o pipefail`, it becomes
 the rightmost unsuccessful stage, including conventional `128 + signal`
@@ -210,8 +219,7 @@ later redirected. Stateful files join the same global open order; replacing
 their empty stdout closes an outgoing pipe normally. WSL stage redirections
 remain unsupported and fail before runner or file side effects.
 
-User-visible terminal streaming, unified pipeline job supervision, WSL pipeline
-adapters and redirection adapters,
+User-visible terminal streaming, WSL pipeline adapters and redirection adapters,
 foreground interactive programs and job control, broader expansion, mutations,
 and WSL execution are not implemented yet. A minimal machine-only binary can be
 built with `--no-default-features`.
@@ -273,7 +281,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **294 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **296 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, signed updates, and
   the human shell.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB
