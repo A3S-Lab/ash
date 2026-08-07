@@ -10,7 +10,8 @@ use thiserror::Error;
 /// Maximum bytes read from one file by the portable semantic read service.
 pub const MAX_READ_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 1_000_000;
-const MAX_SEARCH_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// Maximum bytes scanned from one file by the portable semantic search service.
+pub const MAX_SEARCH_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SEARCH_MATCHES: usize = 1_000_000;
 const MAX_MATCHES_PER_FILE: usize = 100_000;
 const MAX_SEARCH_ENTRIES: usize = 1_000_000;
@@ -769,8 +770,7 @@ where
                     .map(|entry| entry.path),
             );
         }
-        paths.sort_unstable_by(|left, right| left.stable_sort_key.cmp(&right.stable_sort_key));
-        paths.dedup_by(|left, right| left.stable_sort_key == right.stable_sort_key);
+        sort_deduplicate_search_paths(&mut paths);
         check_cancelled(cancellation)?;
 
         let resolved = paths
@@ -795,38 +795,58 @@ where
                 ))
             })
             .await?;
-        let mut matches = Vec::new();
-        let mut normalized_text = false;
-        let mut partial = false;
-        for result in scanned {
-            let result = result?;
-            if result.cancelled {
-                return Err(SemanticError::Cancelled);
-            }
-            if result.overflowed {
-                return Err(SemanticError::WorkLimit);
-            }
-            normalized_text |= result.normalized;
-            partial |= result.binary;
-            matches.extend(result.matches);
-            if matches.len() > self.limits.max_search_matches {
-                return Err(SemanticError::WorkLimit);
-            }
-        }
-        matches.sort_unstable_by(|left, right| {
-            left.path
-                .stable_sort_key
-                .cmp(&right.path.stable_sort_key)
-                .then(left.line.cmp(&right.line))
-                .then(left.column.cmp(&right.column))
-        });
-        matches.dedup();
+        let result = finish_search(scanned, self.limits.max_search_matches)?;
         check_cancelled(cancellation)?;
-        Ok(SemanticSearchResult {
-            matches,
-            normalized_text,
-            partial,
-        })
+        Ok(result)
+    }
+
+    /// Executes search semantics serially for the current synchronous human
+    /// frontend. This retains the same provider bounds, matching, text flags,
+    /// ordering, and deduplication as [`Self::search`] but has no compute-pool
+    /// scheduling or built-in cancellation point.
+    pub fn search_serial(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<SemanticSearchResult, SemanticError> {
+        let matcher = Matcher::new(query)?;
+        let roots = query
+            .paths
+            .iter()
+            .map(|path| self.filesystem.resolve_existing(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let options = SemanticWalkOptions {
+            max_depth: 64,
+            include_hidden: query.include_hidden,
+            max_entries: self.limits.max_search_entries,
+        };
+        let mut paths = Vec::new();
+        for root in roots {
+            paths.extend(
+                self.filesystem
+                    .walk(&root, options)?
+                    .into_iter()
+                    .filter(|entry| entry.kind == SemanticEntryKind::File)
+                    .map(|entry| entry.path),
+            );
+        }
+        sort_deduplicate_search_paths(&mut paths);
+
+        let resolved = paths
+            .iter()
+            .map(|path| self.filesystem.resolve_existing(path.as_path()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let scanned = resolved.iter().map(|path| {
+            let bytes = self
+                .filesystem
+                .read_limited(path, self.limits.max_search_file_bytes)?;
+            Ok(scan_file(
+                self.filesystem.semantic_path(path),
+                &bytes,
+                &matcher,
+                self.limits.max_matches_per_file,
+            ))
+        });
+        finish_search(scanned, self.limits.max_search_matches)
     }
 }
 
@@ -888,6 +908,48 @@ fn selected(entry: &SemanticEntry, filter: SemanticListFilter) -> bool {
         SemanticListFilter::Files => entry.kind == SemanticEntryKind::File,
         SemanticListFilter::Directories => entry.kind == SemanticEntryKind::Directory,
     }
+}
+
+fn sort_deduplicate_search_paths(paths: &mut Vec<SemanticPath>) {
+    paths.sort_unstable_by(|left, right| left.stable_sort_key.cmp(&right.stable_sort_key));
+    paths.dedup_by(|left, right| left.stable_sort_key == right.stable_sort_key);
+}
+
+fn finish_search(
+    scanned: impl IntoIterator<Item = Result<FileMatches, SemanticError>>,
+    max_matches: usize,
+) -> Result<SemanticSearchResult, SemanticError> {
+    let mut matches = Vec::new();
+    let mut normalized_text = false;
+    let mut partial = false;
+    for result in scanned {
+        let result = result?;
+        if result.cancelled {
+            return Err(SemanticError::Cancelled);
+        }
+        if result.overflowed {
+            return Err(SemanticError::WorkLimit);
+        }
+        normalized_text |= result.normalized;
+        partial |= result.binary;
+        matches.extend(result.matches);
+        if matches.len() > max_matches {
+            return Err(SemanticError::WorkLimit);
+        }
+    }
+    matches.sort_unstable_by(|left, right| {
+        left.path
+            .stable_sort_key
+            .cmp(&right.path.stable_sort_key)
+            .then(left.line.cmp(&right.line))
+            .then(left.column.cmp(&right.column))
+    });
+    matches.dedup();
+    Ok(SemanticSearchResult {
+        matches,
+        normalized_text,
+        partial,
+    })
 }
 
 fn select_range(
@@ -1397,6 +1459,16 @@ mod tests {
             PathBuf::from("src/b.txt")
         );
         assert_eq!(literal.matches[1].text, "needle beta");
+        let serial = services
+            .search_serial(&SearchQuery::new(
+                "needle".to_owned(),
+                vec![PathBuf::from("src"), PathBuf::from("src")],
+                SemanticSearchPattern::Literal,
+                true,
+                false,
+            ))
+            .expect("serial literal search");
+        assert_eq!(serial, literal);
 
         let regex = services
             .search(
@@ -1555,6 +1627,16 @@ mod tests {
             .await
             .expect_err("per-file match limit");
         assert!(matches!(error, SemanticError::WorkLimit));
+        let error = services
+            .search_serial(&SearchQuery::new(
+                "needle".to_owned(),
+                vec![PathBuf::from("src")],
+                SemanticSearchPattern::Literal,
+                false,
+                false,
+            ))
+            .expect_err("serial per-file match limit");
+        assert!(matches!(error, SemanticError::WorkLimit));
 
         let error = services
             .search(
@@ -1570,6 +1652,16 @@ mod tests {
             )
             .await
             .expect_err("invalid regex");
+        assert!(matches!(error, SemanticError::Regex(_)));
+        let error = services
+            .search_serial(&SearchQuery::new(
+                "[".to_owned(),
+                vec![PathBuf::from("src")],
+                SemanticSearchPattern::Regex,
+                false,
+                false,
+            ))
+            .expect_err("invalid serial regex");
         assert!(matches!(error, SemanticError::Regex(_)));
     }
 }

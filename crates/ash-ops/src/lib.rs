@@ -30,10 +30,11 @@ pub use reducer::{
     collapse_repeated_lines, focus_error_output,
 };
 pub use semantic::{
-    ListQuery, MAX_READ_FILE_BYTES, NativeFileSystem, ReadQuery, SearchQuery, SemanticEntry,
-    SemanticEntryKind, SemanticError, SemanticFileSystem, SemanticListFilter, SemanticListResult,
-    SemanticPath, SemanticRead, SemanticReadMode, SemanticReadResult, SemanticSearchMatch,
-    SemanticSearchPattern, SemanticSearchResult, SemanticServices, SemanticWalkOptions,
+    ListQuery, MAX_READ_FILE_BYTES, MAX_SEARCH_FILE_BYTES, NativeFileSystem, ReadQuery,
+    SearchQuery, SemanticEntry, SemanticEntryKind, SemanticError, SemanticFileSystem,
+    SemanticListFilter, SemanticListResult, SemanticPath, SemanticRead, SemanticReadMode,
+    SemanticReadResult, SemanticSearchMatch, SemanticSearchPattern, SemanticSearchResult,
+    SemanticServices, SemanticWalkOptions,
 };
 
 /// Portable operations bound to one native workspace capability.

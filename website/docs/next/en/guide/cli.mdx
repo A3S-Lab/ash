@@ -31,11 +31,11 @@ Harness interface.
 
 The current H1 checkpoint executes the H0 simple-command syntax sequentially
 against one persistent native state. It implements `pwd`, `echo` (with `-n`),
-`cd`, portable `ls`, and raw-byte `cat`; source may come from `-c SOURCE`, a
-native script-file path, or stdin:
+`cd`, portable `ls`, raw-byte `cat`, and text `grep`. Source may come from
+`-c SOURCE`, a native script-file path, or stdin:
 
 ```sh
-ash shell -c 'pwd; ls -a; cat crates/ash-shell/Cargo.toml'
+ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ```
@@ -47,9 +47,14 @@ one stably ordered native name per line, and supports `-a`/`--all`,
 `-d`/`--directory`, `-1`, combined short options, and `--`. Portable `cat`
 requires one path, writes exact bytes without an added newline, accepts `--`,
 and shares the 128 MiB read/capture ceiling; options, multiple files, and stdin
-`-` remain errors until streaming stdio lands. Interactive input, profiles,
-external processes, and portable `grep` execution are not implemented yet. The
-regular binary enables the `human-shell` feature; `cargo build -p a3s-ash
+`-` remain errors until streaming stdio lands. Portable `grep` requires one
+valid-UTF-8 regular file and uses Rust regular expressions by default. It
+supports `-E`/`--extended-regexp`, `-F`/`--fixed-strings`,
+`-i`/`--ignore-case`, `-n`/`--line-number`, combined short options, and `--`.
+Searches are capped at 64 MiB; no matches return status 1 without a diagnostic.
+Directories, multiple files, stdin `-`, and unsupported options fail explicitly.
+Interactive input, profiles, and external processes are not implemented yet.
+The regular binary enables the `human-shell` feature; `cargo build -p a3s-ash
 --no-default-features` keeps a minimal machine-only build.
 
 ## Error contract
@@ -75,6 +80,6 @@ logical form and cannot escape through lexical traversal, symbolic links, or
 Windows reparse points. `exec` never switches to an implicit host shell.
 
 Human-shell state instead uses native `PathBuf` and `OsString` values. `cd`,
-`ls`, and `cat` inherit normal user filesystem authority, while native path
-units are preserved or reversibly escaped; this does not weaken or replace
+`ls`, `cat`, and `grep` inherit normal user filesystem authority, while native
+path units are preserved or reversibly escaped; this does not weaken or replace
 ASH/1 workspace confinement.

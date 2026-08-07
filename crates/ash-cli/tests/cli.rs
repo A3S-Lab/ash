@@ -458,7 +458,7 @@ fn shell_command_executes_stateful_sequence_without_machine_framing() {
             "shell",
             "--no-profile",
             "-c",
-            "cd .; pwd; echo \"hello world\"; ls -1; cd child; pwd; cat payload.bin; echo -n done",
+            "cd .; pwd; echo \"hello world\"; ls -1; cd child; pwd; grep -n pay payload.bin; cat payload.bin; echo -n done",
         ],
         b"",
     );
@@ -469,7 +469,7 @@ fn shell_command_executes_stateful_sequence_without_machine_framing() {
     assert_eq!(
         output.stdout,
         format!(
-            "{}\nhello world\na.txt\nb.txt\nchild\n{}\npayloaddone",
+            "{}\nhello world\na.txt\nb.txt\nchild\n{}\n1:payload\npayloaddone",
             root.display(),
             child.display()
         )

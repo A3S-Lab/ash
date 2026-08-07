@@ -20,8 +20,8 @@ services. Existing ASH/1 adapters reuse those services while retaining permit,
 deadline, budget, projection, retention, and ASON ownership. H1 has started with
 a feature-gated `ash shell` route for inline plus bounded stdin and native
 script-file sources, with sequential `pwd`, `echo`, `cd`, and portable `ls`
-and bounded raw-byte `cat` execution. Interactive input, external execution, the
-remaining portable commands, expansion, pipelines, jobs, and WSL launch remain
+plus bounded raw-byte `cat` and text `grep` execution. Interactive input,
+external execution, expansion, pipelines, jobs, and WSL launch remain
 unimplemented.
 
 ## 1. Executive decision
@@ -324,8 +324,8 @@ There is no implicit step from native lookup failure to WSL.
 Examples:
 
 ```sh
-ls -la .                  # portable ash command
-grep -R TODO crates       # portable ash command
+ls -a .                   # portable ash command
+grep -n TODO README.md    # portable ash command
 cargo test                # native executable from host PATH
 native:python app.py      # explicit native backend
 linux:make -j8            # explicit WSL backend on Windows
@@ -348,7 +348,7 @@ The first portable command set reuses existing semantics where possible:
 | `echo`, `printf` | shell builtin | Exact documented escaping, not host-shell delegation. |
 | `ls` | list service | Familiar common options; not all GNU options. |
 | `cat` | read service | Bounded raw bytes now; streaming and text modes later. |
-| `grep` | search service | Literal and regular-expression modes. |
+| `grep` | search service | Bounded single-file literal and Rust-regex modes now. |
 | `cp`, `mv`, `rm`, `touch` | filesystem service | Preserve transactional conflict behavior. |
 | `mkdir`, `rmdir` | future directory service | Requires explicit recovery and capability design. |
 | `env`, `export`, `unset` | shell state | Host-aware environment names. |
@@ -369,6 +369,18 @@ aggregate synchronous shell capture ceiling are both 128 MiB. Options, multiple
 files, and the standard-input operand `-` fail explicitly. Generalized
 streaming, multi-file concatenation, and text modes remain tied to the H2 stdio
 plan rather than pretending that the current buffered executor is streaming.
+
+The current executable `grep` contract requires one pattern and one native
+regular-file path. Rust regular expressions are the default; `-E`/
+`--extended-regexp` selects that mode explicitly, while `-F`/`--fixed-strings`
+selects literal matching. `-i`/`--ignore-case`, `-n`/`--line-number`, combined
+short options, and `--` are accepted. Matching UTF-8 lines are emitted in source
+order with LF endings; CRLF input is normalized. Each file is limited to 64
+MiB, and the rendered result cannot take synchronous shell capture above 128
+MiB. No matches return status 1 without a diagnostic. Invalid regular
+expressions and argument errors return status 2; missing files, directories,
+non-UTF-8 input, and work-limit failures return status 1. Recursive search,
+multiple files, filename prefixes, stdin `-`, and streaming remain later work.
 
 Every portable command has a versioned option contract. Common Linux spelling
 is preferred, but unsupported GNU flags fail clearly. The project must not
@@ -669,15 +681,15 @@ builtin adapters.
 
 Current checkpoint: `ash shell -c SOURCE`, `ash shell < script.ash`, and
 `ash shell script.ash` parse the H0 syntax subset, execute sequential `pwd`,
-`echo`, `cd`, portable `ls`, and bounded raw-byte `cat` commands against one
-native `ShellState`, emit source-spanned human diagnostics, and return the last
-command status. Stdin and file sources share a 1 MiB valid-UTF-8 ceiling, while
-file operands retain native path representation. `ls` and `cat` reuse the
-provider-neutral list/read services with an unconfined native provider and the
-option contracts in section 10. The `human-shell` feature is enabled for the
-normal binary and can be disabled for a minimal machine-only build. Interactive
-input, profiles, native process launch, and `grep` remain for later H1
-increments.
+`echo`, `cd`, portable `ls`, bounded raw-byte `cat`, and bounded text `grep`
+commands against one native `ShellState`, emit source-spanned human diagnostics,
+and return the last command status. Stdin and file sources share a 1 MiB
+valid-UTF-8 ceiling, while file operands retain native path representation.
+`ls`, `cat`, and `grep` reuse the provider-neutral list/read/search services with
+an unconfined native provider and the option contracts in section 10. The
+`human-shell` feature is enabled for the normal binary and can be disabled for a
+minimal machine-only build. Interactive input, profiles, and native process
+launch remain for later H1 increments.
 
 ### H2: streaming execution
 
