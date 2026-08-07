@@ -31,11 +31,13 @@ Harness interface.
 
 The current H1 checkpoint executes the H0 simple-command syntax sequentially
 against one persistent native state. It implements `pwd`, `echo` (with `-n`),
-`cd`, literal `export`/`unset`, portable `ls`, raw-byte `cat`, and text `grep`.
-Source may come from `-c SOURCE`, a native script-file path, or stdin:
+`cd`, literal `export`/`unset`, portable `ls`, raw-byte `cat`, text `grep`, and
+native host executables. Source may come from `-c SOURCE`, a native script-file
+path, or stdin:
 
 ```sh
 ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
+ash shell -c "native:rustc --version"
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ```
@@ -60,9 +62,17 @@ must be ASCII shell identifiers, empty values are preserved, and unsetting a
 missing name succeeds. Listing, multiple names, and parameter expansion are not
 implemented yet.
 
-Interactive input, profiles, and external processes are not implemented yet.
-The regular binary enables the `human-shell` feature; `cargo build -p a3s-ash
---no-default-features` keeps a minimal machine-only build.
+Native programs resolve through the persistent `PATH` or an explicit `native:`
+prefix. The resolved host executable receives the parsed argument vector,
+current directory, and exported environment directly; ash never inserts a host
+shell command string. Child stdin is closed in this checkpoint. Stdout and
+stderr share the remaining 128 MiB synchronous capture allowance, and a normal
+nonzero native exit becomes the command status without an added diagnostic.
+
+Interactive input, profiles, parameter expansion, streaming stdio, and WSL
+execution are not implemented yet. The regular binary enables the `human-shell`
+feature; `cargo build -p a3s-ash --no-default-features` keeps a minimal
+machine-only build.
 
 ## Error contract
 
@@ -88,5 +98,6 @@ Windows reparse points. `exec` never switches to an implicit host shell.
 
 Human-shell state instead uses native `PathBuf` and `OsString` values. `cd`,
 `export`, `unset`, `ls`, `cat`, and `grep` inherit normal user authority, while
-native path and environment units are preserved or reversibly escaped; this
-does not weaken or replace ASH/1 workspace confinement.
+native external programs inherit the same cwd/environment state and ordinary OS
+authority. Native path and environment units are preserved or reversibly
+escaped; this does not weaken or replace ASH/1 workspace confinement.

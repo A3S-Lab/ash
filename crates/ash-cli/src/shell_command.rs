@@ -15,7 +15,7 @@ pub async fn run(arguments: &[OsString]) -> Result<ExitCode, CliError> {
     let source = source(arguments).await?;
     let mut state = ShellState::from_process()
         .map_err(|error| CliError::human(format!("cannot initialize shell state: {error}"), 1))?;
-    let execution = execute_source(&source, &mut state);
+    let execution = execute_source(&source, &mut state).await;
 
     let mut stdout = stdout();
     stdout

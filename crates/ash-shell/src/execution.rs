@@ -1,12 +1,19 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ash_ops::{
     ListQuery, MAX_READ_FILE_BYTES, NativeFileSystem, ReadQuery, SearchQuery, SemanticEntryKind,
     SemanticError, SemanticFileSystem, SemanticListFilter, SemanticReadMode, SemanticSearchPattern,
     SemanticServices,
 };
+use ash_platform::{
+    EnvironmentChange, NativeProcessSpec, PlatformError, ProcessExit, spawn_native,
+};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::state::validate_identifier;
 use crate::{
@@ -22,6 +29,7 @@ pub enum ExecutionDiagnosticCode {
     Parse(DiagnosticCode),
     InvalidArguments,
     Resolution,
+    Process,
     Filesystem,
     Unsupported,
 }
@@ -65,6 +73,7 @@ impl ExecutionDiagnostic {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShellExecution {
     stdout: Vec<u8>,
+    stderr: Vec<u8>,
     diagnostics: Vec<ExecutionDiagnostic>,
     status: ShellStatus,
 }
@@ -73,6 +82,11 @@ impl ShellExecution {
     #[must_use]
     pub fn stdout(&self) -> &[u8] {
         &self.stdout
+    }
+
+    #[must_use]
+    pub fn stderr(&self) -> &[u8] {
+        &self.stderr
     }
 
     #[must_use]
@@ -87,33 +101,31 @@ impl ShellExecution {
 
     #[must_use]
     pub fn rendered_stderr(&self) -> Vec<u8> {
-        let capacity = self
-            .diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.message.len() + 40)
-            .sum();
-        let mut output = Vec::with_capacity(capacity);
-        for diagnostic in &self.diagnostics {
-            output.extend_from_slice(diagnostic.render().as_bytes());
-        }
-        output
+        self.stderr.clone()
     }
+}
+
+#[derive(Default)]
+struct ExecutionOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    diagnostics: Vec<ExecutionDiagnostic>,
 }
 
 /// Parses and executes the currently implemented foreground shell subset.
 ///
-/// Commands run sequentially against one mutable `ShellState`. This first H1
-/// slice implements `pwd`, `echo`, `cd`, and bounded portable `ls`, `cat`, and
-/// `grep` commands; other resolved command categories produce explicit
-/// diagnostics without invoking a host shell.
+/// Commands run sequentially against one mutable `ShellState`. The current H1
+/// slice implements stateful environment updates, the portable command set,
+/// and bounded direct-argv native execution; unresolved backends produce
+/// explicit diagnostics without invoking a host shell.
 #[must_use]
-pub fn execute_source(source: &str, state: &mut ShellState) -> ShellExecution {
-    execute_source_with(source, state, &PathCommandLookup, HostPlatform::current())
+pub async fn execute_source(source: &str, state: &mut ShellState) -> ShellExecution {
+    execute_source_with(source, state, &PathCommandLookup, HostPlatform::current()).await
 }
 
 /// Injectable form of [`execute_source`] for deterministic resolver tests.
 #[must_use]
-pub fn execute_source_with<L>(
+pub async fn execute_source_with<L>(
     source: &str,
     state: &mut ShellState,
     lookup: &L,
@@ -122,25 +134,40 @@ pub fn execute_source_with<L>(
 where
     L: NativeCommandLookup + ?Sized,
 {
+    execute_source_with_runner(source, state, lookup, host, &DirectNativeCommandRunner).await
+}
+
+async fn execute_source_with_runner<L, R>(
+    source: &str,
+    state: &mut ShellState,
+    lookup: &L,
+    host: HostPlatform,
+    runner: &R,
+) -> ShellExecution
+where
+    L: NativeCommandLookup + ?Sized,
+    R: NativeCommandRunner + ?Sized,
+{
     let script = match parse(source) {
         Ok(script) => script,
         Err(error) => {
             let status = shell_status(2, ShellStatusKind::ParseError);
             state.set_last_status(status.clone());
+            let diagnostic = ExecutionDiagnostic {
+                code: ExecutionDiagnosticCode::Parse(error.code()),
+                message: error.message().to_owned(),
+                span: error.span(),
+            };
             return ShellExecution {
                 stdout: Vec::new(),
-                diagnostics: vec![ExecutionDiagnostic {
-                    code: ExecutionDiagnosticCode::Parse(error.code()),
-                    message: error.message().to_owned(),
-                    span: error.span(),
-                }],
+                stderr: diagnostic.render().into_bytes(),
+                diagnostics: vec![diagnostic],
                 status,
             };
         }
     };
 
-    let mut stdout = Vec::new();
-    let mut diagnostics = Vec::new();
+    let mut output = ExecutionOutput::default();
     let mut final_status = ShellStatus::success();
     for command in script.commands() {
         let words: Vec<OsString> = command
@@ -162,101 +189,319 @@ where
             );
             resolver.resolve(name)
         };
+        let diagnostic_start = output.diagnostics.len();
         final_status = match resolved {
-            Ok(resolved) => execute_command(
-                state,
-                resolved,
-                &words[1..],
-                command.span(),
-                &mut stdout,
-                &mut diagnostics,
-            ),
-            Err(error) => resolution_failure(error, name_span, &mut diagnostics),
+            Ok(resolved) => {
+                execute_command(
+                    state,
+                    resolved,
+                    &words[1..],
+                    command.span(),
+                    &mut output,
+                    runner,
+                )
+                .await
+            }
+            Err(error) => resolution_failure(error, name_span, &mut output.diagnostics),
         };
+        for diagnostic in &output.diagnostics[diagnostic_start..] {
+            output
+                .stderr
+                .extend_from_slice(diagnostic.render().as_bytes());
+        }
         state.set_last_status(final_status.clone());
     }
     if script.commands().is_empty() {
         state.set_last_status(final_status.clone());
     }
     ShellExecution {
-        stdout,
-        diagnostics,
+        stdout: output.stdout,
+        stderr: output.stderr,
+        diagnostics: output.diagnostics,
         status: final_status,
     }
 }
 
-fn execute_command(
+async fn execute_command<R>(
     state: &mut ShellState,
     resolved: ResolvedCommand,
     arguments: &[OsString],
     span: SourceSpan,
-    stdout: &mut Vec<u8>,
-    diagnostics: &mut Vec<ExecutionDiagnostic>,
-) -> ShellStatus {
+    output: &mut ExecutionOutput,
+    runner: &R,
+) -> ShellStatus
+where
+    R: NativeCommandRunner + ?Sized,
+{
     match resolved {
         ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Cd) => {
-            execute_cd(state, arguments, span, diagnostics)
+            execute_cd(state, arguments, span, &mut output.diagnostics)
         }
         ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Export) => {
-            execute_export(state, arguments, span, diagnostics)
+            execute_export(state, arguments, span, &mut output.diagnostics)
         }
         ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Unset) => {
-            execute_unset(state, arguments, span, diagnostics)
+            execute_unset(state, arguments, span, &mut output.diagnostics)
         }
-        ResolvedCommand::Portable(PortableCommand::Pwd) => {
-            execute_pwd(state, arguments, span, stdout, diagnostics)
-        }
+        ResolvedCommand::Portable(PortableCommand::Pwd) => execute_pwd(
+            state,
+            arguments,
+            span,
+            &mut output.stdout,
+            &mut output.diagnostics,
+        ),
         ResolvedCommand::Portable(PortableCommand::Echo) => {
-            execute_echo(arguments, span, stdout, diagnostics)
+            execute_echo(arguments, span, &mut output.stdout, &mut output.diagnostics)
         }
-        ResolvedCommand::Portable(PortableCommand::List) => {
-            execute_ls(state, arguments, span, stdout, diagnostics)
-        }
-        ResolvedCommand::Portable(PortableCommand::Cat) => {
-            execute_cat(state, arguments, span, stdout, diagnostics)
-        }
-        ResolvedCommand::Portable(PortableCommand::Grep) => {
-            execute_grep(state, arguments, span, stdout, diagnostics)
-        }
+        ResolvedCommand::Portable(PortableCommand::List) => execute_ls(
+            state,
+            arguments,
+            span,
+            &mut output.stdout,
+            &mut output.diagnostics,
+        ),
+        ResolvedCommand::Portable(PortableCommand::Cat) => execute_cat(
+            state,
+            arguments,
+            span,
+            &mut output.stdout,
+            &mut output.diagnostics,
+        ),
+        ResolvedCommand::Portable(PortableCommand::Grep) => execute_grep(
+            state,
+            arguments,
+            span,
+            &mut output.stdout,
+            &mut output.diagnostics,
+        ),
         ResolvedCommand::StatefulBuiltin(command) => unsupported(
             format!("builtin `{}` is not implemented yet", command.name()),
             span,
-            diagnostics,
+            &mut output.diagnostics,
             ShellStatusKind::Exited,
             2,
         ),
         ResolvedCommand::Alias { name, .. } => unsupported(
             format!("alias execution for `{name}` is not implemented yet"),
             span,
-            diagnostics,
+            &mut output.diagnostics,
             ShellStatusKind::ResolutionError,
             126,
         ),
         ResolvedCommand::Function { name } => unsupported(
             format!("function execution for `{name}` is not implemented yet"),
             span,
-            diagnostics,
+            &mut output.diagnostics,
             ShellStatusKind::ResolutionError,
             126,
         ),
-        ResolvedCommand::Native { executable, .. } => unsupported(
-            format!(
-                "native execution for `{}` is not implemented yet",
-                display_os_string(executable.as_os_str())
-            ),
-            span,
-            diagnostics,
-            ShellStatusKind::SpawnError,
-            126,
-        ),
+        ResolvedCommand::Native { executable, .. } => {
+            execute_native(state, executable, arguments, span, output, runner).await
+        }
         ResolvedCommand::Wsl { command, .. } => unsupported(
             format!("WSL execution for `{command}` is not implemented yet"),
             span,
-            diagnostics,
+            &mut output.diagnostics,
             ShellStatusKind::SpawnError,
             126,
         ),
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NativeInvocation {
+    executable: PathBuf,
+    arguments: Vec<OsString>,
+    cwd: PathBuf,
+    environment: Vec<(OsString, OsString)>,
+    capture_limit: u64,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct NativeCommandOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exit: ProcessExit,
+}
+
+#[derive(Debug)]
+enum NativeCommandError {
+    Platform(PlatformError),
+    Capture(io::Error),
+    MissingStream(&'static str),
+    CaptureLimit { max: u64 },
+}
+
+impl std::fmt::Display for NativeCommandError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Platform(error) => error.fmt(formatter),
+            Self::Capture(error) => write!(formatter, "cannot capture process output: {error}"),
+            Self::MissingStream(stream) => {
+                write!(
+                    formatter,
+                    "the process did not expose its captured {stream}"
+                )
+            }
+            Self::CaptureLimit { max } => {
+                write!(
+                    formatter,
+                    "process output exceeds the {max}-byte capture allowance"
+                )
+            }
+        }
+    }
+}
+
+trait NativeCommandRunner {
+    async fn run(
+        &self,
+        invocation: NativeInvocation,
+    ) -> Result<NativeCommandOutput, NativeCommandError>;
+}
+
+struct DirectNativeCommandRunner;
+
+impl NativeCommandRunner for DirectNativeCommandRunner {
+    async fn run(
+        &self,
+        invocation: NativeInvocation,
+    ) -> Result<NativeCommandOutput, NativeCommandError> {
+        let capture_limit = invocation.capture_limit;
+        let mut process = spawn_native(&NativeProcessSpec {
+            executable: invocation.executable.into_os_string(),
+            argv: invocation.arguments,
+            cwd: invocation.cwd,
+            environment: invocation
+                .environment
+                .into_iter()
+                .map(|(name, value)| EnvironmentChange::Set(name, value))
+                .collect(),
+            clear_environment: true,
+            pipe_stdin: false,
+        })
+        .map_err(NativeCommandError::Platform)?;
+        let Some(stdout) = process.take_stdout() else {
+            let _ = process.terminate().await;
+            let _ = process.wait().await;
+            return Err(NativeCommandError::MissingStream("stdout"));
+        };
+        let Some(stderr) = process.take_stderr() else {
+            let _ = process.terminate().await;
+            let _ = process.wait().await;
+            return Err(NativeCommandError::MissingStream("stderr"));
+        };
+        let captured = Arc::new(AtomicU64::new(0));
+        let result = tokio::try_join!(
+            capture_process_stream(stdout, Arc::clone(&captured), capture_limit),
+            capture_process_stream(stderr, captured, capture_limit),
+            async { process.wait().await.map_err(NativeCommandError::Platform) },
+        );
+        if result.is_err() {
+            let _ = process.terminate().await;
+            let _ = process.wait().await;
+        }
+        let (stdout, stderr, exit) = result?;
+        Ok(NativeCommandOutput {
+            stdout,
+            stderr,
+            exit,
+        })
+    }
+}
+
+async fn capture_process_stream<R>(
+    mut reader: R,
+    captured: Arc<AtomicU64>,
+    max: u64,
+) -> Result<Vec<u8>, NativeCommandError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(NativeCommandError::Capture)?;
+        if read == 0 {
+            return Ok(output);
+        }
+        let read = u64::try_from(read).unwrap_or(u64::MAX);
+        captured
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(read).filter(|updated| *updated <= max)
+            })
+            .map_err(|_| NativeCommandError::CaptureLimit { max })?;
+        let read = usize::try_from(read).unwrap_or(buffer.len());
+        output.extend_from_slice(&buffer[..read]);
+    }
+}
+
+async fn execute_native<R>(
+    state: &ShellState,
+    executable: PathBuf,
+    arguments: &[OsString],
+    span: SourceSpan,
+    output: &mut ExecutionOutput,
+    runner: &R,
+) -> ShellStatus
+where
+    R: NativeCommandRunner + ?Sized,
+{
+    let captured = u64::try_from(output.stdout.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(u64::try_from(output.stderr.len()).unwrap_or(u64::MAX));
+    let invocation = NativeInvocation {
+        executable: executable.clone(),
+        arguments: arguments.to_vec(),
+        cwd: state.cwd().to_owned(),
+        environment: state
+            .environment()
+            .iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect(),
+        capture_limit: MAX_READ_FILE_BYTES.saturating_sub(captured),
+    };
+    match runner.run(invocation).await {
+        Ok(native) => {
+            output.stdout.extend_from_slice(&native.stdout);
+            output.stderr.extend_from_slice(&native.stderr);
+            native_exit_status(native.exit)
+        }
+        Err(NativeCommandError::CaptureLimit { .. }) => process_failure(
+            format!(
+                "native command output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
+            ),
+            span,
+            &mut output.diagnostics,
+            ShellStatusKind::Exited,
+            1,
+        ),
+        Err(error) => process_failure(
+            format!(
+                "cannot execute `{}`: {error}",
+                display_os_string(executable.as_os_str())
+            ),
+            span,
+            &mut output.diagnostics,
+            ShellStatusKind::SpawnError,
+            126,
+        ),
+    }
+}
+
+fn native_exit_status(exit: ProcessExit) -> ShellStatus {
+    let (code, kind) = if let Some(signal) = exit.signal {
+        (128_i64.saturating_add(signal), ShellStatusKind::Interrupted)
+    } else {
+        (
+            exit.code.unwrap_or_else(|| i64::from(!exit.success)),
+            ShellStatusKind::Exited,
+        )
+    };
+    ShellStatus::new(code, kind, exit.signal, ExecutionBackend::Native)
 }
 
 fn execute_pwd(
@@ -948,6 +1193,21 @@ fn filesystem_failure(
     shell_status(1, ShellStatusKind::Exited)
 }
 
+fn process_failure(
+    message: String,
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+    kind: ShellStatusKind,
+    code: i64,
+) -> ShellStatus {
+    diagnostics.push(ExecutionDiagnostic {
+        code: ExecutionDiagnosticCode::Process,
+        message,
+        span,
+    });
+    shell_status(code, kind)
+}
+
 fn unsupported(
     message: String,
     span: SourceSpan,
@@ -1032,12 +1292,18 @@ fn push_os_string(output: &mut Vec<u8>, value: &OsStr) {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{ExecutionDiagnosticCode, execute_source, execute_source_with};
+    use ash_platform::ProcessExit;
+
+    use super::{
+        ExecutionDiagnosticCode, NativeCommandError, NativeCommandOutput, NativeCommandRunner,
+        NativeInvocation, execute_source, execute_source_with, execute_source_with_runner,
+    };
     use crate::{HostPlatform, ShellState, ShellStatusKind, SourceSpan};
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -1060,8 +1326,56 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pwd_echo_and_cd_share_state_across_sequential_commands() {
+    struct RecordingRunner {
+        invocation: Mutex<Option<NativeInvocation>>,
+        output: Mutex<Option<NativeCommandOutput>>,
+    }
+
+    impl RecordingRunner {
+        fn new(output: NativeCommandOutput) -> Self {
+            Self {
+                invocation: Mutex::new(None),
+                output: Mutex::new(Some(output)),
+            }
+        }
+    }
+
+    impl NativeCommandRunner for RecordingRunner {
+        async fn run(
+            &self,
+            invocation: NativeInvocation,
+        ) -> Result<NativeCommandOutput, NativeCommandError> {
+            *self.invocation.lock().expect("invocation lock") = Some(invocation);
+            Ok(self
+                .output
+                .lock()
+                .expect("output lock")
+                .take()
+                .expect("one output"))
+        }
+    }
+
+    struct FailingRunner {
+        capture_limit: bool,
+    }
+
+    impl NativeCommandRunner for FailingRunner {
+        async fn run(
+            &self,
+            invocation: NativeInvocation,
+        ) -> Result<NativeCommandOutput, NativeCommandError> {
+            if self.capture_limit {
+                Err(NativeCommandError::CaptureLimit {
+                    max: invocation.capture_limit,
+                })
+            } else {
+                Err(NativeCommandError::MissingStream("stdout"))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pwd_echo_and_cd_share_state_across_sequential_commands() {
         let directory = TestDirectory::new();
         fs::create_dir(directory.0.join("child")).expect("create child");
         let mut state = ShellState::new(&directory.0);
@@ -1069,7 +1383,8 @@ mod tests {
         let execution = execute_source(
             "pwd; echo \"hello world\"; cd child; pwd; echo -n done",
             &mut state,
-        );
+        )
+        .await;
 
         let child = fs::canonicalize(directory.0.join("child")).expect("canonical child");
         let expected = format!(
@@ -1083,8 +1398,8 @@ mod tests {
         assert_eq!(state.cwd(), child);
     }
 
-    #[test]
-    fn failed_resolution_is_typed_and_later_commands_still_run() {
+    #[tokio::test]
+    async fn failed_resolution_is_typed_and_later_commands_still_run() {
         let directory = TestDirectory::new();
         let mut state = ShellState::new(&directory.0);
         let lookup = |_command: &str,
@@ -1096,7 +1411,8 @@ mod tests {
             &mut state,
             &lookup,
             HostPlatform::Linux,
-        );
+        )
+        .await;
 
         assert_eq!(execution.stdout(), b"recovered\n");
         assert_eq!(execution.diagnostics().len(), 1);
@@ -1108,13 +1424,131 @@ mod tests {
         assert_eq!(state.last_status().code(), 0);
     }
 
-    #[test]
-    fn export_and_unset_persist_variable_environment_and_home_state() {
+    #[tokio::test]
+    async fn native_execution_preserves_exact_state_argv_output_and_status() {
+        let mut state = ShellState::new("/fixture/work");
+        state.environment_mut().insert("PATH", "/fixture/bin");
+        state
+            .environment_mut()
+            .insert("ASH_NATIVE_TOKEN", "present");
+        let lookup =
+            |command: &str, _cwd: &std::path::Path, _environment: &crate::PlatformEnvironment| {
+                (command == "tool").then(|| PathBuf::from("/fixture/bin/tool"))
+            };
+        let runner = RecordingRunner::new(NativeCommandOutput {
+            stdout: b"native-stdout\n".to_vec(),
+            stderr: b"native-stderr\n".to_vec(),
+            exit: ProcessExit {
+                success: false,
+                code: Some(23),
+                signal: None,
+            },
+        });
+
+        let execution = execute_source_with_runner(
+            "native:tool 'alpha beta' plain",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &runner,
+        )
+        .await;
+
+        assert_eq!(execution.stdout(), b"native-stdout\n");
+        assert_eq!(execution.stderr(), b"native-stderr\n");
+        assert_eq!(execution.rendered_stderr(), b"native-stderr\n");
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(execution.status().code(), 23);
+        assert_eq!(execution.status().kind(), ShellStatusKind::Exited);
+        assert_eq!(state.last_status().code(), 23);
+        let invocation = runner
+            .invocation
+            .lock()
+            .expect("invocation lock")
+            .clone()
+            .expect("invocation");
+        assert_eq!(invocation.executable, PathBuf::from("/fixture/bin/tool"));
+        assert_eq!(invocation.cwd, PathBuf::from("/fixture/work"));
+        assert_eq!(
+            invocation.arguments,
+            [OsString::from("alpha beta"), OsString::from("plain")]
+        );
+        assert_eq!(
+            invocation.environment,
+            [
+                (
+                    OsString::from("ASH_NATIVE_TOKEN"),
+                    OsString::from("present"),
+                ),
+                (OsString::from("PATH"), OsString::from("/fixture/bin")),
+            ]
+        );
+        assert_eq!(invocation.capture_limit, super::MAX_READ_FILE_BYTES);
+
+        let signaled = super::native_exit_status(ProcessExit {
+            success: false,
+            code: None,
+            signal: Some(15),
+        });
+        assert_eq!(signaled.code(), 143);
+        assert_eq!(signaled.kind(), ShellStatusKind::Interrupted);
+        assert_eq!(signaled.signal(), Some(15));
+    }
+
+    #[tokio::test]
+    async fn native_infrastructure_and_capture_failures_are_typed() {
+        let lookup =
+            |_command: &str, _cwd: &std::path::Path, _environment: &crate::PlatformEnvironment| {
+                Some(PathBuf::from("/fixture/bin/tool"))
+            };
+        for (capture_limit, code, kind, message) in [
+            (
+                false,
+                126,
+                ShellStatusKind::SpawnError,
+                "cannot execute `/fixture/bin/tool`: the process did not expose its captured stdout",
+            ),
+            (
+                true,
+                1,
+                ShellStatusKind::Exited,
+                "native command output exceeds the 134217728-byte synchronous shell capture ceiling",
+            ),
+        ] {
+            let mut state = ShellState::new("/fixture");
+            let failure = execute_source_with_runner(
+                "tool",
+                &mut state,
+                &lookup,
+                HostPlatform::Linux,
+                &FailingRunner { capture_limit },
+            )
+            .await;
+
+            assert!(failure.stdout().is_empty());
+            assert_eq!(failure.diagnostics().len(), 1);
+            assert_eq!(
+                failure.diagnostics()[0].code(),
+                ExecutionDiagnosticCode::Process
+            );
+            assert_eq!(failure.diagnostics()[0].message(), message);
+            assert_eq!(failure.status().code(), code);
+            assert_eq!(failure.status().kind(), kind);
+            assert_eq!(
+                failure.rendered_stderr(),
+                failure.diagnostics()[0].render().into_bytes()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn export_and_unset_persist_variable_environment_and_home_state() {
         let directory = TestDirectory::new();
         fs::create_dir(directory.0.join("child")).expect("create child");
         let mut state = ShellState::new(&directory.0);
 
-        let exported = execute_source("export TOKEN='alpha beta=gamma'; export EMPTY=", &mut state);
+        let exported =
+            execute_source("export TOKEN='alpha beta=gamma'; export EMPTY=", &mut state).await;
         assert!(exported.stdout().is_empty());
         assert!(exported.diagnostics().is_empty());
         assert_eq!(exported.status().code(), 0);
@@ -1129,18 +1563,18 @@ mod tests {
         assert_eq!(state.variable("EMPTY"), Some(OsStr::new("")));
         assert_eq!(state.environment().get("EMPTY"), Some(OsStr::new("")));
 
-        let overwritten = execute_source("export -- TOKEN=second", &mut state);
+        let overwritten = execute_source("export -- TOKEN=second", &mut state).await;
         assert!(overwritten.diagnostics().is_empty());
         assert_eq!(state.variable("TOKEN"), Some(OsStr::new("second")));
         assert_eq!(state.environment().get("TOKEN"), Some(OsStr::new("second")));
 
-        let home = execute_source("export HOME=child; cd; pwd", &mut state);
+        let home = execute_source("export HOME=child; cd; pwd", &mut state).await;
         let child = fs::canonicalize(directory.0.join("child")).expect("canonical child");
         assert_eq!(home.stdout(), format!("{}\n", child.display()).as_bytes());
         assert!(home.diagnostics().is_empty());
         assert_eq!(state.cwd(), child);
 
-        let unset = execute_source("unset -- TOKEN; unset MISSING; unset HOME", &mut state);
+        let unset = execute_source("unset -- TOKEN; unset MISSING; unset HOME", &mut state).await;
         assert!(unset.stdout().is_empty());
         assert!(unset.diagnostics().is_empty());
         assert_eq!(unset.status().code(), 0);
@@ -1150,8 +1584,8 @@ mod tests {
         assert_eq!(state.environment().get("HOME"), None);
     }
 
-    #[test]
-    fn export_and_unset_reject_options_arity_assignments_and_invalid_names() {
+    #[tokio::test]
+    async fn export_and_unset_reject_options_arity_assignments_and_invalid_names() {
         let mut state = ShellState::new(".");
         let cases = [
             (
@@ -1178,7 +1612,7 @@ mod tests {
         ];
 
         for (source, message) in cases {
-            let failure = execute_source(source, &mut state);
+            let failure = execute_source(source, &mut state).await;
             assert!(failure.stdout().is_empty(), "source={source}");
             assert_eq!(
                 failure.diagnostics()[0].code(),
@@ -1196,10 +1630,10 @@ mod tests {
         assert_eq!(state.environment().get("TOKEN"), None);
     }
 
-    #[test]
-    fn parse_argument_filesystem_and_unsupported_failures_are_distinct() {
+    #[tokio::test]
+    async fn parse_argument_filesystem_and_unsupported_failures_are_distinct() {
         let mut state = ShellState::new(".");
-        let parse = execute_source("echo 'unterminated", &mut state);
+        let parse = execute_source("echo 'unterminated", &mut state).await;
         assert!(matches!(
             parse.diagnostics()[0].code(),
             ExecutionDiagnosticCode::Parse(_)
@@ -1207,7 +1641,7 @@ mod tests {
         assert_eq!(parse.status().kind(), ShellStatusKind::ParseError);
         assert_eq!(parse.status().code(), 2);
 
-        let builtin = execute_source("pwd extra", &mut state);
+        let builtin = execute_source("pwd extra", &mut state).await;
         assert_eq!(
             builtin.diagnostics()[0].code(),
             ExecutionDiagnosticCode::InvalidArguments
@@ -1215,7 +1649,7 @@ mod tests {
         assert_eq!(builtin.status().kind(), ShellStatusKind::Exited);
         assert_eq!(builtin.status().code(), 2);
 
-        let filesystem = execute_source("cd ''", &mut state);
+        let filesystem = execute_source("cd ''", &mut state).await;
         assert_eq!(
             filesystem.diagnostics()[0].code(),
             ExecutionDiagnosticCode::Filesystem
@@ -1225,14 +1659,14 @@ mod tests {
         assert_eq!(filesystem.status().code(), 1);
 
         state.environment_mut().insert("HOME", "");
-        let empty_home = execute_source("cd", &mut state);
+        let empty_home = execute_source("cd", &mut state).await;
         assert_eq!(
             empty_home.diagnostics()[0].code(),
             ExecutionDiagnosticCode::Filesystem
         );
         assert_eq!(empty_home.status().code(), 1);
 
-        let unsupported = execute_source("alias", &mut state);
+        let unsupported = execute_source("alias", &mut state).await;
         assert_eq!(
             unsupported.diagnostics()[0].code(),
             ExecutionDiagnosticCode::Unsupported
@@ -1242,8 +1676,8 @@ mod tests {
         assert_eq!(unsupported.status().code(), 2);
     }
 
-    #[test]
-    fn ls_lists_direct_children_in_stable_order_and_observes_cd() {
+    #[tokio::test]
+    async fn ls_lists_direct_children_in_stable_order_and_observes_cd() {
         let directory = TestDirectory::new();
         fs::create_dir(directory.0.join("child")).expect("create child");
         fs::write(directory.0.join("b.txt"), b"b").expect("write b");
@@ -1252,37 +1686,37 @@ mod tests {
         fs::write(directory.0.join("child/nested.txt"), b"nested").expect("write nested");
         let mut state = ShellState::new(&directory.0);
 
-        let visible = execute_source("ls -1", &mut state);
+        let visible = execute_source("ls -1", &mut state).await;
         assert_eq!(visible.stdout(), b"a.txt\nb.txt\nchild\n");
         assert!(visible.diagnostics().is_empty());
         assert_eq!(visible.status().code(), 0);
 
-        let all = execute_source("ls --all", &mut state);
+        let all = execute_source("ls --all", &mut state).await;
         assert_eq!(all.stdout(), b".hidden\na.txt\nb.txt\nchild\n");
 
-        let nested = execute_source("cd child; ls", &mut state);
+        let nested = execute_source("cd child; ls", &mut state).await;
         assert_eq!(nested.stdout(), b"nested.txt\n");
         assert!(nested.diagnostics().is_empty());
     }
 
-    #[test]
-    fn ls_supports_directory_end_of_options_and_clear_failures() {
+    #[tokio::test]
+    async fn ls_supports_directory_end_of_options_and_clear_failures() {
         let directory = TestDirectory::new();
         fs::create_dir(directory.0.join("child")).expect("create child");
         fs::write(directory.0.join("sample.txt"), b"sample").expect("write sample");
         fs::write(directory.0.join("-dash"), b"dash").expect("write dash");
         let mut state = ShellState::new(&directory.0);
 
-        let file = execute_source("ls sample.txt", &mut state);
+        let file = execute_source("ls sample.txt", &mut state).await;
         assert_eq!(file.stdout(), b"sample.txt\n");
         assert!(file.diagnostics().is_empty());
 
-        let directory_only = execute_source("ls -ad1 child", &mut state);
+        let directory_only = execute_source("ls -ad1 child", &mut state).await;
         assert_eq!(directory_only.stdout(), b"child\n");
-        let dash = execute_source("ls -- -dash", &mut state);
+        let dash = execute_source("ls -- -dash", &mut state).await;
         assert_eq!(dash.stdout(), b"-dash\n");
 
-        let option = execute_source("ls -l", &mut state);
+        let option = execute_source("ls -l", &mut state).await;
         assert_eq!(
             option.diagnostics()[0].code(),
             ExecutionDiagnosticCode::InvalidArguments
@@ -1293,7 +1727,7 @@ mod tests {
         );
         assert_eq!(option.status().code(), 2);
 
-        let paths = execute_source("ls child sample.txt", &mut state);
+        let paths = execute_source("ls child sample.txt", &mut state).await;
         assert_eq!(
             paths.diagnostics()[0].code(),
             ExecutionDiagnosticCode::InvalidArguments
@@ -1303,14 +1737,14 @@ mod tests {
             "ls accepts at most one path"
         );
 
-        let missing = execute_source("ls missing", &mut state);
+        let missing = execute_source("ls missing", &mut state).await;
         assert_eq!(
             missing.diagnostics()[0].code(),
             ExecutionDiagnosticCode::Filesystem
         );
         assert_eq!(missing.status().code(), 1);
 
-        let empty = execute_source("ls ''", &mut state);
+        let empty = execute_source("ls ''", &mut state).await;
         assert_eq!(
             empty.diagnostics()[0].code(),
             ExecutionDiagnosticCode::Filesystem
@@ -1322,8 +1756,8 @@ mod tests {
     }
 
     #[cfg(any(unix, windows))]
-    #[test]
-    fn ls_preserves_and_stably_sorts_native_names() {
+    #[tokio::test]
+    async fn ls_preserves_and_stably_sorts_native_names() {
         let directory = TestDirectory::new();
         fs::write(directory.0.join("a"), b"a").expect("write a");
         fs::write(directory.0.join("雪"), b"unicode").expect("write unicode");
@@ -1344,7 +1778,7 @@ mod tests {
         }
         let mut state = ShellState::new(&directory.0);
 
-        let execution = execute_source("ls", &mut state);
+        let execution = execute_source("ls", &mut state).await;
 
         #[cfg(target_os = "linux")]
         assert_eq!(execution.stdout(), b"a\n\x80\n\xe9\x9b\xaa\n\xff\n");
@@ -1353,8 +1787,8 @@ mod tests {
         assert!(execution.diagnostics().is_empty());
     }
 
-    #[test]
-    fn cat_emits_exact_binary_bytes_and_observes_cd() {
+    #[tokio::test]
+    async fn cat_emits_exact_binary_bytes_and_observes_cd() {
         let directory = TestDirectory::new();
         fs::create_dir(directory.0.join("child")).expect("create child");
         fs::write(directory.0.join("雪.bin"), b"root").expect("write unicode path");
@@ -1362,7 +1796,7 @@ mod tests {
             .expect("write binary payload");
         let mut state = ShellState::new(&directory.0);
 
-        let execution = execute_source("cat '雪.bin'; cd child; cat payload.bin", &mut state);
+        let execution = execute_source("cat '雪.bin'; cd child; cat payload.bin", &mut state).await;
 
         assert_eq!(execution.stdout(), b"root\x00\xff\n");
         assert!(execution.diagnostics().is_empty());
@@ -1373,8 +1807,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cat_supports_end_of_options_and_clear_bounded_failures() {
+    #[tokio::test]
+    async fn cat_supports_end_of_options_and_clear_bounded_failures() {
         let directory = TestDirectory::new();
         fs::write(directory.0.join("-"), b"hyphen").expect("write hyphen");
         fs::create_dir(directory.0.join("child")).expect("create child");
@@ -1385,11 +1819,11 @@ mod tests {
             .expect("set oversized length");
         let mut state = ShellState::new(&directory.0);
 
-        let dash = execute_source("cat -- -", &mut state);
+        let dash = execute_source("cat -- -", &mut state).await;
         assert_eq!(dash.stdout(), b"hyphen");
         assert!(dash.diagnostics().is_empty());
 
-        let option = execute_source("cat -n", &mut state);
+        let option = execute_source("cat -n", &mut state).await;
         assert_eq!(
             option.diagnostics()[0].code(),
             ExecutionDiagnosticCode::InvalidArguments
@@ -1400,26 +1834,26 @@ mod tests {
         );
         assert_eq!(option.status().code(), 2);
 
-        let stdin = execute_source("cat -", &mut state);
+        let stdin = execute_source("cat -", &mut state).await;
         assert_eq!(
             stdin.diagnostics()[0].message(),
             "cat standard-input operand `-` is not implemented yet"
         );
         assert_eq!(stdin.status().code(), 2);
 
-        let missing_argument = execute_source("cat", &mut state);
+        let missing_argument = execute_source("cat", &mut state).await;
         assert_eq!(
             missing_argument.diagnostics()[0].message(),
             "cat requires exactly one path"
         );
-        let paths = execute_source("cat one two", &mut state);
+        let paths = execute_source("cat one two", &mut state).await;
         assert_eq!(
             paths.diagnostics()[0].message(),
             "cat accepts exactly one path"
         );
 
         for source in ["cat missing", "cat child", "cat ''", "cat oversized.bin"] {
-            let failure = execute_source(source, &mut state);
+            let failure = execute_source(source, &mut state).await;
             assert!(failure.stdout().is_empty(), "source={source}");
             assert_eq!(
                 failure.diagnostics()[0].code(),
@@ -1430,8 +1864,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn grep_matches_regex_literal_case_and_line_modes_after_cd() {
+    #[tokio::test]
+    async fn grep_matches_regex_literal_case_and_line_modes_after_cd() {
         let directory = TestDirectory::new();
         fs::create_dir(directory.0.join("child")).expect("create child");
         fs::write(
@@ -1443,29 +1877,31 @@ mod tests {
             .expect("write leading-dash path");
         let mut state = ShellState::new(&directory.0);
 
-        let regex = execute_source("grep --extended-regexp 'Beta [0-9]+' '雪.txt'", &mut state);
+        let regex =
+            execute_source("grep --extended-regexp 'Beta [0-9]+' '雪.txt'", &mut state).await;
         assert_eq!(regex.stdout(), b"Beta 42\n");
         assert!(regex.diagnostics().is_empty());
         assert_eq!(regex.status().code(), 0);
 
-        let literal = execute_source("grep --fixed-strings 'a+b' '雪.txt'", &mut state);
+        let literal = execute_source("grep --fixed-strings 'a+b' '雪.txt'", &mut state).await;
         assert_eq!(literal.stdout(), b"literal a+b\n");
 
         let long_flags = execute_source(
             "grep --fixed-strings --ignore-case --line-number alpha '雪.txt'",
             &mut state,
-        );
+        )
+        .await;
         assert_eq!(long_flags.stdout(), b"1:alpha one\n4:ALPHA two\n");
 
-        let combined = execute_source("grep -inE '^alpha' '雪.txt'", &mut state);
+        let combined = execute_source("grep -inE '^alpha' '雪.txt'", &mut state).await;
         assert_eq!(combined.stdout(), b"1:alpha one\n4:ALPHA two\n");
 
-        let no_match = execute_source("grep absent '雪.txt'", &mut state);
+        let no_match = execute_source("grep absent '雪.txt'", &mut state).await;
         assert!(no_match.stdout().is_empty());
         assert!(no_match.diagnostics().is_empty());
         assert_eq!(no_match.status().code(), 1);
 
-        let dash = execute_source("cd child; grep -Fn -- -needle -data.txt", &mut state);
+        let dash = execute_source("cd child; grep -Fn -- -needle -data.txt", &mut state).await;
         assert_eq!(dash.stdout(), b"1:-needle\n");
         assert!(dash.diagnostics().is_empty());
         assert_eq!(dash.status().code(), 0);
@@ -1475,8 +1911,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn grep_reports_clear_argument_regex_text_and_bounded_failures() {
+    #[tokio::test]
+    async fn grep_reports_clear_argument_regex_text_and_bounded_failures() {
         let directory = TestDirectory::new();
         fs::write(directory.0.join("sample.txt"), b"needle\n").expect("write sample");
         fs::write(directory.0.join("binary.bin"), [0xff, b'n']).expect("write binary");
@@ -1488,30 +1924,30 @@ mod tests {
             .expect("set oversized length");
         let mut state = ShellState::new(&directory.0);
 
-        let no_arguments = execute_source("grep", &mut state);
+        let no_arguments = execute_source("grep", &mut state).await;
         assert_eq!(
             no_arguments.diagnostics()[0].message(),
             "grep requires a pattern and one path"
         );
-        let no_path = execute_source("grep needle", &mut state);
+        let no_path = execute_source("grep needle", &mut state).await;
         assert_eq!(no_path.diagnostics()[0].message(), "grep requires one path");
-        let paths = execute_source("grep needle one two", &mut state);
+        let paths = execute_source("grep needle one two", &mut state).await;
         assert_eq!(
             paths.diagnostics()[0].message(),
             "grep accepts exactly one pattern and one path"
         );
 
-        let option = execute_source("grep -r needle sample.txt", &mut state);
+        let option = execute_source("grep -r needle sample.txt", &mut state).await;
         assert_eq!(
             option.diagnostics()[0].message(),
             "grep does not support option `-r`"
         );
-        let conflict = execute_source("grep -EF needle sample.txt", &mut state);
+        let conflict = execute_source("grep -EF needle sample.txt", &mut state).await;
         assert_eq!(
             conflict.diagnostics()[0].message(),
             "grep options `-E` and `-F` cannot be combined"
         );
-        let stdin = execute_source("grep needle -", &mut state);
+        let stdin = execute_source("grep needle -", &mut state).await;
         assert_eq!(
             stdin.diagnostics()[0].message(),
             "grep standard-input operand `-` is not implemented yet"
@@ -1524,7 +1960,7 @@ mod tests {
             assert_eq!(failure.status().code(), 2);
         }
 
-        let regex = execute_source("grep '[' sample.txt", &mut state);
+        let regex = execute_source("grep '[' sample.txt", &mut state).await;
         assert_eq!(
             regex.diagnostics()[0].code(),
             ExecutionDiagnosticCode::InvalidArguments
@@ -1543,7 +1979,7 @@ mod tests {
             "grep needle binary.bin",
             "grep needle oversized.txt",
         ] {
-            let failure = execute_source(source, &mut state);
+            let failure = execute_source(source, &mut state).await;
             assert!(failure.stdout().is_empty(), "source={source}");
             assert_eq!(
                 failure.diagnostics()[0].code(),
@@ -1555,15 +1991,15 @@ mod tests {
     }
 
     #[cfg(any(unix, windows))]
-    #[test]
-    fn pwd_preserves_or_reversibly_escapes_native_path_units() {
+    #[tokio::test]
+    async fn pwd_preserves_or_reversibly_escapes_native_path_units() {
         #[cfg(unix)]
         {
             use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
             let path = PathBuf::from(std::ffi::OsString::from_vec(b"native-\xff-path".to_vec()));
             let mut state = ShellState::new(&path);
-            let execution = execute_source("pwd", &mut state);
+            let execution = execute_source("pwd", &mut state).await;
 
             assert_eq!(execution.stdout(), b"native-\xff-path\n");
             assert_eq!(state.cwd().as_os_str().as_bytes(), b"native-\xff-path");
@@ -1590,7 +2026,7 @@ mod tests {
             ];
             let path = PathBuf::from(std::ffi::OsString::from_wide(&units));
             let mut state = ShellState::new(&path);
-            let execution = execute_source("pwd", &mut state);
+            let execution = execute_source("pwd", &mut state).await;
 
             assert_eq!(
                 execution.stdout(),

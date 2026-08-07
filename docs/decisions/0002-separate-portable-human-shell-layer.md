@@ -55,13 +55,17 @@ The current source checkpoint has completed H0 and started H1. The independent
 `a3s-ash-shell` crate now owns source-spanned parsing, persistent state,
 deterministic command resolution, and a sequential executor for `pwd`, `echo`,
 `cd`, literal `export`/`unset` environment updates, portable `ls`, bounded
-raw-byte `cat`, and bounded text `grep`. Shared provider-neutral semantic
-services live below the ASH/1 adapters in `a3s-ash-ops`; the portable commands
-reuse their bounded list/read/search semantics through an ordinary-authority
-native provider. The feature-gated `ash shell` route accepts `-c SOURCE`, a
+raw-byte `cat`, bounded text `grep`, and native host executables. Shared
+provider-neutral semantic services live below the ASH/1 adapters in
+`a3s-ash-ops`; the portable commands reuse their bounded list/read/search
+semantics through an ordinary-authority native provider. Native commands reuse
+the `ash-platform` process-tree boundary and launch an already-resolved native
+executable with the exact argument vector, persistent cwd/environment, closed
+stdin, bounded captured stdout/stderr, and propagated exit status; no host
+shell is inserted. The feature-gated `ash shell` route accepts `-c SOURCE`, a
 bounded stdin script, or a bounded native script-file path without changing the
-machine diagnostics of `ash run` or `ash rpc`; interactive input and external
-process execution are still staged work.
+machine diagnostics of `ash run` or `ash rpc`; interactive input, streaming
+stdio, and WSL execution are still staged work.
 
 ## Rejected alternatives
 

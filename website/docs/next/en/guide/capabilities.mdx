@@ -108,7 +108,7 @@ ARM64, with checksums, SBOMs, and provenance.
 
 ## Evidence behind the claims
 
-- 244 Rust workspace tests cover typed schemas, RPC, operations, store,
+- 248 Rust workspace tests cover typed schemas, RPC, operations, store,
   transactions, recovery, cancellation, updates, and deterministic scheduling.
 - The schema-14 runtime harness contains 22 scenarios across worker matrices,
   including an 8 MiB spill/fetch proof over the 4 MiB memory ceiling.
@@ -132,10 +132,11 @@ typed contract portable and auditable.
 
 The separate, feature-gated `ash shell` H1 checkpoint can execute sequential
 `pwd`, `echo`, `cd`, literal `export`/`unset`, portable `ls`, bounded raw-byte
-`cat`, and bounded text `grep` commands from inline source or bounded
-stdin/native script files. The stateful commands and portable operations use
-ordinary user authority, not the machine workspace capability. The route is a
-human frontend, not a free-form ASH/1 operation, and does not change any machine
-capability or confinement claim.
+`cat`, bounded text `grep`, and direct-argv native host commands from inline
+source or bounded stdin/native script files. Stateful and portable commands use
+ordinary user authority, while native programs inherit the persistent shell
+cwd/environment and OS authority through the owned platform process boundary.
+The route is a human frontend, not a free-form ASH/1 operation, and does not
+change any machine capability or confinement claim.
 
 For Agent adoption, continue with [Coding Agent integration](/guide/coding-agents).

@@ -11,3 +11,5 @@ homepage.workspace = true
 
 [dependencies]
 ash-ops.workspace = true
+ash-platform.workspace = true
+tokio.workspace = true

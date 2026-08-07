@@ -85,6 +85,42 @@ fn main() {
     format!("bin/{executable_name}")
 }
 
+#[cfg(feature = "human-shell")]
+fn compile_shell_helper(directory: &TestDirectory) -> String {
+    let bin_directory = directory.0.join("bin");
+    fs::create_dir(&bin_directory).expect("bin directory");
+    let source = directory.0.join("shell-helper.rs");
+    fs::write(
+        &source,
+        r#"
+use std::{env, process};
+
+fn main() {
+    let cwd = env::current_dir().expect("current directory");
+    println!("cwd={}", cwd.file_name().expect("directory name").to_string_lossy());
+    println!("token={}", env::var("ASH_NATIVE_TOKEN").expect("environment"));
+    println!("arguments={}", env::args().skip(1).collect::<Vec<_>>().join("|"));
+    eprintln!("native-stderr");
+    process::exit(23);
+}
+"#,
+    )
+    .expect("write helper source");
+    let executable_name = if cfg!(windows) {
+        "shell-helper.exe"
+    } else {
+        "shell-helper"
+    };
+    let status = Command::new("rustc")
+        .arg(&source)
+        .arg("-o")
+        .arg(bin_directory.join(executable_name))
+        .status()
+        .expect("run rustc");
+    assert!(status.success(), "compile shell helper");
+    executable_name.to_owned()
+}
+
 fn run(arguments: &[&str], input: &[u8]) -> Output {
     run_from(None, arguments, input)
 }
@@ -500,6 +536,26 @@ fn shell_command_executes_stateful_sequence_without_machine_framing() {
     );
     assert_eq!(leading_dash.stdout, b"leading-dash\n");
     assert!(leading_dash.stderr.is_empty());
+}
+
+#[cfg(feature = "human-shell")]
+#[test]
+fn shell_command_launches_native_argv_with_persistent_cwd_and_environment() {
+    let directory = TestDirectory::new();
+    let executable = compile_shell_helper(&directory);
+    fs::create_dir(directory.0.join("work")).expect("work directory");
+    let source = format!(
+        "cd work; export PATH=../bin; export ASH_NATIVE_TOKEN=present; {executable} 'alpha beta' plain"
+    );
+
+    let output = run_in(&directory, &["shell", "--no-profile", "-c", &source], b"");
+
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(
+        output.stdout,
+        b"cwd=work\ntoken=present\narguments=alpha beta|plain\n"
+    );
+    assert_eq!(output.stderr, b"native-stderr\n");
 }
 
 #[cfg(feature = "human-shell")]
