@@ -54,13 +54,14 @@ The detailed accepted contract is defined in
 The current source checkpoint has completed H0 and started H1. The independent
 `a3s-ash-shell` crate now owns source-spanned parsing, persistent state,
 deterministic command resolution, and a sequential executor for `pwd`, `echo`,
-`cd`, portable `ls`, and bounded raw-byte `cat`. Shared provider-neutral
-semantic services live below the ASH/1 adapters in `a3s-ash-ops`; the portable
-commands reuse their bounded list/read semantics through an ordinary-authority
-native provider. A feature-gated `ash shell` route accepts `-c SOURCE`, a
-bounded stdin script, or a bounded native script-file path without changing the
-machine diagnostics of `ash run` or `ash rpc`; interactive input, external
-process execution, and the remaining portable commands are still staged work.
+`cd`, portable `ls`, bounded raw-byte `cat`, and bounded text `grep`. Shared
+provider-neutral semantic services live below the ASH/1 adapters in
+`a3s-ash-ops`; the portable commands reuse their bounded list/read/search
+semantics through an ordinary-authority native provider. The feature-gated
+`ash shell` route accepts `-c SOURCE`, a bounded stdin script, or a bounded
+native script-file path without changing the machine diagnostics of `ash run`
+or `ash rpc`; interactive input and external process execution are still staged
+work.
 
 ## Rejected alternatives
 

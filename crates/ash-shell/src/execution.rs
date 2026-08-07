@@ -3,8 +3,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use ash_ops::{
-    ListQuery, MAX_READ_FILE_BYTES, NativeFileSystem, ReadQuery, SemanticEntryKind,
-    SemanticFileSystem, SemanticListFilter, SemanticReadMode, SemanticServices,
+    ListQuery, MAX_READ_FILE_BYTES, NativeFileSystem, ReadQuery, SearchQuery, SemanticEntryKind,
+    SemanticError, SemanticFileSystem, SemanticListFilter, SemanticReadMode, SemanticSearchPattern,
+    SemanticServices,
 };
 
 use crate::{
@@ -101,9 +102,9 @@ impl ShellExecution {
 /// Parses and executes the currently implemented foreground shell subset.
 ///
 /// Commands run sequentially against one mutable `ShellState`. This first H1
-/// slice implements `pwd`, `echo`, `cd`, and bounded portable `ls` and `cat`
-/// commands; other resolved command categories produce explicit diagnostics
-/// without invoking a host shell.
+/// slice implements `pwd`, `echo`, `cd`, and bounded portable `ls`, `cat`, and
+/// `grep` commands; other resolved command categories produce explicit
+/// diagnostics without invoking a host shell.
 #[must_use]
 pub fn execute_source(source: &str, state: &mut ShellState) -> ShellExecution {
     execute_source_with(source, state, &PathCommandLookup, HostPlatform::current())
@@ -207,18 +208,11 @@ fn execute_command(
         ResolvedCommand::Portable(PortableCommand::Cat) => {
             execute_cat(state, arguments, span, stdout, diagnostics)
         }
+        ResolvedCommand::Portable(PortableCommand::Grep) => {
+            execute_grep(state, arguments, span, stdout, diagnostics)
+        }
         ResolvedCommand::StatefulBuiltin(command) => unsupported(
             format!("builtin `{}` is not implemented yet", command.name()),
-            span,
-            diagnostics,
-            ShellStatusKind::Exited,
-            2,
-        ),
-        ResolvedCommand::Portable(command) => unsupported(
-            format!(
-                "portable command `{}` is not implemented yet",
-                command.name()
-            ),
             span,
             diagnostics,
             ShellStatusKind::Exited,
@@ -534,6 +528,229 @@ fn read_filesystem_failure(
     )
 }
 
+struct GrepCommandOptions {
+    query: String,
+    path: OsString,
+    pattern: SemanticSearchPattern,
+    case_insensitive: bool,
+    line_number: bool,
+}
+
+fn execute_grep(
+    state: &ShellState,
+    arguments: &[OsString],
+    span: SourceSpan,
+    stdout: &mut Vec<u8>,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    let options = match parse_grep_options(arguments) {
+        Ok(options) => options,
+        Err(message) => return invalid_arguments(&message, span, diagnostics),
+    };
+    if options.path.is_empty() {
+        return filesystem_failure("cannot search: path is empty".to_owned(), span, diagnostics);
+    }
+
+    let filesystem = match NativeFileSystem::new(state.cwd()) {
+        Ok(filesystem) => filesystem,
+        Err(error) => {
+            return filesystem_failure(
+                format!("cannot search from the current directory: {error}"),
+                span,
+                diagnostics,
+            );
+        }
+    };
+    let target = PathBuf::from(&options.path);
+    let resolved = match filesystem.resolve_existing(&target) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return search_filesystem_failure(&options.path, error, span, diagnostics);
+        }
+    };
+    let metadata = match fs::metadata(&resolved) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return search_filesystem_failure(&options.path, error, span, diagnostics);
+        }
+    };
+    if !metadata.is_file() {
+        return search_filesystem_failure(
+            &options.path,
+            "path is not a regular file",
+            span,
+            diagnostics,
+        );
+    }
+
+    let services = SemanticServices::new(filesystem);
+    let result = match services.search_serial(&SearchQuery::new(
+        options.query,
+        vec![resolved],
+        options.pattern,
+        options.case_insensitive,
+        false,
+    )) {
+        Ok(result) => result,
+        Err(SemanticError::Regex(error)) => {
+            return invalid_arguments(
+                &format!("grep regular expression is invalid: {error}"),
+                span,
+                diagnostics,
+            );
+        }
+        Err(error) => {
+            return search_filesystem_failure(&options.path, error, span, diagnostics);
+        }
+    };
+    if result.partial {
+        return search_filesystem_failure(
+            &options.path,
+            "file is not valid UTF-8",
+            span,
+            diagnostics,
+        );
+    }
+    if result.matches.is_empty() {
+        return shell_status(1, ShellStatusKind::Exited);
+    }
+
+    let mut rendered = Vec::new();
+    for matched in result.matches {
+        if options.line_number {
+            rendered.extend_from_slice(matched.line.to_string().as_bytes());
+            rendered.push(b':');
+        }
+        rendered.extend_from_slice(matched.text.as_bytes());
+        rendered.push(b'\n');
+    }
+    let remaining = MAX_READ_FILE_BYTES.saturating_sub(stdout.len() as u64);
+    if rendered.len() as u64 > remaining {
+        return search_filesystem_failure(
+            &options.path,
+            format!(
+                "output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
+            ),
+            span,
+            diagnostics,
+        );
+    }
+    stdout.extend_from_slice(&rendered);
+    ShellStatus::success()
+}
+
+fn parse_grep_options(arguments: &[OsString]) -> Result<GrepCommandOptions, String> {
+    let mut selected_pattern = None;
+    let mut case_insensitive = false;
+    let mut line_number = false;
+    let mut options_ended = false;
+    let mut operands = Vec::new();
+
+    for argument in arguments {
+        if !options_ended {
+            if argument == "--" {
+                options_ended = true;
+                continue;
+            }
+            match argument.to_str() {
+                Some("--extended-regexp") => {
+                    select_grep_pattern(&mut selected_pattern, SemanticSearchPattern::Regex)?;
+                    continue;
+                }
+                Some("--fixed-strings") => {
+                    select_grep_pattern(&mut selected_pattern, SemanticSearchPattern::Literal)?;
+                    continue;
+                }
+                Some("--ignore-case") => {
+                    case_insensitive = true;
+                    continue;
+                }
+                Some("--line-number") => {
+                    line_number = true;
+                    continue;
+                }
+                Some(value) if value.starts_with('-') && value != "-" => {
+                    if value.starts_with("--") {
+                        return Err(format!(
+                            "grep does not support option `{}`",
+                            display_os_string(argument)
+                        ));
+                    }
+                    for option in &value.as_bytes()[1..] {
+                        match option {
+                            b'E' => select_grep_pattern(
+                                &mut selected_pattern,
+                                SemanticSearchPattern::Regex,
+                            )?,
+                            b'F' => select_grep_pattern(
+                                &mut selected_pattern,
+                                SemanticSearchPattern::Literal,
+                            )?,
+                            b'i' => case_insensitive = true,
+                            b'n' => line_number = true,
+                            _ => {
+                                return Err(format!(
+                                    "grep does not support option `{}`",
+                                    display_os_string(argument)
+                                ));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        operands.push(argument.clone());
+    }
+
+    match operands.len() {
+        0 => return Err("grep requires a pattern and one path".to_owned()),
+        1 => return Err("grep requires one path".to_owned()),
+        2 => {}
+        _ => return Err("grep accepts exactly one pattern and one path".to_owned()),
+    }
+    let query = operands[0]
+        .to_str()
+        .ok_or_else(|| "grep pattern must be valid UTF-8".to_owned())?
+        .to_owned();
+    let path = operands[1].clone();
+    if path == "-" {
+        return Err("grep standard-input operand `-` is not implemented yet".to_owned());
+    }
+    Ok(GrepCommandOptions {
+        query,
+        path,
+        pattern: selected_pattern.unwrap_or(SemanticSearchPattern::Regex),
+        case_insensitive,
+        line_number,
+    })
+}
+
+fn select_grep_pattern(
+    selected: &mut Option<SemanticSearchPattern>,
+    pattern: SemanticSearchPattern,
+) -> Result<(), String> {
+    if selected.is_some_and(|selected| selected != pattern) {
+        return Err("grep options `-E` and `-F` cannot be combined".to_owned());
+    }
+    *selected = Some(pattern);
+    Ok(())
+}
+
+fn search_filesystem_failure(
+    target: &OsStr,
+    error: impl std::fmt::Display,
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    filesystem_failure(
+        format!("cannot search `{}`: {error}", display_os_string(target)),
+        span,
+        diagnostics,
+    )
+}
+
 fn execute_cd(
     state: &mut ShellState,
     arguments: &[OsString],
@@ -839,12 +1056,12 @@ mod tests {
         );
         assert_eq!(empty_home.status().code(), 1);
 
-        let unsupported = execute_source("grep", &mut state);
+        let unsupported = execute_source("export", &mut state);
         assert_eq!(
             unsupported.diagnostics()[0].code(),
             ExecutionDiagnosticCode::Unsupported
         );
-        assert_eq!(unsupported.diagnostics()[0].span(), SourceSpan::new(0, 4));
+        assert_eq!(unsupported.diagnostics()[0].span(), SourceSpan::new(0, 6));
         assert_eq!(unsupported.status().kind(), ShellStatusKind::Exited);
         assert_eq!(unsupported.status().code(), 2);
     }
@@ -1026,6 +1243,130 @@ mod tests {
         );
 
         for source in ["cat missing", "cat child", "cat ''", "cat oversized.bin"] {
+            let failure = execute_source(source, &mut state);
+            assert!(failure.stdout().is_empty(), "source={source}");
+            assert_eq!(
+                failure.diagnostics()[0].code(),
+                ExecutionDiagnosticCode::Filesystem,
+                "source={source}"
+            );
+            assert_eq!(failure.status().code(), 1, "source={source}");
+        }
+    }
+
+    #[test]
+    fn grep_matches_regex_literal_case_and_line_modes_after_cd() {
+        let directory = TestDirectory::new();
+        fs::create_dir(directory.0.join("child")).expect("create child");
+        fs::write(
+            directory.0.join("雪.txt"),
+            b"alpha one\r\nBeta 42\nliteral a+b\nALPHA two\n",
+        )
+        .expect("write unicode path");
+        fs::write(directory.0.join("child/-data.txt"), b"-needle\nNeedle\n")
+            .expect("write leading-dash path");
+        let mut state = ShellState::new(&directory.0);
+
+        let regex = execute_source("grep --extended-regexp 'Beta [0-9]+' '雪.txt'", &mut state);
+        assert_eq!(regex.stdout(), b"Beta 42\n");
+        assert!(regex.diagnostics().is_empty());
+        assert_eq!(regex.status().code(), 0);
+
+        let literal = execute_source("grep --fixed-strings 'a+b' '雪.txt'", &mut state);
+        assert_eq!(literal.stdout(), b"literal a+b\n");
+
+        let long_flags = execute_source(
+            "grep --fixed-strings --ignore-case --line-number alpha '雪.txt'",
+            &mut state,
+        );
+        assert_eq!(long_flags.stdout(), b"1:alpha one\n4:ALPHA two\n");
+
+        let combined = execute_source("grep -inE '^alpha' '雪.txt'", &mut state);
+        assert_eq!(combined.stdout(), b"1:alpha one\n4:ALPHA two\n");
+
+        let no_match = execute_source("grep absent '雪.txt'", &mut state);
+        assert!(no_match.stdout().is_empty());
+        assert!(no_match.diagnostics().is_empty());
+        assert_eq!(no_match.status().code(), 1);
+
+        let dash = execute_source("cd child; grep -Fn -- -needle -data.txt", &mut state);
+        assert_eq!(dash.stdout(), b"1:-needle\n");
+        assert!(dash.diagnostics().is_empty());
+        assert_eq!(dash.status().code(), 0);
+        assert_eq!(
+            state.cwd(),
+            fs::canonicalize(directory.0.join("child")).expect("canonical child")
+        );
+    }
+
+    #[test]
+    fn grep_reports_clear_argument_regex_text_and_bounded_failures() {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("sample.txt"), b"needle\n").expect("write sample");
+        fs::write(directory.0.join("binary.bin"), [0xff, b'n']).expect("write binary");
+        fs::create_dir(directory.0.join("child")).expect("create child");
+        let oversized =
+            fs::File::create(directory.0.join("oversized.txt")).expect("create oversized file");
+        oversized
+            .set_len(ash_ops::MAX_SEARCH_FILE_BYTES + 1)
+            .expect("set oversized length");
+        let mut state = ShellState::new(&directory.0);
+
+        let no_arguments = execute_source("grep", &mut state);
+        assert_eq!(
+            no_arguments.diagnostics()[0].message(),
+            "grep requires a pattern and one path"
+        );
+        let no_path = execute_source("grep needle", &mut state);
+        assert_eq!(no_path.diagnostics()[0].message(), "grep requires one path");
+        let paths = execute_source("grep needle one two", &mut state);
+        assert_eq!(
+            paths.diagnostics()[0].message(),
+            "grep accepts exactly one pattern and one path"
+        );
+
+        let option = execute_source("grep -r needle sample.txt", &mut state);
+        assert_eq!(
+            option.diagnostics()[0].message(),
+            "grep does not support option `-r`"
+        );
+        let conflict = execute_source("grep -EF needle sample.txt", &mut state);
+        assert_eq!(
+            conflict.diagnostics()[0].message(),
+            "grep options `-E` and `-F` cannot be combined"
+        );
+        let stdin = execute_source("grep needle -", &mut state);
+        assert_eq!(
+            stdin.diagnostics()[0].message(),
+            "grep standard-input operand `-` is not implemented yet"
+        );
+        for failure in [&no_arguments, &no_path, &paths, &option, &conflict, &stdin] {
+            assert_eq!(
+                failure.diagnostics()[0].code(),
+                ExecutionDiagnosticCode::InvalidArguments
+            );
+            assert_eq!(failure.status().code(), 2);
+        }
+
+        let regex = execute_source("grep '[' sample.txt", &mut state);
+        assert_eq!(
+            regex.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::InvalidArguments
+        );
+        assert!(
+            regex.diagnostics()[0]
+                .message()
+                .starts_with("grep regular expression is invalid:")
+        );
+        assert_eq!(regex.status().code(), 2);
+
+        for source in [
+            "grep needle missing",
+            "grep needle child",
+            "grep needle ''",
+            "grep needle binary.bin",
+            "grep needle oversized.txt",
+        ] {
             let failure = execute_source(source, &mut state);
             assert!(failure.stdout().is_empty(), "source={source}");
             assert_eq!(

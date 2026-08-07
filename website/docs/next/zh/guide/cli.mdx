@@ -28,11 +28,11 @@ ash 的主要 CLI 是机器接口：成功输出和错误诊断都使用稳定�
 ## 人类 Shell 检查点
 
 当前 H1 检查点针对同一份持久原生状态，顺序执行 H0 的简单命令语法。已实现 `pwd`、
-`echo`（含 `-n`）、`cd`、可移植 `ls` 与原始字节 `cat`；源码可以来自 `-c SOURCE`、
-原生脚本文件路径或 stdin：
+`echo`（含 `-n`）、`cd`、可移植 `ls`、原始字节 `cat` 与文本 `grep`；源码可以来自
+`-c SOURCE`、原生脚本文件路径或 stdin：
 
 ```sh
-ash shell -c 'pwd; ls -a; cat crates/ash-shell/Cargo.toml'
+ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ```
@@ -42,9 +42,13 @@ UTF-8。以 `-` 开头的文件参数可写成 `ash shell -- ./-script.ash`。�
 接受一个路径（默认 `.`），按稳定原生顺序每行输出一个名称，并支持 `-a`/`--all`、
 `-d`/`--directory`、`-1`、短选项组合与 `--`。可移植 `cat` 要求一个路径，原样输出
 字节且不添加换行，接受 `--`，并共享 128 MiB 读取/捕获上限；选项、多个文件与 stdin
-`-` 会在流式 stdio 落地前明确失败。交互输入、Profile、外部进程以及可移植 `grep`
-执行尚未实现。常规二进制启用 `human-shell` feature；`cargo build -p a3s-ash
---no-default-features` 保留最小机器专用构建。
+`-` 会在流式 stdio 落地前明确失败。可移植 `grep` 要求一个有效 UTF-8 的普通文件，
+默认使用 Rust 正则表达式；支持 `-E`/`--extended-regexp`、
+`-F`/`--fixed-strings`、`-i`/`--ignore-case`、`-n`/`--line-number`、短选项组合与
+`--`。搜索上限为 64 MiB；无匹配时不输出诊断并返回状态 1。目录、多个文件、stdin
+`-` 与不支持的选项都会明确失败。交互输入、Profile 与外部进程尚未实现。常规二进制
+启用 `human-shell` feature；`cargo build -p a3s-ash --no-default-features` 保留最小
+机器专用构建。
 
 ## 错误契约
 
@@ -65,6 +69,6 @@ e{c}:
 文件操作受启动时工作区约束。路径必须使用规范逻辑形式，拒绝词法逃逸、符号链接或
 Windows reparse point 绕过。`exec` 也不会自动切换到隐式系统 Shell。
 
-人类 Shell 状态改用原生 `PathBuf` 与 `OsString`。`cd`、`ls` 与 `cat` 继承普通用户
-文件系统权限，原生路径单元会被保留或可逆转义；这不会削弱或替代 ASH/1 的工作区
-约束。
+人类 Shell 状态改用原生 `PathBuf` 与 `OsString`。`cd`、`ls`、`cat` 与 `grep` 继承
+普通用户文件系统权限，原生路径单元会被保留或可逆转义；这不会削弱或替代 ASH/1
+的工作区约束。
