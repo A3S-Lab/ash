@@ -26,8 +26,8 @@ text `grep`, source-spanned named and last-status expansion, and direct-argv
 native host commands. Pipelines, foreground interactive programs and jobs,
 streaming stdio, broader expansion, mutations, and WSL launch remain
 unimplemented. H2 has started at the lower process boundary with explicit
-`Null`, `Piped`, and `Inherit` modes for each child stream; current H1 execution
-maps to those modes without changing its visible capture contract.
+per-stream modes and validated direct OS pipe graphs; current H1 execution maps
+to the standalone modes without changing its visible capture contract.
 
 ## 1. Executive decision
 
@@ -508,6 +508,19 @@ deliver EOF, and has a bounded no-deadlock deadline. Pipe graphs, file endpoints
 ordered descriptor duplication, and terminal inheritance remain later H2/H4
 slices.
 
+The second H2 checkpoint adds `Pipe(ProcessPipeId)` for direct child-to-child
+connections. A graph must provide one reader process and one writer process for
+every ID, although one writer may bind both stdout and stderr to support later
+descriptor duplication. Missing ends, competing processes, self-links, and
+cycles fail before spawn. After validation, the platform creates every OS pipe,
+starts consumers before producers, attaches cloned child ends, and drops all
+parent copies before returning process handles in plan order. Graph-internal
+streams expose no parent handle. An 8 MiB producer/consumer regression requires
+exact bytes, EOF-driven completion, backpressure, and a bounded deadline without
+a parent relay task. The current shell does not lower syntax to this primitive
+yet, and each child still has its own existing ownership wrapper rather than a
+pipeline-wide supervisor.
+
 Redirections remain an ordered vector because these are observably different:
 
 ```sh
@@ -543,6 +556,11 @@ Pipeline construction follows this lifecycle:
 6. supervise all members as one job;
 7. compute pipeline status according to the configured `pipefail` rule;
 8. reap every child and release all handles.
+
+The current platform checkpoint implements the native graph validation, pipe
+creation, consumer-first spawn, and parent-handle closure portions of this
+lifecycle. Capacity reservation, shell lowering, unified job supervision,
+status selection, portable in-process stages, and redirections remain open.
 
 Data flows directly through OS pipes. It does not pass through ASON or the
 result store, and it is not materialized in memory before the next command
@@ -819,11 +837,14 @@ remain for later increments.
 - add `pipefail` and exact status behavior.
 
 Current checkpoint: the shared platform process boundary now requires explicit
-`Null`, `Piped`, or `Inherit` selection for every standard stream. Existing
-machine and H1 shell callers preserve their prior behavior through explicit
-mapping, and an 8 MiB streaming regression locks handle exposure, EOF closure,
-backpressure, and cross-platform completion. Pipeline syntax and plans, OS pipe
-graphs, file redirection, descriptor ordering, and `pipefail` remain open.
+selection for every standard stream. Existing machine and H1 shell callers
+preserve their prior behavior through explicit `Null`, `Piped`, and `Inherit`
+mapping. A graph-only `Pipe(ProcessPipeId)` endpoint connects validated acyclic
+native process graphs directly through OS pipes, with consumers spawned first
+and parent copies closed before return. Two 8 MiB regressions lock
+parent-facing and child-to-child handle exposure, exact bytes, EOF closure,
+backpressure, and cross-platform completion. Pipeline syntax and plans, shell
+supervision, file redirection, descriptor ordering, and `pipefail` remain open.
 
 ### H3: mutations and command language
 

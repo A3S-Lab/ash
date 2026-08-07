@@ -1,4 +1,6 @@
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
+use std::io::{PipeReader, PipeWriter};
 use std::path::PathBuf;
 use std::process::Stdio;
 
@@ -17,9 +19,22 @@ pub enum EnvironmentChange {
     Remove(OsString),
 }
 
+/// Stable identifier for one operating-system pipe inside a process graph.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ProcessPipeId(u32);
+
+impl ProcessPipeId {
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+}
+
 /// Explicit standard-I/O mode for one child-process stream.
 ///
-/// A piped endpoint exposes its corresponding handle through [`ProcessHandle`].
+/// A [`ProcessStdio::Piped`] endpoint exposes its corresponding handle through
+/// [`ProcessHandle`]. A [`ProcessStdio::Pipe`] endpoint is internal to a graph
+/// launched by [`spawn_native_graph`] or [`Workspace::spawn_graph`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ProcessStdio {
@@ -27,16 +42,22 @@ pub enum ProcessStdio {
     Inherit,
     /// Attach the platform null device.
     Null,
-    /// Create an operating-system pipe owned by [`ProcessHandle`].
+    /// Create a parent-facing operating-system pipe owned by [`ProcessHandle`].
     Piped,
+    /// Connect this stream to one named operating-system pipe in a process graph.
+    ///
+    /// An stdin endpoint reads from the pipe. A stdout or stderr endpoint writes
+    /// to it. Internal graph endpoints do not expose handles on [`ProcessHandle`].
+    Pipe(ProcessPipeId),
 }
 
 impl ProcessStdio {
-    fn into_stdio(self) -> Stdio {
+    fn standalone_stdio(self) -> Result<Stdio, PlatformError> {
         match self {
-            Self::Inherit => Stdio::inherit(),
-            Self::Null => Stdio::null(),
-            Self::Piped => Stdio::piped(),
+            Self::Inherit => Ok(Stdio::inherit()),
+            Self::Null => Ok(Stdio::null()),
+            Self::Piped => Ok(Stdio::piped()),
+            Self::Pipe(_) => Err(PlatformError::InvalidProcessGraph),
         }
     }
 }
@@ -82,6 +103,23 @@ pub struct ProcessHandle {
 
 impl Workspace {
     pub fn spawn(&self, spec: &ProcessSpec) -> Result<ProcessHandle, PlatformError> {
+        spawn_native(&self.resolve_process_spec(spec)?)
+    }
+
+    /// Resolves and launches a complete process graph inside this workspace.
+    ///
+    /// Connected pipe endpoints must have exactly one reader process and one
+    /// writer process. One writer may attach both stdout and stderr to the same
+    /// pipe. Cycles and unmatched endpoints are rejected before any child starts.
+    pub fn spawn_graph(&self, specs: &[ProcessSpec]) -> Result<Vec<ProcessHandle>, PlatformError> {
+        let specs = specs
+            .iter()
+            .map(|spec| self.resolve_process_spec(spec))
+            .collect::<Result<Vec<_>, _>>()?;
+        spawn_native_graph(&specs)
+    }
+
+    fn resolve_process_spec(&self, spec: &ProcessSpec) -> Result<NativeProcessSpec, PlatformError> {
         validate_process_spec(spec)?;
         let cwd = self.resolve_existing(&spec.cwd)?;
         let executable = if spec.executable.contains('/') {
@@ -91,7 +129,7 @@ impl Workspace {
         } else {
             spec.executable.clone().into()
         };
-        spawn_native(&NativeProcessSpec {
+        Ok(NativeProcessSpec {
             executable: executable.into_os_string(),
             argv: spec.argv.iter().map(OsString::from).collect(),
             cwd: cwd.native,
@@ -107,13 +145,57 @@ impl Workspace {
 /// Launches one host executable directly from an already-resolved native
 /// specification. No command shell or workspace path interpretation is added.
 pub fn spawn_native(spec: &NativeProcessSpec) -> Result<ProcessHandle, PlatformError> {
+    let stdin = spec.stdin.standalone_stdio()?;
+    let stdout = spec.stdout.standalone_stdio()?;
+    let stderr = spec.stderr.standalone_stdio()?;
+    spawn_native_with_stdio(spec, stdin, stdout, stderr)
+}
+
+/// Launches a complete native process graph connected by operating-system pipes.
+///
+/// The graph is validated and every pipe is created before the first child is
+/// started. Consumers are spawned before their producers, then all parent pipe
+/// copies are closed before this function returns. Returned handles retain the
+/// same order as `specs`.
+pub fn spawn_native_graph(
+    specs: &[NativeProcessSpec],
+) -> Result<Vec<ProcessHandle>, PlatformError> {
+    let graph = validate_process_graph(specs)?;
+    let mut pipes = BTreeMap::new();
+    for id in graph.pipe_ids {
+        pipes.insert(id, std::io::pipe()?);
+    }
+
+    let mut processes: Vec<Option<ProcessHandle>> =
+        std::iter::repeat_with(|| None).take(specs.len()).collect();
+    for index in graph.spawn_order.into_iter().rev() {
+        let spec = &specs[index];
+        let stdin = graph_input_stdio(spec.stdin, &pipes)?;
+        let stdout = graph_output_stdio(spec.stdout, &pipes)?;
+        let stderr = graph_output_stdio(spec.stderr, &pipes)?;
+        processes[index] = Some(spawn_native_with_stdio(spec, stdin, stdout, stderr)?);
+    }
+    drop(pipes);
+
+    processes
+        .into_iter()
+        .map(|process| process.ok_or(PlatformError::InvalidProcessGraph))
+        .collect()
+}
+
+fn spawn_native_with_stdio(
+    spec: &NativeProcessSpec,
+    stdin: Stdio,
+    stdout: Stdio,
+    stderr: Stdio,
+) -> Result<ProcessHandle, PlatformError> {
     let mut command = Command::new(&spec.executable);
     command
         .args(&spec.argv)
         .current_dir(&spec.cwd)
-        .stdin(spec.stdin.into_stdio())
-        .stdout(spec.stdout.into_stdio())
-        .stderr(spec.stderr.into_stdio());
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr);
     if spec.clear_environment {
         command.env_clear();
     }
@@ -136,6 +218,111 @@ pub fn spawn_native(spec: &NativeProcessSpec) -> Result<ProcessHandle, PlatformE
     Ok(ProcessHandle {
         child: command.spawn()?,
     })
+}
+
+struct ProcessGraph {
+    pipe_ids: Vec<ProcessPipeId>,
+    spawn_order: Vec<usize>,
+}
+
+#[derive(Default)]
+struct PipeUsage {
+    reader: Option<usize>,
+    writer: Option<usize>,
+}
+
+fn validate_process_graph(specs: &[NativeProcessSpec]) -> Result<ProcessGraph, PlatformError> {
+    let mut usages = BTreeMap::<ProcessPipeId, PipeUsage>::new();
+    for (index, spec) in specs.iter().enumerate() {
+        if let ProcessStdio::Pipe(id) = spec.stdin {
+            let usage = usages.entry(id).or_default();
+            if usage.reader.replace(index).is_some() {
+                return Err(PlatformError::InvalidProcessGraph);
+            }
+        }
+        for output in [spec.stdout, spec.stderr] {
+            if let ProcessStdio::Pipe(id) = output {
+                let usage = usages.entry(id).or_default();
+                if usage.writer.is_some_and(|writer| writer != index) {
+                    return Err(PlatformError::InvalidProcessGraph);
+                }
+                usage.writer = Some(index);
+            }
+        }
+    }
+
+    let mut outgoing = vec![Vec::new(); specs.len()];
+    let mut incoming = vec![0_usize; specs.len()];
+    for usage in usages.values() {
+        let (Some(writer), Some(reader)) = (usage.writer, usage.reader) else {
+            return Err(PlatformError::InvalidProcessGraph);
+        };
+        if writer == reader {
+            return Err(PlatformError::InvalidProcessGraph);
+        }
+        outgoing[writer].push(reader);
+        incoming[reader] = incoming[reader]
+            .checked_add(1)
+            .ok_or(PlatformError::InvalidProcessGraph)?;
+    }
+
+    let mut ready = incoming
+        .iter()
+        .enumerate()
+        .filter_map(|(index, count)| (*count == 0).then_some(index))
+        .collect::<VecDeque<_>>();
+    let mut spawn_order = Vec::with_capacity(specs.len());
+    while let Some(index) = ready.pop_front() {
+        spawn_order.push(index);
+        for &next in &outgoing[index] {
+            incoming[next] = incoming[next]
+                .checked_sub(1)
+                .ok_or(PlatformError::InvalidProcessGraph)?;
+            if incoming[next] == 0 {
+                ready.push_back(next);
+            }
+        }
+    }
+    if spawn_order.len() != specs.len() {
+        return Err(PlatformError::InvalidProcessGraph);
+    }
+
+    Ok(ProcessGraph {
+        pipe_ids: usages.into_keys().collect(),
+        spawn_order,
+    })
+}
+
+fn graph_input_stdio(
+    endpoint: ProcessStdio,
+    pipes: &BTreeMap<ProcessPipeId, (PipeReader, PipeWriter)>,
+) -> Result<Stdio, PlatformError> {
+    match endpoint {
+        ProcessStdio::Pipe(id) => pipes
+            .get(&id)
+            .ok_or(PlatformError::InvalidProcessGraph)?
+            .0
+            .try_clone()
+            .map(Stdio::from)
+            .map_err(PlatformError::from),
+        endpoint => endpoint.standalone_stdio(),
+    }
+}
+
+fn graph_output_stdio(
+    endpoint: ProcessStdio,
+    pipes: &BTreeMap<ProcessPipeId, (PipeReader, PipeWriter)>,
+) -> Result<Stdio, PlatformError> {
+    match endpoint {
+        ProcessStdio::Pipe(id) => pipes
+            .get(&id)
+            .ok_or(PlatformError::InvalidProcessGraph)?
+            .1
+            .try_clone()
+            .map(Stdio::from)
+            .map_err(PlatformError::from),
+        endpoint => endpoint.standalone_stdio(),
+    }
 }
 
 fn validate_process_spec(spec: &ProcessSpec) -> Result<(), PlatformError> {
@@ -233,8 +420,11 @@ mod tests {
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use super::{EnvironmentChange, NativeProcessSpec, ProcessSpec, ProcessStdio, spawn_native};
-    use crate::Workspace;
+    use super::{
+        EnvironmentChange, NativeProcessSpec, ProcessPipeId, ProcessSpec, ProcessStdio,
+        spawn_native, spawn_native_graph, validate_process_graph,
+    };
+    use crate::{PlatformError, Workspace};
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -263,7 +453,7 @@ mod tests {
         fs::write(
             &source,
             r#"
-use std::{env, fs, io, io::Write, process::Command, thread, time::Duration};
+use std::{convert::TryFrom, env, fs, io, io::Write, process::Command, thread, time::Duration};
 
 fn main() {
     let mut arguments = env::args().skip(1);
@@ -281,6 +471,27 @@ fn main() {
             let mut output = io::stdout().lock();
             io::copy(&mut input, &mut output).expect("copy stdin to stdout");
             output.flush().expect("flush stdout");
+        }
+        Some("produce") => {
+            let length = arguments
+                .next()
+                .expect("payload length")
+                .parse::<usize>()
+                .expect("numeric payload length");
+            let mut output = io::stdout().lock();
+            let mut buffer = vec![0_u8; 64 * 1024];
+            let mut offset = 0_usize;
+            while offset < length {
+                let count = (length - offset).min(buffer.len());
+                for (index, byte) in buffer[..count].iter_mut().enumerate() {
+                    *byte = u8::try_from((offset + index) % 251).expect("bounded byte");
+                }
+                output
+                    .write_all(&buffer[..count])
+                    .expect("write generated stdout");
+                offset += count;
+            }
+            output.flush().expect("flush generated stdout");
         }
         Some("quiet") => {}
         Some("parent") => {
@@ -429,6 +640,140 @@ fn main() {
                 .expect("wait for quiet helper")
                 .success
         );
+    }
+
+    #[test]
+    fn connected_stdio_requires_a_complete_acyclic_process_graph() {
+        let first_pipe = ProcessPipeId::new(1);
+        let second_pipe = ProcessPipeId::new(2);
+        let spec = |stdin, stdout| NativeProcessSpec {
+            executable: OsString::from("missing-process"),
+            argv: vec![],
+            cwd: PathBuf::from("."),
+            environment: vec![],
+            clear_environment: false,
+            stdin,
+            stdout,
+            stderr: ProcessStdio::Null,
+        };
+
+        assert!(matches!(
+            spawn_native(&spec(ProcessStdio::Pipe(first_pipe), ProcessStdio::Null)),
+            Err(PlatformError::InvalidProcessGraph)
+        ));
+        assert!(matches!(
+            spawn_native_graph(&[spec(ProcessStdio::Null, ProcessStdio::Pipe(first_pipe))]),
+            Err(PlatformError::InvalidProcessGraph)
+        ));
+        assert!(matches!(
+            spawn_native_graph(&[
+                spec(ProcessStdio::Null, ProcessStdio::Pipe(first_pipe)),
+                spec(ProcessStdio::Pipe(first_pipe), ProcessStdio::Null),
+                spec(ProcessStdio::Pipe(first_pipe), ProcessStdio::Null),
+            ]),
+            Err(PlatformError::InvalidProcessGraph)
+        ));
+        assert!(matches!(
+            spawn_native_graph(&[
+                spec(ProcessStdio::Null, ProcessStdio::Pipe(first_pipe)),
+                spec(ProcessStdio::Null, ProcessStdio::Pipe(first_pipe)),
+                spec(ProcessStdio::Pipe(first_pipe), ProcessStdio::Null),
+            ]),
+            Err(PlatformError::InvalidProcessGraph)
+        ));
+        assert!(matches!(
+            spawn_native_graph(&[spec(
+                ProcessStdio::Pipe(first_pipe),
+                ProcessStdio::Pipe(first_pipe)
+            )]),
+            Err(PlatformError::InvalidProcessGraph)
+        ));
+        assert!(matches!(
+            spawn_native_graph(&[
+                spec(
+                    ProcessStdio::Pipe(second_pipe),
+                    ProcessStdio::Pipe(first_pipe),
+                ),
+                spec(
+                    ProcessStdio::Pipe(first_pipe),
+                    ProcessStdio::Pipe(second_pipe),
+                ),
+            ]),
+            Err(PlatformError::InvalidProcessGraph)
+        ));
+
+        let mut shared_writer = spec(ProcessStdio::Null, ProcessStdio::Pipe(first_pipe));
+        shared_writer.stderr = ProcessStdio::Pipe(first_pipe);
+        let graph = validate_process_graph(&[
+            shared_writer,
+            spec(ProcessStdio::Pipe(first_pipe), ProcessStdio::Null),
+        ])
+        .expect("one process may share one writer across stdout and stderr");
+        assert_eq!(graph.spawn_order, vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn native_pipe_graph_streams_without_exposing_internal_handles() {
+        const PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+
+        let directory = TestDirectory::new();
+        let executable = directory.0.join(compile_process_tree_helper(&directory));
+        let pipe = ProcessPipeId::new(7);
+        let mut processes = spawn_native_graph(&[
+            NativeProcessSpec {
+                executable: executable.clone().into_os_string(),
+                argv: vec![
+                    OsString::from("produce"),
+                    OsString::from(PAYLOAD_BYTES.to_string()),
+                ],
+                cwd: directory.0.clone(),
+                environment: vec![],
+                clear_environment: false,
+                stdin: ProcessStdio::Null,
+                stdout: ProcessStdio::Pipe(pipe),
+                stderr: ProcessStdio::Null,
+            },
+            NativeProcessSpec {
+                executable: executable.into_os_string(),
+                argv: vec![OsString::from("copy")],
+                cwd: directory.0.clone(),
+                environment: vec![],
+                clear_environment: false,
+                stdin: ProcessStdio::Pipe(pipe),
+                stdout: ProcessStdio::Piped,
+                stderr: ProcessStdio::Null,
+            },
+        ])
+        .expect("spawn native pipe graph");
+        let mut consumer = processes.pop().expect("consumer process");
+        let mut producer = processes.pop().expect("producer process");
+        assert!(processes.is_empty());
+        assert!(producer.take_stdin().is_none());
+        assert!(producer.take_stdout().is_none());
+        assert!(producer.take_stderr().is_none());
+        assert!(consumer.take_stdin().is_none());
+        let mut stdout = consumer.take_stdout().expect("parent-facing stdout");
+        assert!(consumer.take_stderr().is_none());
+
+        let reader = async move {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).await.expect("read pipeline");
+            bytes
+        };
+        let (actual, producer_exit, consumer_exit) =
+            tokio::time::timeout(Duration::from_secs(30), async {
+                tokio::join!(reader, producer.wait(), consumer.wait())
+            })
+            .await
+            .expect("native pipe graph completes without deadlock");
+        assert!(producer_exit.expect("wait for producer").success);
+        assert!(consumer_exit.expect("wait for consumer").success);
+
+        let expected: Vec<u8> = (0..PAYLOAD_BYTES)
+            .map(|index| u8::try_from(index % 251).expect("bounded byte"))
+            .collect();
+        assert_eq!(actual.len(), expected.len());
+        assert!(actual == expected, "native pipe graph changed the payload");
     }
 
     #[tokio::test]

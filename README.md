@@ -32,9 +32,10 @@ and `exit [STATUS]`. The same persistent state executes sequential `pwd`,
 host executables with direct argument vectors. Inline source, native script
 files, and bounded stdin remain available without changing the machine
 contracts of `ash run` and `ash rpc`. H2 has begun below the language surface
-with explicit `Null`, `Piped`, and `Inherit` process-stdio modes; the current
-shell still closes native child stdin and captures both output streams until
-the later streaming and pipeline slices select different endpoints.
+with explicit process-stdio modes and validated native OS pipe graphs. The
+current shell still closes native child stdin and captures both output streams
+until later syntax, lowering, and supervision slices select those graph
+endpoints.
 
 ## What ash covers
 
@@ -205,7 +206,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **278 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **280 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, and signed updates.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB
   retained capture crossing the 4 MiB memory ceiling and fetching only its final
