@@ -12,9 +12,9 @@ use ash_ops::{
 };
 use ash_platform::{
     ClosedProcessPipeEnd, EnvironmentChange, NativeProcessFile, NativeProcessFileMode,
-    NativeProcessSpec, ParentProcessPipeEnd, PlatformError, ProcessCaptureId, ProcessExit,
-    ProcessFileId, ProcessHandle, ProcessPipeId, ProcessStdio, spawn_native,
-    spawn_native_graph_with_parent_pipe_ends,
+    NativeProcessSpec, ParentProcessFile, ParentProcessFileId, ParentProcessPipeEnd, PlatformError,
+    ProcessCaptureId, ProcessExit, ProcessFileId, ProcessGraphFile, ProcessHandle, ProcessPipeId,
+    ProcessStdio, spawn_native, spawn_native_graph_with_parent_io,
 };
 use futures::future::{join_all, try_join_all};
 use regex::{Regex, RegexBuilder};
@@ -144,12 +144,12 @@ struct ExecutionOutput {
 /// Stateful stages execute against isolated state clones. Pipeline status
 /// defaults to the final stage and can select the rightmost failure through
 /// persistent `pipefail`; final stdout and every stage's stderr share the
-/// synchronous capture ceiling. Native commands accept
+/// synchronous capture ceiling. Native and portable commands accept
 /// source-ordered `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`
 /// redirections resolved against the persistent shell working directory;
-/// replacing internal native pipeline endpoints preserves EOF and broken-pipe
-/// behavior. Unresolved backends produce explicit diagnostics without invoking
-/// a host shell.
+/// child and parent-task files open in one global order, and replacing internal
+/// pipeline endpoints preserves EOF and broken-pipe behavior. Unresolved
+/// backends produce explicit diagnostics without invoking a host shell.
 #[must_use]
 pub async fn execute_source(source: &str, state: &mut ShellState) -> ShellExecution {
     execute_source_with(source, state, &PathCommandLookup, HostPlatform::current()).await
@@ -321,9 +321,14 @@ where
 {
     let span = command.span();
     let redirections = command.redirections();
-    if !redirections.is_empty() && !matches!(&resolved, ResolvedCommand::Native { .. }) {
+    if !redirections.is_empty()
+        && !matches!(
+            &resolved,
+            ResolvedCommand::Native { .. } | ResolvedCommand::Portable(_)
+        )
+    {
         return unsupported(
-            "redirections currently require a native host command".to_owned(),
+            "redirections currently require a native or portable command".to_owned(),
             span,
             &mut output.diagnostics,
             ShellStatusKind::Exited,
@@ -347,6 +352,18 @@ where
             let (status, requested) = execute_exit(state, arguments, span, &mut output.diagnostics);
             *exit_requested = requested;
             status
+        }
+        ResolvedCommand::Portable(command) if !redirections.is_empty() => {
+            execute_portable_redirected(
+                state,
+                command,
+                arguments,
+                redirections,
+                span,
+                output,
+                runner,
+            )
+            .await
         }
         ResolvedCommand::Portable(PortableCommand::Pwd) => execute_pwd(
             state,
@@ -449,14 +466,35 @@ enum PipelineStageInvocation {
     Stateful(StatefulPipelineInvocation),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParentTaskStdio {
+    Null,
+    Pipe(ProcessPipeId),
+    File(ParentProcessFileId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PipelineCaptureStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ParentPipelineCapture {
+    stage_index: usize,
+    pipe: ProcessPipeId,
+    stream: PipelineCaptureStream,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PortablePipelineInvocation {
     command: PortableCommand,
     arguments: Vec<OsString>,
     state: ShellState,
     span: SourceSpan,
-    stdin_pipe: Option<ProcessPipeId>,
-    stdout_pipe: ProcessPipeId,
+    files: Vec<ParentProcessFile>,
+    stdin: ParentTaskStdio,
+    stdout: ParentTaskStdio,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -478,7 +516,7 @@ struct PipelineInvocation {
     stages: Vec<PipelineStageInvocation>,
     closed_pipe_ends: Vec<ClosedProcessPipeEnd>,
     parent_pipe_ends: Vec<ParentProcessPipeEnd>,
-    final_stdout_pipe: Option<ProcessPipeId>,
+    parent_captures: Vec<ParentPipelineCapture>,
     capture_limit: u64,
 }
 
@@ -611,50 +649,80 @@ async fn run_pipeline(
         stages,
         closed_pipe_ends,
         parent_pipe_ends,
-        final_stdout_pipe,
+        parent_captures,
         capture_limit,
     } = invocation;
     let stage_count = stages.len();
     let mut specs = Vec::with_capacity(stage_count);
     let mut native_stage_indices = Vec::with_capacity(stage_count);
+    let mut parent_files = Vec::new();
+    let mut file_order = Vec::new();
     for (stage_index, stage) in stages.iter().enumerate() {
-        let PipelineStageInvocation::Native(stage) = stage else {
-            continue;
-        };
-        native_stage_indices.push(stage_index);
-        specs.push(NativeProcessSpec {
-            executable: stage.executable.clone().into_os_string(),
-            argv: stage.arguments.clone(),
-            cwd: stage.cwd.clone(),
-            environment: stage
-                .environment
-                .iter()
-                .map(|(name, value)| EnvironmentChange::Set(name.clone(), value.clone()))
-                .collect(),
-            clear_environment: true,
-            files: stage.files.clone(),
-            stdin: stage.stdin,
-            stdout: stage.stdout,
-            stderr: stage.stderr,
-        });
+        match stage {
+            PipelineStageInvocation::Native(stage) => {
+                let process_index = specs.len();
+                native_stage_indices.push(stage_index);
+                file_order.extend(
+                    stage
+                        .files
+                        .iter()
+                        .map(|endpoint| ProcessGraphFile::Process {
+                            process_index,
+                            file: endpoint.id,
+                        }),
+                );
+                specs.push(NativeProcessSpec {
+                    executable: stage.executable.clone().into_os_string(),
+                    argv: stage.arguments.clone(),
+                    cwd: stage.cwd.clone(),
+                    environment: stage
+                        .environment
+                        .iter()
+                        .map(|(name, value)| EnvironmentChange::Set(name.clone(), value.clone()))
+                        .collect(),
+                    clear_environment: true,
+                    files: stage.files.clone(),
+                    stdin: stage.stdin,
+                    stdout: stage.stdout,
+                    stderr: stage.stderr,
+                });
+            }
+            PipelineStageInvocation::Portable(stage) => {
+                file_order.extend(
+                    stage
+                        .files
+                        .iter()
+                        .map(|endpoint| ProcessGraphFile::Parent(endpoint.id)),
+                );
+                parent_files.extend(stage.files.iter().cloned());
+            }
+            PipelineStageInvocation::Stateful(_) => {}
+        }
     }
 
-    let mut graph =
-        spawn_native_graph_with_parent_pipe_ends(&specs, &closed_pipe_ends, &parent_pipe_ends)
-            .map_err(classify_native_spawn_error)?;
+    let mut graph = spawn_native_graph_with_parent_io(
+        &specs,
+        &closed_pipe_ends,
+        &parent_pipe_ends,
+        &parent_files,
+        &file_order,
+    )
+    .map_err(classify_native_spawn_error)?;
     let mut stdout_streams: Vec<Option<tokio::fs::File>> =
         std::iter::repeat_with(|| None).take(stage_count).collect();
     let mut stderr_streams: Vec<Option<tokio::fs::File>> =
         std::iter::repeat_with(|| None).take(stage_count).collect();
-    if let Some(pipe) = final_stdout_pipe {
-        let final_index = stage_count
-            .checked_sub(1)
-            .ok_or(NativeCommandError::MissingStream("final stage stdout"))?;
-        stdout_streams[final_index] = Some(
+    for capture in parent_captures {
+        let reader =
             graph
-                .take_pipe_reader(pipe)
-                .ok_or(NativeCommandError::MissingStream("portable final stdout"))?,
-        );
+                .take_pipe_reader(capture.pipe)
+                .ok_or(NativeCommandError::MissingStream(
+                    "in-process stage capture",
+                ))?;
+        match capture.stream {
+            PipelineCaptureStream::Stdout => stdout_streams[capture.stage_index] = Some(reader),
+            PipelineCaptureStream::Stderr => stderr_streams[capture.stage_index] = Some(reader),
+        }
     }
 
     let mut in_process_tasks = Vec::new();
@@ -662,20 +730,11 @@ async fn run_pipeline(
         let (invocation, input, output) = match stage {
             PipelineStageInvocation::Native(_) => continue,
             PipelineStageInvocation::Portable(invocation) => {
-                let input = invocation
-                    .stdin_pipe
-                    .map(|pipe| {
-                        graph
-                            .take_pipe_reader(pipe)
-                            .ok_or(NativeCommandError::MissingStream("portable stage stdin"))
-                    })
-                    .transpose()?;
-                let output = graph
-                    .take_pipe_writer(invocation.stdout_pipe)
-                    .ok_or(NativeCommandError::MissingStream("portable stage stdout"))?;
+                let input = take_parent_task_reader(&mut graph, invocation.stdin)?;
+                let output = take_parent_task_writer(&mut graph, invocation.stdout)?;
                 (
                     InProcessPipelineInvocation::Portable(invocation),
-                    input,
+                    Some(input),
                     output,
                 )
             }
@@ -686,7 +745,7 @@ async fn run_pipeline(
                 (
                     InProcessPipelineInvocation::Stateful(invocation),
                     None,
-                    output,
+                    Box::new(output) as PortablePipelineWriter,
                 )
             }
         };
@@ -763,23 +822,68 @@ async fn run_pipeline(
     }
 }
 
+type PortablePipelineReader = Box<dyn AsyncRead + Send + Unpin>;
+type PortablePipelineWriter = Box<dyn AsyncWrite + Send + Unpin>;
+
+fn take_parent_task_reader(
+    graph: &mut ash_platform::NativeProcessGraph,
+    endpoint: ParentTaskStdio,
+) -> Result<PortablePipelineReader, NativeCommandError> {
+    match endpoint {
+        ParentTaskStdio::Null => Ok(Box::new(tokio::io::empty())),
+        ParentTaskStdio::Pipe(id) => graph
+            .take_pipe_reader(id)
+            .map(|reader| Box::new(reader) as PortablePipelineReader)
+            .ok_or(NativeCommandError::MissingStream("portable stage stdin")),
+        ParentTaskStdio::File(id) => graph
+            .take_parent_file(id)
+            .map(|reader| Box::new(reader) as PortablePipelineReader)
+            .ok_or(NativeCommandError::MissingStream(
+                "portable stage input file",
+            )),
+    }
+}
+
+fn take_parent_task_writer(
+    graph: &mut ash_platform::NativeProcessGraph,
+    endpoint: ParentTaskStdio,
+) -> Result<PortablePipelineWriter, NativeCommandError> {
+    match endpoint {
+        ParentTaskStdio::Null => Ok(Box::new(tokio::io::sink())),
+        ParentTaskStdio::Pipe(id) => graph
+            .take_pipe_writer(id)
+            .map(|writer| Box::new(writer) as PortablePipelineWriter)
+            .ok_or(NativeCommandError::MissingStream("portable stage stdout")),
+        ParentTaskStdio::File(id) => graph
+            .take_parent_file(id)
+            .map(|writer| Box::new(writer) as PortablePipelineWriter)
+            .ok_or(NativeCommandError::MissingStream(
+                "portable stage output file",
+            )),
+    }
+}
+
 struct PipelineStageOutput {
     stage_index: usize,
     exit: ProcessExit,
     diagnostics: Vec<ExecutionDiagnostic>,
 }
 
-type PortablePipelineReader = Box<dyn AsyncRead + Send + Unpin>;
-
 async fn execute_in_process_pipeline_stage(
     stage_index: usize,
     invocation: InProcessPipelineInvocation,
-    input: Option<tokio::fs::File>,
-    output: tokio::fs::File,
+    input: Option<PortablePipelineReader>,
+    output: PortablePipelineWriter,
 ) -> PipelineStageOutput {
     match invocation {
         InProcessPipelineInvocation::Portable(invocation) => {
-            execute_portable_pipeline_stage(stage_index, invocation, input, output).await
+            execute_portable_pipeline_stage(
+                stage_index,
+                invocation,
+                input.expect("portable task input is prepared"),
+                output,
+            )
+            .await
         }
         InProcessPipelineInvocation::Stateful(invocation) => {
             debug_assert!(input.is_none());
@@ -791,7 +895,7 @@ async fn execute_in_process_pipeline_stage(
 fn execute_stateful_pipeline_stage(
     stage_index: usize,
     invocation: StatefulPipelineInvocation,
-    output: tokio::fs::File,
+    output: PortablePipelineWriter,
 ) -> PipelineStageOutput {
     let mut state = invocation.state;
     let mut diagnostics = Vec::new();
@@ -843,8 +947,8 @@ fn execute_stateful_pipeline_stage(
 async fn execute_portable_pipeline_stage(
     stage_index: usize,
     invocation: PortablePipelineInvocation,
-    input: Option<tokio::fs::File>,
-    output: tokio::fs::File,
+    input: PortablePipelineReader,
+    output: PortablePipelineWriter,
 ) -> PipelineStageOutput {
     match invocation.command {
         PortableCommand::Cat => {
@@ -893,17 +997,14 @@ async fn execute_portable_pipeline_stage(
 async fn execute_portable_pipeline_cat(
     stage_index: usize,
     invocation: PortablePipelineInvocation,
-    input: Option<tokio::fs::File>,
-    mut output: tokio::fs::File,
+    input: PortablePipelineReader,
+    mut output: PortablePipelineWriter,
 ) -> PipelineStageOutput {
     let target = parse_cat_path_with_stdin(&invocation.arguments, true)
         .expect("portable pipeline cat arguments were preflighted");
     let mut diagnostics = Vec::new();
     let mut reader: PortablePipelineReader = if target == "-" {
-        input.map_or_else(
-            || Box::new(tokio::io::empty()) as PortablePipelineReader,
-            |input| Box::new(input) as PortablePipelineReader,
-        )
+        input
     } else {
         drop(input);
         let filesystem = match NativeFileSystem::new(invocation.state.cwd()) {
@@ -960,8 +1061,8 @@ async fn execute_portable_pipeline_cat(
 async fn execute_portable_pipeline_grep(
     stage_index: usize,
     invocation: PortablePipelineInvocation,
-    input: Option<tokio::fs::File>,
-    mut output: tokio::fs::File,
+    input: PortablePipelineReader,
+    mut output: PortablePipelineWriter,
 ) -> PipelineStageOutput {
     let options = parse_grep_options_with_stdin(&invocation.arguments, true)
         .expect("portable pipeline grep arguments were preflighted");
@@ -969,10 +1070,7 @@ async fn execute_portable_pipeline_grep(
         PipelineGrepMatcher::new(&options).expect("portable pipeline grep pattern was preflighted");
     let mut diagnostics = Vec::new();
     let mut reader: PortablePipelineReader = if options.path == "-" {
-        input.map_or_else(
-            || Box::new(tokio::io::empty()) as PortablePipelineReader,
-            |input| Box::new(input) as PortablePipelineReader,
-        )
+        input
     } else {
         drop(input);
         let filesystem = match NativeFileSystem::new(invocation.state.cwd()) {
@@ -1224,7 +1322,7 @@ async fn grep_portable_pipeline_stream(
 }
 
 async fn write_portable_pipeline_output(
-    mut output: tokio::fs::File,
+    mut output: PortablePipelineWriter,
     bytes: &[u8],
 ) -> io::Result<()> {
     output.write_all(bytes).await?;
@@ -1336,6 +1434,171 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PortableRedirectionEndpoint {
+    Null,
+    Pipe(ProcessPipeId),
+    File(ParentProcessFileId),
+    Capture(PipelineCaptureStream),
+}
+
+fn allocate_parent_capture(
+    stage_index: usize,
+    stream: PipelineCaptureStream,
+    next_pipe_id: &mut u32,
+    parent_pipe_ends: &mut Vec<ParentProcessPipeEnd>,
+    parent_captures: &mut Vec<ParentPipelineCapture>,
+) -> ProcessPipeId {
+    let pipe = ProcessPipeId::new(*next_pipe_id);
+    *next_pipe_id = next_pipe_id
+        .checked_add(1)
+        .expect("bounded pipeline capture identifiers fit u32");
+    parent_pipe_ends.push(ParentProcessPipeEnd::Reader(pipe));
+    parent_pipe_ends.push(ParentProcessPipeEnd::Writer(pipe));
+    parent_captures.push(ParentPipelineCapture {
+        stage_index,
+        pipe,
+        stream,
+    });
+    pipe
+}
+
+fn materialize_portable_endpoint(
+    endpoint: PortableRedirectionEndpoint,
+    stage_index: usize,
+    next_pipe_id: &mut u32,
+    parent_pipe_ends: &mut Vec<ParentProcessPipeEnd>,
+    parent_captures: &mut Vec<ParentPipelineCapture>,
+) -> ParentTaskStdio {
+    match endpoint {
+        PortableRedirectionEndpoint::Null => ParentTaskStdio::Null,
+        PortableRedirectionEndpoint::Pipe(id) => ParentTaskStdio::Pipe(id),
+        PortableRedirectionEndpoint::File(id) => ParentTaskStdio::File(id),
+        PortableRedirectionEndpoint::Capture(stream) => {
+            ParentTaskStdio::Pipe(allocate_parent_capture(
+                stage_index,
+                stream,
+                next_pipe_id,
+                parent_pipe_ends,
+                parent_captures,
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn portable_pipeline_invocation(
+    state: &ShellState,
+    command: PortableCommand,
+    arguments: Vec<OsString>,
+    redirections: &[Redirection],
+    span: SourceSpan,
+    stage_index: usize,
+    reads_stdin: bool,
+    mut stdin: PortableRedirectionEndpoint,
+    mut stdout: PortableRedirectionEndpoint,
+    next_pipe_id: &mut u32,
+    next_parent_file_id: &mut u32,
+    parent_pipe_ends: &mut Vec<ParentProcessPipeEnd>,
+    parent_captures: &mut Vec<ParentPipelineCapture>,
+) -> Result<PortablePipelineInvocation, RedirectionPlanError> {
+    let mut stderr = PortableRedirectionEndpoint::Capture(PipelineCaptureStream::Stderr);
+    let mut files = Vec::with_capacity(redirections.len());
+    for redirection in redirections {
+        let endpoint = match redirection.target() {
+            RedirectionTarget::File { path, mode } => {
+                if !matches!(
+                    (redirection.descriptor(), mode),
+                    (RedirectionDescriptor::Stdin, RedirectionFileMode::Read)
+                        | (
+                            RedirectionDescriptor::Stdout | RedirectionDescriptor::Stderr,
+                            RedirectionFileMode::Write | RedirectionFileMode::Append
+                        )
+                ) {
+                    return Err(RedirectionPlanError {
+                        message: "redirection file mode does not match its descriptor".to_owned(),
+                        span: redirection.operator_span(),
+                    });
+                }
+                let mut expanded = expand_words(std::slice::from_ref(path), state).into_iter();
+                let Some(target) = expanded.next() else {
+                    return Err(RedirectionPlanError {
+                        message: "redirection target expands to no path".to_owned(),
+                        span: path.span(),
+                    });
+                };
+                if expanded.next().is_some() {
+                    return Err(RedirectionPlanError {
+                        message: "redirection target expands to multiple paths".to_owned(),
+                        span: path.span(),
+                    });
+                }
+                let id = ParentProcessFileId::new(*next_parent_file_id);
+                *next_parent_file_id =
+                    next_parent_file_id
+                        .checked_add(1)
+                        .ok_or_else(|| RedirectionPlanError {
+                            message: "redirection plan contains too many parent file targets"
+                                .to_owned(),
+                            span: redirection.span(),
+                        })?;
+                files.push(ParentProcessFile {
+                    id,
+                    path: state.cwd().join(PathBuf::from(target.into_value())),
+                    mode: match mode {
+                        RedirectionFileMode::Read => NativeProcessFileMode::Read,
+                        RedirectionFileMode::Write => NativeProcessFileMode::Write,
+                        RedirectionFileMode::Append => NativeProcessFileMode::Append,
+                    },
+                });
+                PortableRedirectionEndpoint::File(id)
+            }
+            RedirectionTarget::Descriptor(source) => match source {
+                RedirectionDescriptor::Stdin => stdin,
+                RedirectionDescriptor::Stdout => stdout,
+                RedirectionDescriptor::Stderr => stderr,
+            },
+        };
+        match redirection.descriptor() {
+            RedirectionDescriptor::Stdin => stdin = endpoint,
+            RedirectionDescriptor::Stdout => stdout = endpoint,
+            RedirectionDescriptor::Stderr => stderr = endpoint,
+        }
+    }
+
+    let stdin = if reads_stdin {
+        match stdin {
+            PortableRedirectionEndpoint::Null => ParentTaskStdio::Null,
+            PortableRedirectionEndpoint::Pipe(id) => ParentTaskStdio::Pipe(id),
+            PortableRedirectionEndpoint::File(id) => ParentTaskStdio::File(id),
+            PortableRedirectionEndpoint::Capture(_) => {
+                return Err(RedirectionPlanError {
+                    message: "portable stdin cannot use an output capture".to_owned(),
+                    span,
+                });
+            }
+        }
+    } else {
+        ParentTaskStdio::Null
+    };
+    let stdout = materialize_portable_endpoint(
+        stdout,
+        stage_index,
+        next_pipe_id,
+        parent_pipe_ends,
+        parent_captures,
+    );
+    Ok(PortablePipelineInvocation {
+        command,
+        arguments,
+        state: state.clone(),
+        span,
+        files,
+        stdin,
+        stdout,
+    })
+}
+
 async fn execute_pipeline<L, R>(
     commands: &[SimpleCommand],
     span: SourceSpan,
@@ -1359,6 +1622,11 @@ where
 
     let capture_limit = remaining_capture(output);
     let mut stages = Vec::with_capacity(commands.len());
+    let mut parent_pipe_ends = Vec::with_capacity(commands.len().saturating_mul(2));
+    let mut parent_captures = Vec::new();
+    let mut next_pipe_id =
+        u32::try_from(commands.len() - 1).expect("pipeline stage ceiling fits u32");
+    let mut next_parent_file_id = 0_u32;
     for (index, command) in commands.iter().enumerate() {
         let expanded = expand_words(command.words(), state);
         let name_span = expanded.first().map(|word| word.span());
@@ -1432,7 +1700,7 @@ where
             {
                 if !command.redirections().is_empty() {
                     return unsupported(
-                        "redirections currently require a native host command".to_owned(),
+                        "redirections currently require a native or portable command".to_owned(),
                         command.span(),
                         &mut output.diagnostics,
                         ShellStatusKind::Exited,
@@ -1450,9 +1718,19 @@ where
                         arguments,
                         state: state.clone(),
                         span: command.span(),
-                        stdout_pipe: ProcessPipeId::new(
-                            u32::try_from(index).expect("pipeline stage ceiling fits u32"),
-                        ),
+                        stdout_pipe: if index + 1 == commands.len() {
+                            allocate_parent_capture(
+                                index,
+                                PipelineCaptureStream::Stdout,
+                                &mut next_pipe_id,
+                                &mut parent_pipe_ends,
+                                &mut parent_captures,
+                            )
+                        } else {
+                            ProcessPipeId::new(
+                                u32::try_from(index).expect("pipeline stage ceiling fits u32"),
+                            )
+                        },
                     },
                 ));
             }
@@ -1464,15 +1742,6 @@ where
                 );
             }
             Ok(ResolvedCommand::Portable(portable)) => {
-                if !command.redirections().is_empty() {
-                    return unsupported(
-                        "redirections currently require a native host command".to_owned(),
-                        command.span(),
-                        &mut output.diagnostics,
-                        ShellStatusKind::Exited,
-                        2,
-                    );
-                }
                 let arguments = words[1..].to_vec();
                 let reads_stdin = match portable_pipeline_reads_stdin(portable, &arguments) {
                     Ok(reads_stdin) => reads_stdin,
@@ -1480,23 +1749,46 @@ where
                         return invalid_arguments(&error, command.span(), &mut output.diagnostics);
                     }
                 };
-                let stdin_pipe = (reads_stdin && index > 0).then(|| {
-                    ProcessPipeId::new(
+                let stdin = if index == 0 {
+                    PortableRedirectionEndpoint::Null
+                } else {
+                    PortableRedirectionEndpoint::Pipe(ProcessPipeId::new(
                         u32::try_from(index - 1).expect("pipeline stage ceiling fits u32"),
-                    )
-                });
-                stages.push(PipelineStageInvocation::Portable(
-                    PortablePipelineInvocation {
-                        command: portable,
-                        arguments,
-                        state: state.clone(),
-                        span: command.span(),
-                        stdin_pipe,
-                        stdout_pipe: ProcessPipeId::new(
-                            u32::try_from(index).expect("pipeline stage ceiling fits u32"),
-                        ),
-                    },
-                ));
+                    ))
+                };
+                let stdout = if index + 1 == commands.len() {
+                    PortableRedirectionEndpoint::Capture(PipelineCaptureStream::Stdout)
+                } else {
+                    PortableRedirectionEndpoint::Pipe(ProcessPipeId::new(
+                        u32::try_from(index).expect("pipeline stage ceiling fits u32"),
+                    ))
+                };
+                match portable_pipeline_invocation(
+                    state,
+                    portable,
+                    arguments,
+                    command.redirections(),
+                    command.span(),
+                    index,
+                    reads_stdin,
+                    stdin,
+                    stdout,
+                    &mut next_pipe_id,
+                    &mut next_parent_file_id,
+                    &mut parent_pipe_ends,
+                    &mut parent_captures,
+                ) {
+                    Ok(invocation) => {
+                        stages.push(PipelineStageInvocation::Portable(invocation));
+                    }
+                    Err(error) => {
+                        return redirection_failure(
+                            error.message,
+                            error.span,
+                            &mut output.diagnostics,
+                        );
+                    }
+                }
             }
             Ok(
                 ResolvedCommand::Alias { name, .. }
@@ -1516,7 +1808,6 @@ where
     }
 
     let mut closed_pipe_ends = Vec::with_capacity((stages.len() - 1).saturating_mul(2));
-    let mut parent_pipe_ends = Vec::with_capacity(stages.len().saturating_mul(2));
     for index in 0..stages.len() - 1 {
         let pipe_id =
             ProcessPipeId::new(u32::try_from(index).expect("pipeline stage ceiling fits u32"));
@@ -1528,8 +1819,11 @@ where
                 }
             }
             PipelineStageInvocation::Portable(stage) => {
-                debug_assert_eq!(stage.stdout_pipe, pipe_id);
-                parent_pipe_ends.push(ParentProcessPipeEnd::Writer(pipe_id));
+                if stage.stdout == ParentTaskStdio::Pipe(pipe_id) {
+                    parent_pipe_ends.push(ParentProcessPipeEnd::Writer(pipe_id));
+                } else {
+                    closed_pipe_ends.push(ClosedProcessPipeEnd::Writer(pipe_id));
+                }
             }
             PipelineStageInvocation::Stateful(stage) => {
                 debug_assert_eq!(stage.stdout_pipe, pipe_id);
@@ -1543,7 +1837,7 @@ where
                 }
             }
             PipelineStageInvocation::Portable(stage) => {
-                if stage.stdin_pipe == Some(pipe_id) {
+                if stage.stdin == ParentTaskStdio::Pipe(pipe_id) {
                     parent_pipe_ends.push(ParentProcessPipeEnd::Reader(pipe_id));
                 } else {
                     closed_pipe_ends.push(ClosedProcessPipeEnd::Reader(pipe_id));
@@ -1555,26 +1849,12 @@ where
         }
     }
 
-    let final_stdout_pipe = match stages.last() {
-        Some(PipelineStageInvocation::Portable(stage)) => {
-            parent_pipe_ends.push(ParentProcessPipeEnd::Reader(stage.stdout_pipe));
-            parent_pipe_ends.push(ParentProcessPipeEnd::Writer(stage.stdout_pipe));
-            Some(stage.stdout_pipe)
-        }
-        Some(PipelineStageInvocation::Stateful(stage)) => {
-            parent_pipe_ends.push(ParentProcessPipeEnd::Reader(stage.stdout_pipe));
-            parent_pipe_ends.push(ParentProcessPipeEnd::Writer(stage.stdout_pipe));
-            Some(stage.stdout_pipe)
-        }
-        Some(PipelineStageInvocation::Native(_)) | None => None,
-    };
-
     match runner
         .run_pipeline(PipelineInvocation {
             stages,
             closed_pipe_ends,
             parent_pipe_ends,
-            final_stdout_pipe,
+            parent_captures,
             capture_limit,
         })
         .await
@@ -1618,6 +1898,104 @@ where
         ),
         Err(error) => process_failure(
             format!("cannot execute pipeline: {error}"),
+            span,
+            &mut output.diagnostics,
+            ShellStatusKind::SpawnError,
+            126,
+        ),
+    }
+}
+
+async fn execute_portable_redirected<R>(
+    state: &ShellState,
+    command: PortableCommand,
+    arguments: &[OsString],
+    redirections: &[Redirection],
+    span: SourceSpan,
+    output: &mut ExecutionOutput,
+    runner: &R,
+) -> ShellStatus
+where
+    R: NativeCommandRunner + ?Sized,
+{
+    let reads_stdin = match portable_pipeline_reads_stdin(command, arguments) {
+        Ok(reads_stdin) => reads_stdin,
+        Err(error) => return invalid_arguments(&error, span, &mut output.diagnostics),
+    };
+    let mut parent_pipe_ends = Vec::new();
+    let mut parent_captures = Vec::new();
+    let mut next_pipe_id = 0_u32;
+    let mut next_parent_file_id = 0_u32;
+    let invocation = match portable_pipeline_invocation(
+        state,
+        command,
+        arguments.to_vec(),
+        redirections,
+        span,
+        0,
+        reads_stdin,
+        PortableRedirectionEndpoint::Null,
+        PortableRedirectionEndpoint::Capture(PipelineCaptureStream::Stdout),
+        &mut next_pipe_id,
+        &mut next_parent_file_id,
+        &mut parent_pipe_ends,
+        &mut parent_captures,
+    ) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            return redirection_failure(error.message, error.span, &mut output.diagnostics);
+        }
+    };
+    if reads_stdin && invocation.stdin == ParentTaskStdio::Null {
+        return invalid_arguments(
+            &format!(
+                "{} standard input requires a `<` redirection in a simple command",
+                command.name()
+            ),
+            span,
+            &mut output.diagnostics,
+        );
+    }
+
+    match runner
+        .run_pipeline(PipelineInvocation {
+            stages: vec![PipelineStageInvocation::Portable(invocation)],
+            closed_pipe_ends: Vec::new(),
+            parent_pipe_ends,
+            parent_captures,
+            capture_limit: remaining_capture(output),
+        })
+        .await
+    {
+        Ok(portable) if portable.exits.len() == 1 => {
+            output.stdout.extend_from_slice(&portable.stdout);
+            output.stderr.extend_from_slice(&portable.stderr);
+            output.diagnostics.extend(portable.diagnostics);
+            native_exit_status(portable.exits[0])
+        }
+        Ok(_) => process_failure(
+            "portable command supervision returned incomplete exit status".to_owned(),
+            span,
+            &mut output.diagnostics,
+            ShellStatusKind::SpawnError,
+            126,
+        ),
+        Err(NativeCommandError::CaptureLimit { .. }) => process_failure(
+            format!(
+                "portable command output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
+            ),
+            span,
+            &mut output.diagnostics,
+            ShellStatusKind::Exited,
+            1,
+        ),
+        Err(NativeCommandError::Redirection(error)) => redirection_failure(
+            format!("cannot apply portable redirection: {error}"),
+            span,
+            &mut output.diagnostics,
+        ),
+        Err(error) => process_failure(
+            format!("cannot execute portable command: {error}"),
             span,
             &mut output.diagnostics,
             ShellStatusKind::SpawnError,
@@ -2807,13 +3185,15 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use ash_platform::{
-        ClosedProcessPipeEnd, ParentProcessPipeEnd, ProcessExit, ProcessPipeId, ProcessStdio,
+        ClosedProcessPipeEnd, NativeProcessFileMode, ParentProcessFileId, ParentProcessPipeEnd,
+        ProcessExit, ProcessPipeId, ProcessStdio,
     };
 
     use super::{
         ExecutionDiagnosticCode, NativeCommandError, NativeCommandOutput, NativeCommandRunner,
-        NativeInvocation, PipelineInvocation, PipelineOutput, PipelineStageInvocation,
-        execute_source, execute_source_with, execute_source_with_runner,
+        NativeInvocation, ParentPipelineCapture, ParentTaskStdio, PipelineCaptureStream,
+        PipelineInvocation, PipelineOutput, PipelineStageInvocation, execute_source,
+        execute_source_with, execute_source_with_runner,
     };
     use crate::{HostPlatform, ShellState, ShellStatusKind, SourceSpan};
 
@@ -3491,6 +3871,133 @@ fn main() {
     }
 
     #[tokio::test]
+    async fn portable_redirections_stream_files_descriptors_and_replaced_pipeline_ends() {
+        let directory = TestDirectory::new();
+        let input = b"alpha\r\nneedle one\nneedle two\r\nomega\n";
+        fs::write(directory.0.join("input.txt"), input).expect("portable redirect input");
+        let mut state = ShellState::new(&directory.0);
+
+        let redirected = execute_source(
+            "echo first >output.log; echo second >>output.log; \
+             cat - <input.txt >copy.txt; grep -n needle - <input.txt >matches.txt; \
+             echo routed 1>&2; echo file 2>stderr.log 1>&2; \
+             echo retained 1>&2 2>late-stderr.log",
+            &mut state,
+        )
+        .await;
+        assert_eq!(redirected.status().code(), 0);
+        assert!(redirected.stdout().is_empty());
+        assert_eq!(redirected.stderr(), b"routed\nretained\n");
+        assert!(redirected.diagnostics().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("output.log")).expect("portable append output"),
+            b"first\nsecond\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("copy.txt")).expect("portable copied input"),
+            input
+        );
+        assert_eq!(
+            fs::read(directory.0.join("matches.txt")).expect("portable grep output"),
+            b"2:needle one\n3:needle two\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("stderr.log")).expect("portable descriptor output"),
+            b"file\n"
+        );
+        assert!(
+            fs::read(directory.0.join("late-stderr.log"))
+                .expect("superseding portable stderr file")
+                .is_empty()
+        );
+
+        let invalid_stdin = execute_source("cat - >must-not-open.log", &mut state).await;
+        assert_eq!(invalid_stdin.status().code(), 2);
+        assert_eq!(
+            invalid_stdin.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::InvalidArguments
+        );
+        assert!(!directory.0.join("must-not-open.log").exists());
+
+        state.options_mut().set_pipefail(true);
+        let replaced_reader = execute_source(
+            "echo upstream | cat - <input.txt >reader-copy.txt",
+            &mut state,
+        )
+        .await;
+        state.options_mut().set_pipefail(false);
+        assert_ne!(replaced_reader.status().code(), 0);
+        assert!(replaced_reader.stdout().is_empty());
+        assert!(replaced_reader.stderr().is_empty());
+        assert!(replaced_reader.diagnostics().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("reader-copy.txt")).expect("redirected portable reader"),
+            input
+        );
+
+        let replaced_writer = execute_source("echo side >side.log | cat -", &mut state).await;
+        assert_eq!(replaced_writer.status().code(), 0);
+        assert!(replaced_writer.stdout().is_empty());
+        assert!(replaced_writer.stderr().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("side.log")).expect("redirected portable writer"),
+            b"side\n"
+        );
+
+        let descriptor_pipeline = execute_source("echo diagnostic 1>&2 | cat -", &mut state).await;
+        assert_eq!(descriptor_pipeline.status().code(), 0);
+        assert!(descriptor_pipeline.stdout().is_empty());
+        assert_eq!(descriptor_pipeline.stderr(), b"diagnostic\n");
+        assert!(descriptor_pipeline.diagnostics().is_empty());
+    }
+
+    #[tokio::test]
+    async fn mixed_pipeline_files_open_in_global_stage_and_source_order() {
+        let directory = TestDirectory::new();
+        let mut state = ShellState::new(&directory.0);
+        let lookup =
+            |command: &str, _cwd: &std::path::Path, _environment: &crate::PlatformEnvironment| {
+                (command == "consumer").then(|| directory.0.join("unreachable-consumer"))
+            };
+
+        let parent_first = execute_source_with(
+            "echo value >opened-first.log | native:consumer <missing-input",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+        )
+        .await;
+        assert_eq!(
+            parent_first.status().kind(),
+            ShellStatusKind::RedirectionError
+        );
+        assert_eq!(
+            parent_first.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Redirection
+        );
+        assert!(
+            directory.0.join("opened-first.log").exists(),
+            "the earlier portable file must open before the later native failure"
+        );
+
+        let native_first = execute_source_with(
+            "native:consumer <missing-input | echo value >must-stay-unopened.log",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+        )
+        .await;
+        assert_eq!(
+            native_first.status().kind(),
+            ShellStatusKind::RedirectionError
+        );
+        assert!(
+            !directory.0.join("must-stay-unopened.log").exists(),
+            "the later portable file must not open after an earlier native failure"
+        );
+    }
+
+    #[tokio::test]
     async fn native_pipelines_preflight_every_stage_and_apply_the_status_policy() {
         let mut state = ShellState::new("/fixture/work");
         state.environment_mut().insert("PATH", "/fixture/bin");
@@ -3554,7 +4061,7 @@ fn main() {
         assert_eq!(invocation.capture_limit, super::MAX_READ_FILE_BYTES);
         assert!(invocation.closed_pipe_ends.is_empty());
         assert!(invocation.parent_pipe_ends.is_empty());
-        assert_eq!(invocation.final_stdout_pipe, None);
+        assert!(invocation.parent_captures.is_empty());
         assert_eq!(first.capture_limit, invocation.capture_limit);
         assert_eq!(second.capture_limit, invocation.capture_limit);
 
@@ -3584,15 +4091,19 @@ fn main() {
         };
         assert_eq!(portable.command, crate::PortableCommand::Echo);
         assert_eq!(portable.arguments, [OsString::from("hello")]);
-        assert_eq!(portable.stdin_pipe, None);
-        assert_eq!(portable.stdout_pipe, ProcessPipeId::new(0));
+        assert_eq!(portable.stdin, ParentTaskStdio::Null);
+        assert_eq!(
+            portable.stdout,
+            ParentTaskStdio::Pipe(ProcessPipeId::new(0))
+        );
+        assert!(portable.files.is_empty());
         assert_eq!(native.stdin, ProcessStdio::Pipe(ProcessPipeId::new(0)));
         assert_eq!(
             mixed_invocation.parent_pipe_ends,
             [ParentProcessPipeEnd::Writer(ProcessPipeId::new(0))]
         );
         assert!(mixed_invocation.closed_pipe_ends.is_empty());
-        assert_eq!(mixed_invocation.final_stdout_pipe, None);
+        assert!(mixed_invocation.parent_captures.is_empty());
 
         let final_portable_runner = RecordingPipelineRunner::new(successful_pipeline_output(2));
         let final_portable = execute_source_with_runner(
@@ -3620,8 +4131,11 @@ fn main() {
         };
         assert_eq!(native.stdout, ProcessStdio::Pipe(ProcessPipeId::new(0)));
         assert_eq!(portable.command, crate::PortableCommand::Pwd);
-        assert_eq!(portable.stdin_pipe, None);
-        assert_eq!(portable.stdout_pipe, ProcessPipeId::new(1));
+        assert_eq!(portable.stdin, ParentTaskStdio::Null);
+        assert_eq!(
+            portable.stdout,
+            ParentTaskStdio::Pipe(ProcessPipeId::new(1))
+        );
         assert_eq!(
             final_portable_invocation.closed_pipe_ends,
             [ClosedProcessPipeEnd::Reader(ProcessPipeId::new(0))]
@@ -3634,8 +4148,12 @@ fn main() {
             ]
         );
         assert_eq!(
-            final_portable_invocation.final_stdout_pipe,
-            Some(ProcessPipeId::new(1))
+            final_portable_invocation.parent_captures,
+            [ParentPipelineCapture {
+                stage_index: 1,
+                pipe: ProcessPipeId::new(1),
+                stream: PipelineCaptureStream::Stdout,
+            }]
         );
 
         let portable_runner = RecordingPipelineRunner::new(successful_pipeline_output(2));
@@ -3663,8 +4181,8 @@ fn main() {
             panic!("expected two portable stages");
         };
         assert_eq!(echo.command, crate::PortableCommand::Echo);
-        assert_eq!(echo.stdin_pipe, None);
-        assert_eq!(echo.stdout_pipe, ProcessPipeId::new(0));
+        assert_eq!(echo.stdin, ParentTaskStdio::Null);
+        assert_eq!(echo.stdout, ParentTaskStdio::Pipe(ProcessPipeId::new(0)));
         assert_eq!(grep.command, crate::PortableCommand::Grep);
         assert_eq!(
             grep.arguments,
@@ -3674,21 +4192,25 @@ fn main() {
                 OsString::from("-"),
             ]
         );
-        assert_eq!(grep.stdin_pipe, Some(ProcessPipeId::new(0)));
-        assert_eq!(grep.stdout_pipe, ProcessPipeId::new(1));
+        assert_eq!(grep.stdin, ParentTaskStdio::Pipe(ProcessPipeId::new(0)));
+        assert_eq!(grep.stdout, ParentTaskStdio::Pipe(ProcessPipeId::new(1)));
         assert!(portable_invocation.closed_pipe_ends.is_empty());
         assert_eq!(
             portable_invocation.parent_pipe_ends,
             [
-                ParentProcessPipeEnd::Writer(ProcessPipeId::new(0)),
-                ParentProcessPipeEnd::Reader(ProcessPipeId::new(0)),
                 ParentProcessPipeEnd::Reader(ProcessPipeId::new(1)),
                 ParentProcessPipeEnd::Writer(ProcessPipeId::new(1)),
+                ParentProcessPipeEnd::Writer(ProcessPipeId::new(0)),
+                ParentProcessPipeEnd::Reader(ProcessPipeId::new(0)),
             ]
         );
         assert_eq!(
-            portable_invocation.final_stdout_pipe,
-            Some(ProcessPipeId::new(1))
+            portable_invocation.parent_captures,
+            [ParentPipelineCapture {
+                stage_index: 1,
+                pipe: ProcessPipeId::new(1),
+                stream: PipelineCaptureStream::Stdout,
+            }]
         );
 
         let redirected_runner = RecordingPipelineRunner::new(PipelineOutput {
@@ -3819,9 +4341,9 @@ fn main() {
         assert_eq!(
             redirected_producer_invocation.parent_pipe_ends,
             [
-                ParentProcessPipeEnd::Reader(ProcessPipeId::new(0)),
                 ParentProcessPipeEnd::Reader(ProcessPipeId::new(1)),
                 ParentProcessPipeEnd::Writer(ProcessPipeId::new(1)),
+                ParentProcessPipeEnd::Reader(ProcessPipeId::new(0)),
             ]
         );
 
@@ -3956,7 +4478,7 @@ fn main() {
             [ParentProcessPipeEnd::Writer(ProcessPipeId::new(0))]
         );
         assert!(stateful_invocation.closed_pipe_ends.is_empty());
-        assert_eq!(stateful_invocation.final_stdout_pipe, None);
+        assert!(stateful_invocation.parent_captures.is_empty());
         assert_eq!(state.cwd(), std::path::Path::new("/fixture/work"));
 
         let rejected_runner = RecordingPipelineRunner::new(PipelineOutput {
@@ -4068,20 +4590,38 @@ fn main() {
             &portable_redirection_runner,
         )
         .await;
-        assert_eq!(portable_redirection.status().code(), 2);
-        assert_eq!(portable_redirection.diagnostics().len(), 1);
+        assert_eq!(portable_redirection.status().code(), 0);
+        assert!(portable_redirection.diagnostics().is_empty());
+        let portable_redirection_invocation = portable_redirection_runner
+            .invocation
+            .lock()
+            .expect("portable redirection invocation lock")
+            .clone()
+            .expect("portable redirection invocation");
+        let [
+            PipelineStageInvocation::Portable(portable),
+            PipelineStageInvocation::Native(native),
+        ] = portable_redirection_invocation.stages.as_slice()
+        else {
+            panic!("expected redirected portable-to-native stages");
+        };
+        let parent_file = ParentProcessFileId::new(0);
+        assert_eq!(portable.stdout, ParentTaskStdio::File(parent_file));
+        assert_eq!(portable.stdin, ParentTaskStdio::Null);
+        assert_eq!(portable.files.len(), 1);
+        assert_eq!(portable.files[0].id, parent_file);
+        assert_eq!(portable.files[0].mode, NativeProcessFileMode::Write);
         assert_eq!(
-            portable_redirection.diagnostics()[0].code(),
-            ExecutionDiagnosticCode::Unsupported
+            portable.files[0].path,
+            preflight_directory.0.join("portable.log")
         );
-        assert!(
-            portable_redirection_runner
-                .invocation
-                .lock()
-                .expect("portable redirection invocation lock")
-                .is_none(),
-            "portable redirection must fail before spawn"
+        assert_eq!(native.stdin, ProcessStdio::Pipe(ProcessPipeId::new(0)));
+        assert_eq!(
+            portable_redirection_invocation.closed_pipe_ends,
+            [ClosedProcessPipeEnd::Writer(ProcessPipeId::new(0))]
         );
+        assert!(portable_redirection_invocation.parent_pipe_ends.is_empty());
+        assert!(portable_redirection_invocation.parent_captures.is_empty());
         assert!(!preflight_directory.0.join("portable.log").exists());
 
         let stateful_redirection_runner =
@@ -4285,6 +4825,42 @@ fn main() {
         let expected: Vec<u8> = (0..PAYLOAD_BYTES)
             .map(|index| u8::try_from(index % 251).expect("bounded byte"))
             .collect();
+        fs::write(directory.0.join("portable-input.bin"), &expected)
+            .expect("write portable redirection payload");
+        let redirected_input_source =
+            format!("cat - <portable-input.bin | {executable} copy redirected-input");
+        let redirected_input = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            execute_source(&redirected_input_source, &mut state),
+        )
+        .await
+        .expect("portable file reader streams with backpressure");
+        assert_eq!(redirected_input.status().code(), 0);
+        assert!(redirected_input.diagnostics().is_empty());
+        assert_eq!(redirected_input.stderr(), b"redirected-input-stderr\n");
+        assert_eq!(redirected_input.stdout().len(), expected.len());
+        assert!(
+            redirected_input.stdout() == expected,
+            "portable file input changed the payload"
+        );
+
+        let redirected_output_source =
+            format!("{executable} produce {PAYLOAD_BYTES} | cat - >portable-output.bin");
+        let redirected_output = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            execute_source(&redirected_output_source, &mut state),
+        )
+        .await
+        .expect("portable file writer streams with backpressure");
+        assert_eq!(redirected_output.status().code(), 0);
+        assert!(redirected_output.stdout().is_empty());
+        assert_eq!(redirected_output.stderr(), b"producer-stderr\n");
+        assert!(redirected_output.diagnostics().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("portable-output.bin")).expect("portable redirected output"),
+            expected
+        );
+
         let source = format!(
             "{executable} produce {PAYLOAD_BYTES} | {executable} copy middle | {executable} copy final"
         );

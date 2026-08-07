@@ -85,25 +85,30 @@ unsuccessful native, portable, or stateful stage and `set +o pipefail` restores
 the default. Stateful stages run concurrently on independent state clones,
 close non-consumed input and empty output ends, cannot mutate the parent shell,
 and let pipeline `exit` contribute a status without stopping the parent source.
-Native commands also accept source-spanned `<`, `>`, `>>`, `2>`,
+Native and portable commands also accept source-spanned `<`, `>`, `>>`, `2>`,
 `2>>`, `2>&1`, and `1>&2`.
 Targets expand to exactly one field, relative paths resolve from persistent cwd,
-descriptor assignments apply left to right, files attach directly to child
-handles, and shared targets retain OS write ordering. Invalid plans fail before
-side effects; source-ordered valid file opens still create or truncate
-superseded targets. A second graph entry accepts explicit parent-closed reader
+descriptor assignments apply left to right, and files attach directly to child
+handles or explicitly retained asynchronous parent-task handles. One complete
+graph file order interleaves native and parent-owned resources by shell source
+order; invalid plans fail before side effects, while valid superseded targets
+are still created or truncated. A second graph entry accepts explicit parent-closed reader
 and writer ends while the original entry remains strict about unmatched pipes.
 Ordered Shell lowering uses that contract when any native stage replaces an
 internal stdin or stdout; downstream readers observe EOF, upstream writers
 observe native broken-pipe behavior, and descriptor copies that still name the
 pipe remain connected. A third graph entry classifies each end as child-owned,
 closed, or parent-owned and returns only explicitly declared readers and
-writers. Parent-facing, child-to-child, native, mixed, portable-only,
+writers. A fourth entry also returns source-ordered parent files for portable
+simple commands and stages. Portable stdin and stdout may replace a pipeline
+endpoint without a relay buffer; `cat -` and `grep PATTERN -` consume redirected
+input directly. Parent-facing, child-to-child, native, mixed, portable-only,
 stateful, closed-reader, and ordered-redirection regressions lock backpressure,
-exact bytes, EOF, handle closure, cloned-state isolation, and descriptor sharing.
-Unified job supervision, visible terminal streaming, WSL pipeline adapters,
-non-native redirection adapters, broader expansion, foreground interactive
-programs and jobs, mutations, and WSL execution remain staged work.
+exact bytes, EOF, handle closure, cloned-state isolation, descriptor sharing,
+and global file-open order. Unified job supervision, visible terminal streaming,
+WSL pipeline adapters, stateful/WSL redirection adapters, broader expansion,
+foreground interactive programs and jobs, mutations, and WSL execution remain
+staged work.
 
 ## Rejected alternatives
 

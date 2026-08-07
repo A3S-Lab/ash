@@ -43,14 +43,21 @@ final portable stage is captured concurrently. The eighth checkpoint runs
 `cd`, `export`, `unset`, `set`, and `exit` against independent state clones on
 the same retained ends. These stages close incoming readers, emit EOF
 downstream, cannot mutate the parent shell, and contribute ordinary ordered
-statuses without allowing pipeline `exit` to stop the parent source.
+statuses without allowing pipeline `exit` to stop the parent source. The ninth
+checkpoint adds parent-owned graph files and one explicit global file-open order
+across native and in-process stages. Portable simple commands and pipeline
+stages now accept the same ordered redirection syntax: `cat -` and
+`grep PATTERN -` can read a redirected file, portable stdout can stream directly
+to write/append files or the original stderr capture, and replaced internal
+endpoints retain the existing EOF, broken-pipe, and `pipefail` behavior.
 Eight-megabyte parent-facing,
 child-to-child, native, mixed, and closed-reader regressions lock exact bytes,
-EOF, backpressure, and completion; ordered-output regressions lock file,
-capture, and surviving-pipe sharing. Unified job supervision, user-visible
-terminal streaming, WSL pipeline adapters, non-native
-redirection adapters, foreground interactive programs and job control, broader
-expansion and mutations, and WSL launch remain open.
+EOF, backpressure, and completion; ordered-output regressions lock child and
+parent file resources, capture, surviving-pipe sharing, and global file-open
+side effects. Unified job supervision, user-visible terminal streaming, WSL
+pipeline adapters, stateful/WSL redirection adapters, foreground interactive
+programs and job control, broader expansion and mutations, and WSL launch remain
+open.
 Release-key and platform-signing credential provisioning, the first published release, enough accumulated fuzz duration to claim a soak gate, captured real multi-model Coding Agent runs, medium/large task families, and published hardware-labelled runtime measurements remain open.
 
 The runtime evidence covers fifteen end-to-end paths: recursive listing, literal and regular-expression search, snapshot, disk spill/fetch, paired disk-spill I/O with the compute plane idle and fully occupied, fresh `ash run` startup, empty child spawn, steady, fragmented, and paced-bursty simultaneous disk-backed stdout/stderr capture, repeated cancellation of a parent plus pipe-inheriting descendant, warm framed RPC dispatch, and retained ASON table projection. The mixed-load pair alternates sample order, consumes identical bytes, times only `capture` through asynchronous flush, and checks that every Rayon worker remains inside a bounded integer workload at I/O completion. It releases that workload before BLAKE3 retention and exact tail validation, so compute queueing cannot contaminate the I/O interval. Capture metadata records exact producer chunk cycles, flush boundaries, pacing, and output seeds; the compiled helper must independently describe the same profiles before timing starts. List and search split the deterministic fixture into disjoint roots so traversal and scanning can use the bounded worker pool. Structured projection reads and parses the retained value, applies ordered column reduction across the configured Rayon pool, and emits the same canonical row order at every worker count. Three compute-plane reducer scenarios separately process 131,072 deterministic lines as 512-line runs, eight-line blocks repeated 64 times, and sparse failure diagnostics with fixed context windows; all require the same compact evidence at every worker count. Four isolated single-caller scenarios additionally measure 4,096 hot lookups in a 1,024-entry path dictionary and DAG validation/scheduling at 64, 256, and 1,024 nodes. They report no scaling curve because they bypass the configurable engine worker pools. Cold startup launches and reaps a real shell process for every observation. Warm dispatch uses the same embeddable gateway as `ash rpc`, excludes its handshake, and keeps one session alive per worker configuration. Cancellation is recorded only after the owned native process group or Job Object has emptied and the final response is canonicalized; it is not merely a signal-delivery timer.
@@ -413,7 +420,10 @@ Every platform process specification selects `Null`, `Piped`, `Inherit`,
 one named parent-facing OS pipe through `ProcessHandle::take_capture`; attaching
 both output descriptors to the same ID preserves their real write order.
 `File(id)` references a source-ordered native file-open plan, and cloned handles
-for the same ID share one open-file description. The ASH/1 adapter preserves its
+for the same ID share one open-file description. `ParentProcessFile(id)` names a
+graph-local file returned as an asynchronous parent-task handle, while
+`ProcessGraphFile` provides one validated order across specification-local child
+files and graph-local parent files. The ASH/1 adapter preserves its
 contract by selecting piped stdin only when bounded input exists and always
 piping both output streams. Unredirected human-shell output uses captures so
 descriptor duplication can retain its original destination. `Inherit` remains
@@ -436,7 +446,10 @@ declared OS pipe, starts real consumers before producers, passes child ends
 directly, and drops every unretained parent copy. This produces EOF for a real
 reader with a closed writer and broken-pipe behavior for a real writer with a
 closed reader. A writer may attach both stdout and stderr to one pipe for
-descriptor-duplication lowering.
+descriptor-duplication lowering. `spawn_native_graph_with_parent_io` additionally
+validates parent file identifiers and requires every native and parent file once
+in the global order before opening any resource. Only declared parent files are
+returned through a one-time take method.
 
 The shell accepts same-line `|` syntax for two to 32 native, implemented
 portable, or implemented stateful-builtin stages after complete expansion,
@@ -444,9 +457,9 @@ resolution, argument, regular-expression, and redirection preflight.
 Native-to-native edges remain direct OS pipes. Boundaries involving portable
 `pwd`, `echo`, `ls`, `cat`, or `grep` retain the required async parent ends and
 poll their bounded task futures concurrently with native capture and waits. Only
-`cat -` and `grep PATTERN -` consume an incoming pipe; a non-consuming portable
-stage closes that reader so the upstream producer observes native broken-pipe
-behavior. A
+`cat -` and `grep PATTERN -` consume an incoming pipe or redirected parent file;
+a non-consuming portable stage closes that reader so the upstream producer
+observes native broken-pipe behavior. A
 stateful `cd`, `export`, `unset`, `set`, or `exit` stage also closes its reader,
 runs on an independent state clone, and closes its empty output when complete;
 the parent shell is unchanged and downstream readers receive EOF. Pipeline
@@ -457,23 +470,24 @@ Status defaults to the final stage; persistent `set -o pipefail` instead selects
 the rightmost unsuccessful native, portable, or stateful exit, while
 `set +o pipefail` restores the default.
 
-Native shell commands lower `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`
+Native and portable shell commands lower `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`
 from left to right after assigning default capture or pipeline endpoints. A file
 target must expand to exactly one native field and is resolved against the
 persistent shell cwd. The platform validates the complete graph and every
-redirection resource plan before file-open side effects, then opens all file
-entries in plan order before any child starts. This intentionally creates or
-truncates superseded targets while final descriptors reference only their last
-assignment. File output bypasses shell memory; shared file or capture IDs retain
-kernel ordering. Any native pipeline stage may replace stdin, stdout, or stderr.
+redirection resource plan before file-open side effects, then uses one graph
+order to interleave native child and portable parent-task files before any child
+starts. This intentionally creates or truncates superseded targets while final
+descriptors reference only their last assignment. File output bypasses shell
+memory; shared file or capture IDs retain kernel ordering. Any native or
+portable pipeline stage may replace stdin, stdout, or stderr.
 After ordered lowering, ash marks an internal writer closed only when neither
 final stdout nor stderr still references that pipe, so
 `producer 2>&1 >out | consumer` correctly keeps stderr connected. Replacing an
 internal producer endpoint delivers EOF downstream; replacing a consumer stdin
-exposes broken-pipe behavior upstream. Applying a redirection to a builtin,
-portable command, or WSL stage still fails before file opens or spawn. Job-wide
-supervision, WSL pipeline adapters, and non-native
-redirection adapters remain later layers.
+exposes broken-pipe behavior upstream. Applying a redirection to a stateful
+builtin or WSL stage still fails before file opens or spawn. Job-wide
+supervision, WSL pipeline adapters, and stateful/WSL redirection adapters remain
+later layers.
 
 Inputs include:
 

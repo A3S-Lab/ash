@@ -30,7 +30,7 @@ ash 的主要 CLI 是机器接口：成功输出和错误诊断都使用稳定�
 当前 H1 检查点会在 stdin 为终端时打开跨平台行编辑 REPL，并针对同一份持久原生状态
 顺序执行当前命令与管道语法。已实现 `pwd`、`echo`（含 `-n`）、`cd`、展开后的
 `export`/`unset`、`set` pipefail 控制、`exit`、可移植 `ls`、原始字节 `cat`、文本
-`grep`、命名参数与上一状态展开、宿主原生命令，以及带有序原生重定向的同一行
+`grep`、命名参数与上一状态展开、宿主原生命令，以及带有序原生和可移植重定向的同一行
 原生/可移植管道；源码也可以来自 `-c SOURCE`、原生
 脚本文件路径或 stdin：
 
@@ -40,6 +40,7 @@ ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
 ash shell -c 'export NAME=world; echo "hello $NAME"; echo $?'
 ash shell -c "native:rustc --version"
 ash shell -c 'native:rustc --version >version.txt 2>&1'
+ash shell -c 'cat - <input.bin >copy.bin'
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ash shell --profile ./profile.ash
@@ -51,13 +52,15 @@ ash shell --profile ./profile.ash
 接受一个路径（默认 `.`），按稳定原生顺序每行输出一个名称，并支持 `-a`/`--all`、
 `-d`/`--directory`、`-1`、短选项组合与 `--`。可移植 `cat` 要求一个路径，原样输出
 字节且不添加换行，接受 `--`，并共享 128 MiB 读取/捕获上限。在多阶段管道中，
-`cat -` 会消费上游字节流；独立命令的 stdin `-`、选项与多个文件仍会明确失败。
+`cat -` 会消费上游字节流；独立命令可通过显式 `<` 文件提供 `-`。未重定向的独立
+stdin `-`、选项与多个文件仍会明确失败。
 可移植 `grep` 要求一个有效 UTF-8 的普通文件，
 默认使用 Rust 正则表达式；支持 `-E`/`--extended-regexp`、
 `-F`/`--fixed-strings`、`-i`/`--ignore-case`、`-n`/`--line-number`、短选项组合与
 `--`。搜索上限为 64 MiB；无匹配时不输出诊断并返回状态 1。在多阶段管道中，
 `grep PATTERN -` 会用同一语义消费上游 UTF-8 流，输出上限为
-128 MiB。目录、多个文件、独立命令的 stdin `-` 与不支持的选项都会明确失败。
+128 MiB；独立命令也可通过 `<` 提供 `-`。目录、多个文件、未重定向的独立 stdin
+`-` 与不支持的选项都会明确失败。
 
 启动 Profile 是显式选择的：`--profile FILE` 指定一个文件，非空 `ASH_PROFILE` 提供
 配置默认值，`--no-profile` 则禁用两者。相对路径以 Shell 初始 cwd 为基准。Profile
@@ -98,12 +101,14 @@ Ctrl+C 会把 `$?` 设为 130 并继续，EOF 则返回上一状态。`exit [STA
 控制，而不是当前行编辑 REPL。stdout 与 stderr 共享剩余的 128 MiB 捕获额度，普通
 的非零原生退出状态会直接成为命令状态，不额外生成诊断。
 
-原生命令支持 `<`、`>`、`>>`、`2>`、`2>>`、`2>&1` 与 `1>&2`，并从左到右应用：
+原生与可移植命令支持 `<`、`>`、`>>`、`2>`、`2>>`、`2>&1` 与 `1>&2`，并从左到右应用：
 `command >out 2>&1` 会把两路流合入 `out`，而 `command 2>&1 >out` 会让 stderr 保留在
 原 stdout 捕获上。每个文件目标必须展开为恰好一个原生字段；相对路径以持久 cwd 为基准。
-文件直接连接子进程 OS 句柄，因此重定向输出不占同步捕获额度；被后续赋值覆盖的目标
-仍按源码顺序打开。目标缺失、歧义或无法打开时返回状态 1 和重定向诊断。状态命令、
-可移植命令与 WSL 命令会在执行或产生文件系统副作用前拒绝重定向。
+文件直接连接子进程或父任务 OS 句柄，因此重定向输出不占同步捕获额度；一份经过
+校验的图级顺序会按阶段与重定向源码顺序交错打开原生和可移植文件，被后续赋值覆盖的
+目标仍会打开。目标缺失、歧义或无法打开时返回状态 1 和重定向诊断。带源码位置的
+Shell 诊断仍写入 Shell stderr，而不是命令原始 stderr。状态命令与 WSL 命令会在执行
+或产生文件系统副作用前拒绝重定向。
 
 同一行的 `|` 可组成两个到 32 个阶段的管道。每个阶段可以是宿主原生命令，也可以是
 可移植 `pwd`、`echo`、`ls`、`cat` 或 `grep`，也可以是已实现的状态 `cd`、`export`、
@@ -119,15 +124,15 @@ Ctrl+C 会把 `$?` 设为 130 并继续，EOF 则返回上一状态。`exit [STA
 状态阶段不消费 stdin，在独立的 `ShellState` 克隆上执行，并在完成时关闭空 stdout。
 父 Shell 的 cwd、变量、环境、选项与退出请求都不会改变；下游 reader 收到 EOF，管道
 中的 `exit` 也只贡献普通阶段状态。
-任意原生阶段都可以重定向 stdin、stdout 或 stderr，描述符复制仍按源码顺序应用。若
+任意原生或可移植阶段都可以重定向 stdin、stdout 或 stderr，描述符复制仍按源码顺序应用。若
 producer 不再引用内部管道，ash 会关闭父进程 writer，使下游 reader 收到 EOF；若
 consumer 用文件替换管道 stdin，ash 会关闭父进程 reader，使上游 writer 遇到原生
 broken-pipe 行为，随后仍由最终阶段或 `pipefail` 策略决定可见状态。即使原描述符随后
-被重定向，只要复制出的描述符仍引用管道，该连接就会保留。非原生阶段重定向仍不受
-支持，并会在 runner 或文件副作用之前失败。
+被重定向，只要复制出的描述符仍引用管道，该连接就会保留。状态与 WSL 阶段重定向仍
+不受支持，并会在 runner 或文件副作用之前失败。
 
 更广的展开（包括命令替换与 glob）、修改命令、终端流式输出、统一作业监督、WSL
-管道适配器、非原生重定向适配器、前台交互程序与作业控制，以及 WSL
+管道适配器、状态/WSL 重定向适配器、前台交互程序与作业控制，以及 WSL
 执行尚未实现。
 常规二进制启用 `human-shell` feature；
 `cargo build -p a3s-ash --no-default-features` 保留最小机器专用构建。
