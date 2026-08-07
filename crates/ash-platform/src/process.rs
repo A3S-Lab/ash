@@ -58,6 +58,17 @@ pub enum ParentProcessPipeEnd {
     Writer(ProcessPipeId),
 }
 
+/// Stable graph-local identifier for one file owned by an in-process parent task.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ParentProcessFileId(u32);
+
+impl ParentProcessFileId {
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+}
+
 /// Stable specification-local identifier for one opened native process file.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ProcessFileId(u32);
@@ -80,7 +91,7 @@ impl ProcessCaptureId {
     }
 }
 
-/// File-open mode for one native process redirection resource.
+/// File-open mode for one native child or in-process parent redirection resource.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeProcessFileMode {
     Read,
@@ -99,12 +110,36 @@ pub struct NativeProcessFile {
     pub mode: NativeProcessFileMode,
 }
 
+/// One source-ordered file resource retained for an in-process parent task.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParentProcessFile {
+    pub id: ParentProcessFileId,
+    pub path: PathBuf,
+    pub mode: NativeProcessFileMode,
+}
+
+/// One entry in the global file-open order for a native process graph.
+///
+/// Native file identifiers remain local to their process specification, while
+/// parent file identifiers are graph-local. A complete order names every file
+/// exactly once so mixed child and in-process stages preserve shell source order.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ProcessGraphFile {
+    Process {
+        process_index: usize,
+        file: ProcessFileId,
+    },
+    Parent(ParentProcessFileId),
+}
+
 /// Explicit standard-I/O mode for one child-process stream.
 ///
 /// A [`ProcessStdio::Piped`] endpoint exposes its corresponding handle through
 /// [`ProcessHandle`]. A [`ProcessStdio::Pipe`] endpoint is internal to a graph
 /// launched by [`spawn_native_graph`],
-/// [`spawn_native_graph_with_closed_pipe_ends`], or [`Workspace::spawn_graph`].
+/// [`spawn_native_graph_with_closed_pipe_ends`],
+/// [`spawn_native_graph_with_parent_pipe_ends`],
+/// [`spawn_native_graph_with_parent_io`], or [`Workspace::spawn_graph`].
 /// [`ProcessStdio::File`] references the source-ordered file plan on
 /// [`NativeProcessSpec`], while [`ProcessStdio::Capture`] exposes one named pipe
 /// through [`ProcessHandle::take_capture`]. Reusing a file or capture identifier
@@ -187,11 +222,12 @@ pub struct ProcessHandle {
     captures: BTreeMap<ProcessCaptureId, tokio::fs::File>,
 }
 
-/// Running native process graph plus explicitly retained parent pipe ends.
+/// Running native process graph plus explicitly retained parent pipe ends and files.
 pub struct NativeProcessGraph {
     processes: Vec<ProcessHandle>,
     pipe_readers: BTreeMap<ProcessPipeId, tokio::fs::File>,
     pipe_writers: BTreeMap<ProcessPipeId, tokio::fs::File>,
+    parent_files: BTreeMap<ParentProcessFileId, tokio::fs::File>,
 }
 
 impl NativeProcessGraph {
@@ -203,6 +239,11 @@ impl NativeProcessGraph {
     /// Takes one declared parent writer by its graph-local pipe identifier.
     pub fn take_pipe_writer(&mut self, id: ProcessPipeId) -> Option<tokio::fs::File> {
         self.pipe_writers.remove(&id)
+    }
+
+    /// Takes one declared parent-owned file by its graph-local identifier.
+    pub fn take_parent_file(&mut self, id: ParentProcessFileId) -> Option<tokio::fs::File> {
+        self.parent_files.remove(&id)
     }
 
     /// Consumes the graph wrapper and returns process handles in specification order.
@@ -311,13 +352,63 @@ pub fn spawn_native_graph_with_parent_pipe_ends(
     closed_ends: &[ClosedProcessPipeEnd],
     parent_ends: &[ParentProcessPipeEnd],
 ) -> Result<NativeProcessGraph, PlatformError> {
+    let file_order = default_process_file_order(specs);
+    spawn_native_graph_with_parent_io(specs, closed_ends, parent_ends, &[], &file_order)
+}
+
+/// Launches a native graph with parent-owned pipe endpoints and files.
+///
+/// `file_order` must name every native and parent file exactly once. The graph,
+/// every redirection plan, all parent file identifiers, and the complete order
+/// are validated before any file is opened. Files are then opened in that exact
+/// order before pipes are created or children are spawned. Only parent files and
+/// pipe ends explicitly declared here are exposed by [`NativeProcessGraph`].
+pub fn spawn_native_graph_with_parent_io(
+    specs: &[NativeProcessSpec],
+    closed_ends: &[ClosedProcessPipeEnd],
+    parent_ends: &[ParentProcessPipeEnd],
+    parent_files: &[ParentProcessFile],
+    file_order: &[ProcessGraphFile],
+) -> Result<NativeProcessGraph, PlatformError> {
     let graph = validate_process_graph_with_parent_pipe_ends(specs, closed_ends, parent_ends)?;
     for spec in specs {
         validate_process_redirections(spec)?;
     }
+    validate_parent_process_files(parent_files)?;
+    validate_process_file_order(specs, parent_files, file_order)?;
+
+    let mut process_files: Vec<BTreeMap<ProcessFileId, File>> =
+        std::iter::repeat_with(BTreeMap::new)
+            .take(specs.len())
+            .collect();
+    let mut opened_parent_files = BTreeMap::new();
+    for entry in file_order {
+        match *entry {
+            ProcessGraphFile::Process {
+                process_index,
+                file,
+            } => {
+                let endpoint = specs[process_index]
+                    .files
+                    .iter()
+                    .find(|endpoint| endpoint.id == file)
+                    .ok_or(PlatformError::InvalidProcessRedirection)?;
+                process_files[process_index]
+                    .insert(file, open_process_file(&endpoint.path, endpoint.mode)?);
+            }
+            ProcessGraphFile::Parent(id) => {
+                let endpoint = parent_files
+                    .iter()
+                    .find(|endpoint| endpoint.id == id)
+                    .ok_or(PlatformError::InvalidProcessRedirection)?;
+                opened_parent_files.insert(id, open_process_file(&endpoint.path, endpoint.mode)?);
+            }
+        }
+    }
     let mut prepared = specs
         .iter()
-        .map(PreparedProcessStdio::open)
+        .zip(process_files)
+        .map(|(spec, files)| PreparedProcessStdio::with_files(spec, files))
         .collect::<Result<Vec<_>, _>>()?;
     let mut pipes = BTreeMap::new();
     for id in &graph.pipe_ids {
@@ -360,7 +451,59 @@ pub fn spawn_native_graph_with_parent_pipe_ends(
         processes,
         pipe_readers,
         pipe_writers,
+        parent_files: opened_parent_files
+            .into_iter()
+            .map(|(id, file)| (id, tokio::fs::File::from_std(file)))
+            .collect(),
     })
+}
+
+fn default_process_file_order(specs: &[NativeProcessSpec]) -> Vec<ProcessGraphFile> {
+    specs
+        .iter()
+        .enumerate()
+        .flat_map(|(process_index, spec)| {
+            spec.files
+                .iter()
+                .map(move |endpoint| ProcessGraphFile::Process {
+                    process_index,
+                    file: endpoint.id,
+                })
+        })
+        .collect()
+}
+
+fn validate_parent_process_files(parent_files: &[ParentProcessFile]) -> Result<(), PlatformError> {
+    let mut ids = BTreeMap::new();
+    for endpoint in parent_files {
+        if ids.insert(endpoint.id, endpoint.mode).is_some() {
+            return Err(PlatformError::InvalidProcessRedirection);
+        }
+    }
+    Ok(())
+}
+
+fn validate_process_file_order(
+    specs: &[NativeProcessSpec],
+    parent_files: &[ParentProcessFile],
+    file_order: &[ProcessGraphFile],
+) -> Result<(), PlatformError> {
+    let expected = default_process_file_order(specs)
+        .into_iter()
+        .chain(
+            parent_files
+                .iter()
+                .map(|endpoint| ProcessGraphFile::Parent(endpoint.id)),
+        )
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual = file_order
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    if expected.len() != file_order.len() || actual != expected {
+        return Err(PlatformError::InvalidProcessRedirection);
+    }
+    Ok(())
 }
 
 fn spawn_native_with_stdio(
@@ -423,27 +566,19 @@ impl PreparedProcessStdio {
     fn open(spec: &NativeProcessSpec) -> Result<Self, PlatformError> {
         let mut files = BTreeMap::new();
         for endpoint in &spec.files {
-            let mut options = OpenOptions::new();
-            match endpoint.mode {
-                NativeProcessFileMode::Read => {
-                    options.read(true);
-                }
-                NativeProcessFileMode::Write => {
-                    options.write(true).create(true).truncate(true);
-                }
-                NativeProcessFileMode::Append => {
-                    options.write(true).create(true).append(true);
-                }
-            }
-            let file = options.open(&endpoint.path).map_err(|source| {
-                PlatformError::ProcessRedirection {
-                    path: endpoint.path.clone(),
-                    source,
-                }
-            })?;
-            files.insert(endpoint.id, file);
+            files.insert(
+                endpoint.id,
+                open_process_file(&endpoint.path, endpoint.mode)?,
+            );
         }
 
+        Self::with_files(spec, files)
+    }
+
+    fn with_files(
+        spec: &NativeProcessSpec,
+        files: BTreeMap<ProcessFileId, File>,
+    ) -> Result<Self, PlatformError> {
         let mut capture_readers = BTreeMap::new();
         let mut capture_writers = BTreeMap::new();
         for endpoint in [spec.stdout, spec.stderr] {
@@ -521,6 +656,27 @@ impl PreparedProcessStdio {
             .map(|(id, reader)| (id, async_pipe_reader(reader)))
             .collect()
     }
+}
+
+fn open_process_file(path: &PathBuf, mode: NativeProcessFileMode) -> Result<File, PlatformError> {
+    let mut options = OpenOptions::new();
+    match mode {
+        NativeProcessFileMode::Read => {
+            options.read(true);
+        }
+        NativeProcessFileMode::Write => {
+            options.write(true).create(true).truncate(true);
+        }
+        NativeProcessFileMode::Append => {
+            options.write(true).create(true).append(true);
+        }
+    }
+    options
+        .open(path)
+        .map_err(|source| PlatformError::ProcessRedirection {
+            path: path.clone(),
+            source,
+        })
 }
 
 fn validate_process_redirections(spec: &NativeProcessSpec) -> Result<(), PlatformError> {
@@ -844,8 +1000,9 @@ mod tests {
 
     use super::{
         ClosedProcessPipeEnd, EnvironmentChange, NativeProcessSpec, ParentProcessPipeEnd,
-        ProcessPipeId, ProcessSpec, ProcessStdio, spawn_native, spawn_native_graph,
-        spawn_native_graph_with_closed_pipe_ends, spawn_native_graph_with_parent_pipe_ends,
+        ProcessGraphFile, ProcessPipeId, ProcessSpec, ProcessStdio, spawn_native,
+        spawn_native_graph, spawn_native_graph_with_closed_pipe_ends,
+        spawn_native_graph_with_parent_io, spawn_native_graph_with_parent_pipe_ends,
         validate_process_graph, validate_process_graph_with_closed_pipe_ends,
         validate_process_graph_with_parent_pipe_ends,
     };
@@ -1464,6 +1621,181 @@ fn main() {
         ])
         .expect("one process may share one writer across stdout and stderr");
         assert_eq!(graph.spawn_order, vec![0, 1]);
+    }
+
+    #[test]
+    fn parent_file_plans_validate_before_source_ordered_open_side_effects() {
+        let directory = TestDirectory::new();
+        let parent_id = super::ParentProcessFileId::new(1);
+        let native_id = super::ProcessFileId::new(2);
+        let missing = directory.0.join("missing-input");
+        let native = NativeProcessSpec {
+            executable: OsString::from("unreachable-process"),
+            argv: Vec::new(),
+            cwd: directory.0.clone(),
+            environment: Vec::new(),
+            clear_environment: false,
+            files: vec![super::NativeProcessFile {
+                id: native_id,
+                path: missing,
+                mode: super::NativeProcessFileMode::Read,
+            }],
+            stdin: ProcessStdio::File(native_id),
+            stdout: ProcessStdio::Null,
+            stderr: ProcessStdio::Null,
+        };
+
+        let invalid_path = directory.0.join("invalid-order.log");
+        let invalid_parent = super::ParentProcessFile {
+            id: parent_id,
+            path: invalid_path.clone(),
+            mode: super::NativeProcessFileMode::Write,
+        };
+        assert!(matches!(
+            spawn_native_graph_with_parent_io(
+                &[],
+                &[],
+                &[],
+                std::slice::from_ref(&invalid_parent),
+                &[],
+            ),
+            Err(PlatformError::InvalidProcessRedirection)
+        ));
+        assert!(
+            !invalid_path.exists(),
+            "an incomplete global order must fail before opening a parent file"
+        );
+
+        let duplicate_path = directory.0.join("duplicate-parent.log");
+        let duplicate_parent = super::ParentProcessFile {
+            id: parent_id,
+            path: duplicate_path.clone(),
+            mode: super::NativeProcessFileMode::Write,
+        };
+        assert!(matches!(
+            spawn_native_graph_with_parent_io(
+                &[],
+                &[],
+                &[],
+                &[invalid_parent, duplicate_parent],
+                &[ProcessGraphFile::Parent(parent_id)],
+            ),
+            Err(PlatformError::InvalidProcessRedirection)
+        ));
+        assert!(
+            !duplicate_path.exists(),
+            "duplicate parent file identifiers must fail before open"
+        );
+
+        let before_path = directory.0.join("opened-before-failure.log");
+        let before_parent = super::ParentProcessFile {
+            id: parent_id,
+            path: before_path.clone(),
+            mode: super::NativeProcessFileMode::Write,
+        };
+        assert!(matches!(
+            spawn_native_graph_with_parent_io(
+                std::slice::from_ref(&native),
+                &[],
+                &[],
+                &[before_parent],
+                &[
+                    ProcessGraphFile::Parent(parent_id),
+                    ProcessGraphFile::Process {
+                        process_index: 0,
+                        file: native_id,
+                    },
+                ],
+            ),
+            Err(PlatformError::ProcessRedirection { .. })
+        ));
+        assert!(
+            before_path.exists(),
+            "a parent file ordered before a failing native file must be created"
+        );
+
+        let after_path = directory.0.join("not-opened-after-failure.log");
+        let after_parent = super::ParentProcessFile {
+            id: parent_id,
+            path: after_path.clone(),
+            mode: super::NativeProcessFileMode::Write,
+        };
+        assert!(matches!(
+            spawn_native_graph_with_parent_io(
+                &[native],
+                &[],
+                &[],
+                &[after_parent],
+                &[
+                    ProcessGraphFile::Process {
+                        process_index: 0,
+                        file: native_id,
+                    },
+                    ProcessGraphFile::Parent(parent_id),
+                ],
+            ),
+            Err(PlatformError::ProcessRedirection { .. })
+        ));
+        assert!(
+            !after_path.exists(),
+            "a parent file ordered after a failing native file must stay unopened"
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_owned_graph_files_expose_async_handles_once() {
+        let directory = TestDirectory::new();
+        let input_path = directory.0.join("input.bin");
+        let output_path = directory.0.join("output.bin");
+        fs::write(&input_path, b"parent-file-input").expect("write parent input");
+        let input_id = super::ParentProcessFileId::new(3);
+        let output_id = super::ParentProcessFileId::new(4);
+        let mut graph = spawn_native_graph_with_parent_io(
+            &[],
+            &[],
+            &[],
+            &[
+                super::ParentProcessFile {
+                    id: input_id,
+                    path: input_path,
+                    mode: super::NativeProcessFileMode::Read,
+                },
+                super::ParentProcessFile {
+                    id: output_id,
+                    path: output_path.clone(),
+                    mode: super::NativeProcessFileMode::Write,
+                },
+            ],
+            &[
+                ProcessGraphFile::Parent(input_id),
+                ProcessGraphFile::Parent(output_id),
+            ],
+        )
+        .expect("open parent-owned graph files");
+        let mut input = graph.take_parent_file(input_id).expect("parent input file");
+        let mut output = graph
+            .take_parent_file(output_id)
+            .expect("parent output file");
+        assert!(graph.take_parent_file(input_id).is_none());
+        assert!(graph.take_parent_file(output_id).is_none());
+        assert!(graph.into_processes().is_empty());
+
+        let mut bytes = Vec::new();
+        input
+            .read_to_end(&mut bytes)
+            .await
+            .expect("read parent input file");
+        output
+            .write_all(&bytes)
+            .await
+            .expect("write parent output file");
+        output.shutdown().await.expect("close parent output file");
+        drop(output);
+        assert_eq!(bytes, b"parent-file-input");
+        assert_eq!(
+            fs::read(output_path).expect("read parent output fixture"),
+            b"parent-file-input"
+        );
     }
 
     #[tokio::test]

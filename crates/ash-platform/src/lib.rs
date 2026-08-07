@@ -12,9 +12,10 @@ pub use identity::FileIdentity;
 pub use mutation::{MutationGuard, ReplaceOutcome};
 pub use process::{
     ClosedProcessPipeEnd, EnvironmentChange, NativeProcessFile, NativeProcessFileMode,
-    NativeProcessGraph, NativeProcessSpec, ParentProcessPipeEnd, ProcessCaptureId, ProcessExit,
-    ProcessFileId, ProcessHandle, ProcessPipeId, ProcessSpec, ProcessStdio, spawn_native,
-    spawn_native_graph, spawn_native_graph_with_closed_pipe_ends,
+    NativeProcessGraph, NativeProcessSpec, ParentProcessFile, ParentProcessFileId,
+    ParentProcessPipeEnd, ProcessCaptureId, ProcessExit, ProcessFileId, ProcessGraphFile,
+    ProcessHandle, ProcessPipeId, ProcessSpec, ProcessStdio, spawn_native, spawn_native_graph,
+    spawn_native_graph_with_closed_pipe_ends, spawn_native_graph_with_parent_io,
     spawn_native_graph_with_parent_pipe_ends,
 };
 pub use transaction::{

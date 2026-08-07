@@ -34,7 +34,7 @@ a terminal and executes the current command and pipeline syntax sequentially
 against one persistent native state. It implements `pwd`, `echo` (with `-n`),
 `cd`, expanded `export`/`unset`, `set` pipefail control, `exit`, portable `ls`,
 raw-byte `cat`, text `grep`, named and last-status parameter expansion, native host executables, and
-same-line native/portable pipelines with ordered native redirections. Source may also come from `-c SOURCE`, a native
+same-line native/portable pipelines with ordered native and portable redirections. Source may also come from `-c SOURCE`, a native
 script-file path, or stdin:
 
 ```sh
@@ -43,6 +43,7 @@ ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
 ash shell -c 'export NAME=world; echo "hello $NAME"; echo $?'
 ash shell -c "native:rustc --version"
 ash shell -c 'native:rustc --version >version.txt 2>&1'
+ash shell -c 'cat - <input.bin >copy.bin'
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ash shell --profile ./profile.ash
@@ -56,15 +57,17 @@ one stably ordered native name per line, and supports `-a`/`--all`,
 `-d`/`--directory`, `-1`, combined short options, and `--`. Portable `cat`
 requires one path, writes exact bytes without an added newline, accepts `--`,
 and shares the 128 MiB read/capture ceiling. In a multi-stage pipeline, `cat -`
-consumes the incoming byte stream; standalone stdin `-`, options, and multiple
-files remain errors. Portable `grep` requires one valid-UTF-8 regular file and
+consumes the incoming byte stream; in a simple command it consumes an explicit
+`<` file. An unredirected standalone `-`, options, and multiple files remain
+errors. Portable `grep` requires one valid-UTF-8 regular file and
 uses Rust regular expressions by default. It
 supports `-E`/`--extended-regexp`, `-F`/`--fixed-strings`,
 `-i`/`--ignore-case`, `-n`/`--line-number`, combined short options, and `--`.
 Searches are capped at 64 MiB; no matches return status 1 without a diagnostic.
 In a multi-stage pipeline, `grep PATTERN -` consumes incoming UTF-8 with the
-same semantics and a 128 MiB output ceiling. Directories, multiple files,
-standalone stdin `-`, and unsupported options fail explicitly.
+same semantics and a 128 MiB output ceiling; a simple command may provide `-`
+through `<`. Directories, multiple files, unredirected standalone stdin `-`, and
+unsupported options fail explicitly.
 
 Startup Profiles are opt-in. `--profile FILE` selects one explicitly, a
 non-empty `ASH_PROFILE` supplies the configured default, and `--no-profile`
@@ -116,15 +119,18 @@ part of H4 job control rather than this line-edited REPL. Stdout and stderr shar
 the remaining 128 MiB capture allowance, and a normal nonzero native exit
 becomes the command status without an added diagnostic.
 
-Native commands accept `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
+Native and portable commands accept `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
 Assignments apply from left to right: `command >out 2>&1` merges both streams
 into `out`, while `command 2>&1 >out` leaves stderr on the original stdout
 capture. Every file target must expand to exactly one native field; relative
-paths resolve against persistent cwd. Files connect directly to child OS handles, so redirected
-output does not consume the synchronous capture allowance; superseded targets
-are still opened in source order. Missing, ambiguous, or unopenable targets
-return status 1 with a redirection diagnostic. Stateful, portable, and WSL
-commands reject redirections before execution or filesystem side effects.
+paths resolve against persistent cwd. Files connect directly to child or
+parent-task OS handles, so redirected output does not consume the synchronous
+capture allowance. One validated graph order interleaves native and portable
+files by stage and redirection source order; superseded targets are still
+opened. Missing, ambiguous, or unopenable targets return status 1 with a
+redirection diagnostic. Source-spanned shell diagnostics remain shell stderr,
+not raw command stderr. Stateful and WSL commands reject redirections before
+execution or filesystem side effects.
 
 A same-line `|` forms a pipeline of two to 32 stages. Each may be a native host
 command, portable `pwd`, `echo`, `ls`, `cat`, or `grep`, or implemented stateful
@@ -144,19 +150,19 @@ Stateful stages never consume stdin, execute against independent `ShellState`
 clones, and close their empty stdout on completion. The parent cwd, variables,
 environment, options, and exit request remain unchanged; downstream readers see
 EOF, and pipeline `exit` contributes only an ordinary stage status.
-Any native stage may redirect stdin, stdout, or stderr, with descriptor
+Any native or portable stage may redirect stdin, stdout, or stderr, with descriptor
 duplication still applied in source order. If a producer no longer references
 an internal pipe, ash closes its parent writer and the downstream reader sees
 EOF. If a consumer replaces its pipe stdin, ash closes the parent reader and the
 upstream writer sees native broken-pipe behavior. Final-stage or `pipefail`
 selection then determines the visible status. A descriptor copy that still
 references the pipe remains connected even if the original descriptor is later
-redirected. Non-native stage redirections remain unsupported and fail before
-runner or file side effects.
+redirected. Stateful and WSL stage redirections remain unsupported and fail
+before runner or file side effects.
 
 Broader expansion (including command substitution and globbing), mutations,
-terminal streaming, unified job supervision, WSL pipeline adapters, non-native
-redirection adapters, foreground interactive programs and
+terminal streaming, unified job supervision, WSL pipeline adapters,
+stateful/WSL redirection adapters, foreground interactive programs and
 jobs, and WSL execution are not implemented yet. The regular binary enables the
 `human-shell`
 feature;

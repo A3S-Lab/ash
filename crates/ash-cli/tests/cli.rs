@@ -861,6 +861,44 @@ fn shell_command_launches_native_argv_with_persistent_cwd_and_environment() {
         fs::read(directory.0.join("both-consumer.log")).expect("both consumer"),
         b"redirected-cli-input"
     );
+
+    let portable_redirection_source = "echo first >portable.log; echo second >>portable.log; \
+         cat - <input.bin >portable-copy.bin; echo portable-stderr 1>&2; \
+         echo portable-file 2>portable-stderr.log 1>&2; \
+         echo closed >portable-side.log | cat - >portable-eof.log";
+    let portable_redirected = run_in(
+        &directory,
+        &["shell", "--no-profile", "-c", portable_redirection_source],
+        b"",
+    );
+    assert!(
+        portable_redirected.status.success(),
+        "stderr={:?}",
+        portable_redirected.stderr
+    );
+    assert!(portable_redirected.stdout.is_empty());
+    assert_eq!(portable_redirected.stderr, b"portable-stderr\n");
+    assert_eq!(
+        fs::read(directory.0.join("portable.log")).expect("portable output"),
+        b"first\nsecond\n"
+    );
+    assert_eq!(
+        fs::read(directory.0.join("portable-copy.bin")).expect("portable copy"),
+        b"redirected-cli-input"
+    );
+    assert_eq!(
+        fs::read(directory.0.join("portable-stderr.log")).expect("portable stderr file"),
+        b"portable-file\n"
+    );
+    assert_eq!(
+        fs::read(directory.0.join("portable-side.log")).expect("portable side output"),
+        b"closed\n"
+    );
+    assert!(
+        fs::read(directory.0.join("portable-eof.log"))
+            .expect("portable EOF output")
+            .is_empty()
+    );
 }
 
 #[cfg(feature = "human-shell")]
