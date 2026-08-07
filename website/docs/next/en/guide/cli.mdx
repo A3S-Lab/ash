@@ -10,41 +10,45 @@ diagnostics use stable ASON, with no human help page, color, or progress bar.
 The separate, feature-gated `ash shell` route is explicitly human-facing and
 uses conventional bytes, diagnostics, and exit statuses instead of ASON.
 
-| Command                                        | Input                                 | Output                                                         |
-| ---------------------------------------------- | ------------------------------------- | -------------------------------------------------------------- |
-| `ash --version`                                | None                                  | Stable version string                                          |
-| `ash --build-info`                             | None                                  | Version, target, protocol, ASON, commit, and trust fingerprint |
-| `ash ason`                                     | Bare ASON on stdin                    | Unique canonical ASON                                          |
-| `ash run`                                      | One typed request on stdin            | One final response                                             |
-| `ash rpc`                                      | Length-framed stdin/stdout            | Handshake and ordered response frames                          |
-| `ash shell [--no-profile] [-c SOURCE \| FILE]` | Inline, native file, or bounded stdin | Human command output and source-spanned diagnostics            |
-| `ash self status [--prefix PATH]`              | Installation prefix                   | Current/previous version and install state                     |
-| `ash self check --candidate FILE`              | Candidate binary                      | Health, version, and target                                    |
-| `ash self update [--prefix PATH] [--from DIR]` | Signed metadata or offline directory  | Activation result                                              |
-| `ash self rollback [--prefix PATH]`            | Installation state                    | Rollback or scheduled result                                   |
-| `ash self recover [--prefix PATH]`             | Installation journal                  | Recovery result                                                |
+| Command                                                          | Input                                           | Output                                                         |
+| ---------------------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------- |
+| `ash --version`                                                  | None                                            | Stable version string                                          |
+| `ash --build-info`                                               | None                                            | Version, target, protocol, ASON, commit, and trust fingerprint |
+| `ash ason`                                                       | Bare ASON on stdin                              | Unique canonical ASON                                          |
+| `ash run`                                                        | One typed request on stdin                      | One final response                                             |
+| `ash rpc`                                                        | Length-framed stdin/stdout                      | Handshake and ordered response frames                          |
+| `ash shell [--no-profile \| --profile FILE] [-c SOURCE \| FILE]` | Terminal, inline, native file, or bounded stdin | Human command output and source-spanned diagnostics            |
+| `ash self status [--prefix PATH]`                                | Installation prefix                             | Current/previous version and install state                     |
+| `ash self check --candidate FILE`                                | Candidate binary                                | Health, version, and target                                    |
+| `ash self update [--prefix PATH] [--from DIR]`                   | Signed metadata or offline directory            | Activation result                                              |
+| `ash self rollback [--prefix PATH]`                              | Installation state                              | Rollback or scheduled result                                   |
+| `ash self recover [--prefix PATH]`                               | Installation journal                            | Recovery result                                                |
 
 `ash self replace` is an internal Windows helper used by activation, not a normal
 Harness interface.
 
 ## Human shell checkpoint
 
-The current H1 checkpoint executes the H0 simple-command syntax sequentially
-against one persistent native state. It implements `pwd`, `echo` (with `-n`),
-`cd`, expanded `export`/`unset`, portable `ls`, raw-byte `cat`, text `grep`,
-named and last-status parameter expansion, and native host executables. Source
-may come from `-c SOURCE`, a native script-file path, or stdin:
+The current H1 checkpoint opens a cross-platform line-edited REPL when stdin is
+a terminal and executes the H0 simple-command syntax sequentially against one
+persistent native state. It implements `pwd`, `echo` (with `-n`), `cd`, expanded
+`export`/`unset`, `exit`, portable `ls`, raw-byte `cat`, text `grep`, named and
+last-status parameter expansion, and native host executables. Source may also
+come from `-c SOURCE`, a native script-file path, or stdin:
 
 ```sh
+ash shell
 ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
 ash shell -c 'export NAME=world; echo "hello $NAME"; echo $?'
 ash shell -c "native:rustc --version"
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
+ash shell --profile ./profile.ash
 ```
 
-File and stdin sources must be valid UTF-8 and cannot exceed 1 MiB. Native file
-paths are not converted to UTF-8; use `ash shell -- ./-script.ash` for an
+File, stdin, and Profile sources must be valid UTF-8 and cannot exceed 1 MiB.
+Native file paths are not converted to UTF-8; use
+`ash shell -- ./-script.ash` for an
 operand beginning with `-`. Portable `ls` accepts one path (default `.`), emits
 one stably ordered native name per line, and supports `-a`/`--all`,
 `-d`/`--directory`, `-1`, combined short options, and `--`. Portable `cat`
@@ -56,6 +60,28 @@ supports `-E`/`--extended-regexp`, `-F`/`--fixed-strings`,
 `-i`/`--ignore-case`, `-n`/`--line-number`, combined short options, and `--`.
 Searches are capped at 64 MiB; no matches return status 1 without a diagnostic.
 Directories, multiple files, stdin `-`, and unsupported options fail explicitly.
+
+Startup Profiles are opt-in. `--profile FILE` selects one explicitly, a
+non-empty `ASH_PROFILE` supplies the configured default, and `--no-profile`
+disables both. Relative paths are anchored to the initial cwd. A Profile is
+parsed completely before any command runs: malformed startup never applies a
+prefix. A non-interactive invocation stops with status 2; an interactive shell
+prints the same source-spanned diagnostic and opens in safe mode. Profile state,
+including `cd` and exported variables, persists into the selected input.
+
+The prompt defaults to `ash> `; `ASH_PROMPT` replaces it and must be valid
+UTF-8. Ctrl+C at the prompt sets `$?` to 130 and continues, while EOF returns
+the previous status. `exit [STATUS]` stops the remaining submitted source and
+the REPL. An omitted status reuses `$?`; explicit values must be integers from
+0 through 255, and invalid arguments return 2 without exiting.
+
+`ASH_HISTORY` selects persistent history relative to the initial cwd, and an
+empty value disables it. Defaults are `$XDG_STATE_HOME/ash/history` then
+`$HOME/.local/state/ash/history` on Unix-like hosts, and
+`%LOCALAPPDATA%\ash\history` on Windows. Leading-space or leading-tab lines are
+not recorded. Symbolic links and non-regular targets are rejected, Unix history
+files are forced to mode `0600`, and an unsafe or unavailable path produces a
+warning while the in-memory editing session remains usable.
 
 `export NAME=VALUE` and `unset NAME` persistently update both shell-variable and
 exported environment state. Each accepts one expanded argument and `--`; names
@@ -74,13 +100,16 @@ remain lossless through expansion and direct argv launch.
 Native programs resolve through the persistent `PATH` or an explicit `native:`
 prefix. The resolved host executable receives the parsed argument vector,
 current directory, and exported environment directly; ash never inserts a host
-shell command string. Child stdin is closed in this checkpoint. Stdout and
-stderr share the remaining 128 MiB synchronous capture allowance, and a normal
-nonzero native exit becomes the command status without an added diagnostic.
+shell command string. Child stdin is still closed and output is synchronously
+captured, so programs that require their own foreground terminal remain part of
+H4 job control rather than this line-edited REPL. Stdout and stderr share the
+remaining 128 MiB capture allowance, and a normal nonzero native exit becomes
+the command status without an added diagnostic.
 
-Interactive input, profiles, broader expansion (including command substitution
-and globbing), streaming stdio, and WSL execution are not implemented yet. The
-regular binary enables the `human-shell` feature;
+Broader expansion (including command substitution and globbing), mutations,
+streaming stdio and pipelines, foreground interactive programs and jobs, and
+WSL execution are not implemented yet. The regular binary enables the
+`human-shell` feature;
 `cargo build -p a3s-ash --no-default-features` keeps a minimal machine-only
 build.
 

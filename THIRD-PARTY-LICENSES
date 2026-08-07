@@ -33,6 +33,7 @@ cc 1.4.0 | MIT OR Apache-2.0
 cfg_aliases 0.2.2 | MIT
 cfg-if 1.0.4 | MIT OR Apache-2.0
 chacha20 0.10.1 | MIT OR Apache-2.0
+clipboard-win 5.4.1 | BSL-1.0
 cmake 0.1.58 | MIT OR Apache-2.0
 combine 4.6.7 | MIT
 constant_time_eq 0.4.2 | CC0-1.0 OR MIT-0 OR Apache-2.0
@@ -56,6 +57,7 @@ ed25519-dalek 3.0.0 | BSD-3-Clause
 either 1.17.0 | MIT OR Apache-2.0
 equivalent 1.0.2 | Apache-2.0 OR MIT
 errno 0.3.14 | MIT OR Apache-2.0
+error-code 3.3.2 | BSL-1.0
 fancy-regex 0.17.0 | MIT
 fastrand 2.5.0 | Apache-2.0 OR MIT
 fiat-crypto 0.3.0 | MIT OR Apache-2.0 OR BSD-1-Clause
@@ -147,6 +149,7 @@ rustls-platform-verifier 0.7.0 | MIT OR Apache-2.0
 rustls-platform-verifier-android 0.1.1 | MIT OR Apache-2.0
 rustls-webpki 0.103.13 | ISC
 rustversion 1.0.23 | MIT OR Apache-2.0
+rustyline 18.0.1 | MIT
 same-file 1.0.6 | Unlicense/MIT
 schannel 0.1.29 | MIT
 security-framework 3.7.0 | MIT OR Apache-2.0
@@ -196,9 +199,12 @@ try-lock 0.2.5 | MIT
 typed-path 0.12.3 | MIT OR Apache-2.0
 typenum 1.20.1 | MIT OR Apache-2.0
 unicode-ident 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0
+unicode-segmentation 1.13.3 | MIT OR Apache-2.0
+unicode-width 0.2.2 | MIT OR Apache-2.0
 untrusted 0.9.0 | ISC
 url 2.5.8 | MIT OR Apache-2.0
 utf8_iter 1.0.4 | Apache-2.0 OR MIT
+utf8parse 0.2.2 | Apache-2.0 OR MIT
 walkdir 2.5.0 | Unlicense/MIT
 want 0.3.1 | MIT
 wasi 0.11.1+wasi-snapshot-preview1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT

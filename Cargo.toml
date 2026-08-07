@@ -40,6 +40,7 @@ process-wrap = { version = "9.1.0", default-features = false, features = ["job-o
 rayon = "1.12.0"
 regex = "1.13.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream", "system-proxy"] }
+rustyline = { version = "18.0.1", default-features = false, features = ["with-file-history"] }
 semver = "1.0.28"
 same-file = "1.0.6"
 serde = { version = "1.0.228", features = ["derive"] }

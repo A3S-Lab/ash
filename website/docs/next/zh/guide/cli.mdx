@@ -9,39 +9,43 @@ ash 的主要 CLI 是机器接口：成功输出和错误诊断都使用稳定�
 颜色或进度条。独立且受 feature 控制的 `ash shell` 入口明确面向人类，使用普通字节、
 诊断与退出状态，而不是 ASON。
 
-| 命令                                           | 输入                       | 输出                                   |
-| ---------------------------------------------- | -------------------------- | -------------------------------------- |
-| `ash --version`                                | 无                         | 稳定版本字符串                         |
-| `ash --build-info`                             | 无                         | 版本、目标、协议、ASON、提交与信任指纹 |
-| `ash ason`                                     | stdin 裸 ASON              | 唯一规范 ASON                          |
-| `ash run`                                      | stdin 单个类型化请求       | 单个最终响应                           |
-| `ash rpc`                                      | stdin/stdout 长度帧        | 握手与有序响应帧                       |
-| `ash shell [--no-profile] [-c SOURCE \| FILE]` | 内联、原生文件或有界 stdin | 人类命令输出与带源码位置的诊断         |
-| `ash self status [--prefix PATH]`              | 安装前缀                   | 当前/前一版本与安装状态                |
-| `ash self check --candidate FILE`              | 候选二进制                 | 健康、版本与目标                       |
-| `ash self update [--prefix PATH] [--from DIR]` | 签名元数据或离线目录       | 激活结果                               |
-| `ash self rollback [--prefix PATH]`            | 安装状态                   | 回滚或计划结果                         |
-| `ash self recover [--prefix PATH]`             | 安装日志                   | 恢复结果                               |
+| 命令                                                             | 输入                             | 输出                                   |
+| ---------------------------------------------------------------- | -------------------------------- | -------------------------------------- |
+| `ash --version`                                                  | 无                               | 稳定版本字符串                         |
+| `ash --build-info`                                               | 无                               | 版本、目标、协议、ASON、提交与信任指纹 |
+| `ash ason`                                                       | stdin 裸 ASON                    | 唯一规范 ASON                          |
+| `ash run`                                                        | stdin 单个类型化请求             | 单个最终响应                           |
+| `ash rpc`                                                        | stdin/stdout 长度帧              | 握手与有序响应帧                       |
+| `ash shell [--no-profile \| --profile FILE] [-c SOURCE \| FILE]` | 终端、内联、原生文件或有界 stdin | 人类命令输出与带源码位置的诊断         |
+| `ash self status [--prefix PATH]`                                | 安装前缀                         | 当前/前一版本与安装状态                |
+| `ash self check --candidate FILE`                                | 候选二进制                       | 健康、版本与目标                       |
+| `ash self update [--prefix PATH] [--from DIR]`                   | 签名元数据或离线目录             | 激活结果                               |
+| `ash self rollback [--prefix PATH]`                              | 安装状态                         | 回滚或计划结果                         |
+| `ash self recover [--prefix PATH]`                               | 安装日志                         | 恢复结果                               |
 
 `ash self replace` 是更新流程使用的内部 Windows 辅助入口，不是普通 Harness API。
 
 ## 人类 Shell 检查点
 
-当前 H1 检查点针对同一份持久原生状态，顺序执行 H0 的简单命令语法。已实现 `pwd`、
-`echo`（含 `-n`）、`cd`、展开后的 `export`/`unset`、可移植 `ls`、原始字节 `cat`、
-文本 `grep`、命名参数与上一状态展开，并可执行宿主原生命令；源码可以来自
-`-c SOURCE`、原生脚本文件路径或 stdin：
+当前 H1 检查点会在 stdin 为终端时打开跨平台行编辑 REPL，并针对同一份持久原生状态
+顺序执行 H0 的简单命令语法。已实现 `pwd`、`echo`（含 `-n`）、`cd`、展开后的
+`export`/`unset`、`exit`、可移植 `ls`、原始字节 `cat`、文本 `grep`、命名参数与上一
+状态展开，并可执行宿主原生命令；源码也可以来自 `-c SOURCE`、原生脚本文件路径或
+stdin：
 
 ```sh
+ash shell
 ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
 ash shell -c 'export NAME=world; echo "hello $NAME"; echo $?'
 ash shell -c "native:rustc --version"
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
+ash shell --profile ./profile.ash
 ```
 
-文件和 stdin 源码必须是有效 UTF-8，且不能超过 1 MiB；原生文件路径本身不会转换为
-UTF-8。以 `-` 开头的文件参数可写成 `ash shell -- ./-script.ash`。可移植 `ls` 最多
+文件、stdin 与 Profile 源码必须是有效 UTF-8，且不能超过 1 MiB；原生文件路径本身
+不会转换为 UTF-8。以 `-` 开头的文件参数可写成
+`ash shell -- ./-script.ash`。可移植 `ls` 最多
 接受一个路径（默认 `.`），按稳定原生顺序每行输出一个名称，并支持 `-a`/`--all`、
 `-d`/`--directory`、`-1`、短选项组合与 `--`。可移植 `cat` 要求一个路径，原样输出
 字节且不添加换行，接受 `--`，并共享 128 MiB 读取/捕获上限；选项、多个文件与 stdin
@@ -50,6 +54,24 @@ UTF-8。以 `-` 开头的文件参数可写成 `ash shell -- ./-script.ash`。�
 `-F`/`--fixed-strings`、`-i`/`--ignore-case`、`-n`/`--line-number`、短选项组合与
 `--`。搜索上限为 64 MiB；无匹配时不输出诊断并返回状态 1。目录、多个文件、stdin
 `-` 与不支持的选项都会明确失败。
+
+启动 Profile 是显式选择的：`--profile FILE` 指定一个文件，非空 `ASH_PROFILE` 提供
+配置默认值，`--no-profile` 则禁用两者。相对路径以 Shell 初始 cwd 为基准。Profile
+会在执行任何命令前完整解析，因此语法错误不会应用前缀；非交互调用在带源码位置的
+诊断后以状态 2 停止，交互调用则输出同一诊断并以安全模式打开。Profile 中的 `cd`
+和导出环境等状态会延续到所选输入。
+
+提示符默认为 `ash> `；`ASH_PROMPT` 可替换它，但必须是有效 UTF-8。在提示符处按
+Ctrl+C 会把 `$?` 设为 130 并继续，EOF 则返回上一状态。`exit [STATUS]` 会停止当前
+提交源码的剩余命令并退出 REPL；省略状态时复用 `$?`，显式值只能是 0 到 255 的
+整数，非法参数返回 2 但不会退出。
+
+`ASH_HISTORY` 选择相对初始 cwd 的持久历史文件，空值会禁用持久化。类 Unix 主机
+默认依次使用 `$XDG_STATE_HOME/ash/history` 与
+`$HOME/.local/state/ash/history`，Windows 使用
+`%LOCALAPPDATA%\ash\history`。以空格或制表符开头的行不会记录。符号链接和非普通
+文件目标会被拒绝，Unix 历史文件强制为 `0600`；路径不安全或不可用时会给出警告，
+但内存中的行编辑会话仍可使用。
 
 `export NAME=VALUE` 与 `unset NAME` 会持久更新 Shell 变量和导出环境。两者各接受一个
 展开后的参数和 `--`；名称必须是 ASCII Shell 标识符，空值会被保留，移除不存在的
@@ -64,11 +86,12 @@ UTF-8。以 `-` 开头的文件参数可写成 `ash shell -- ./-script.ash`。�
 
 原生程序通过持久 `PATH` 或显式 `native:` 前缀解析。ash 会把解析后的参数向量、当前
 目录和导出环境直接交给解析出的宿主可执行文件，绝不插入宿主 Shell 命令字符串。本
-检查点关闭子进程 stdin；stdout 与 stderr 共享剩余的 128 MiB 同步捕获额度，普通的
+检查点仍关闭子进程 stdin 并同步捕获输出，因此自身需要前台终端的程序属于 H4 作业
+控制，而不是当前行编辑 REPL。stdout 与 stderr 共享剩余的 128 MiB 捕获额度，普通的
 非零原生退出状态会直接成为命令状态，不额外生成诊断。
 
-交互输入、Profile、更广的展开（包括命令替换与 glob）、流式 stdio 与 WSL 执行尚未
-实现。常规二进制启用 `human-shell` feature；
+更广的展开（包括命令替换与 glob）、修改命令、流式 stdio 与管道、前台交互程序与
+作业控制，以及 WSL 执行尚未实现。常规二进制启用 `human-shell` feature；
 `cargo build -p a3s-ash --no-default-features` 保留最小机器专用构建。
 
 ## 错误契约

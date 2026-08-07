@@ -130,14 +130,29 @@ fn run_in(directory: &TestDirectory, arguments: &[&str], input: &[u8]) -> Output
 }
 
 fn run_from(directory: Option<&std::path::Path>, arguments: &[&str], input: &[u8]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ash"))
+    run_from_with_env(directory, arguments, input, &[])
+}
+
+fn run_from_with_env(
+    directory: Option<&std::path::Path>,
+    arguments: &[&str],
+    input: &[u8],
+    environment: &[(&str, &str)],
+) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ash"));
+    command
         .args(arguments)
         .current_dir(directory.unwrap_or_else(|| std::path::Path::new(".")))
+        .env_remove("ASH_PROFILE")
+        .env_remove("ASH_PROMPT")
+        .env_remove("ASH_HISTORY")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn ash");
+        .stderr(Stdio::piped());
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    let mut child = command.spawn().expect("spawn ash");
     child
         .stdin
         .take()
@@ -540,6 +555,131 @@ fn shell_command_executes_stateful_sequence_without_machine_framing() {
 
 #[cfg(feature = "human-shell")]
 #[test]
+fn shell_profiles_are_opt_in_share_state_and_keep_cli_paths_anchored() {
+    let directory = TestDirectory::new();
+    fs::create_dir(directory.0.join("child")).expect("child directory");
+    fs::write(
+        directory.0.join("profile.ash"),
+        b"export TOKEN='profile value'; cd child; echo profile-loaded",
+    )
+    .expect("profile");
+    fs::write(directory.0.join("script.ash"), b"echo script-loaded").expect("script");
+
+    let configured = run_from_with_env(
+        Some(&directory.0),
+        &["shell", "-c", "echo \"$TOKEN\"; pwd"],
+        b"",
+        &[("ASH_PROFILE", "profile.ash")],
+    );
+    let child = fs::canonicalize(directory.0.join("child")).expect("child path");
+    assert!(
+        configured.status.success(),
+        "stderr={:?}",
+        configured.stderr
+    );
+    assert_eq!(
+        configured.stdout,
+        format!("profile-loaded\nprofile value\n{}\n", child.display()).as_bytes()
+    );
+    assert!(configured.stderr.is_empty());
+
+    let disabled = run_from_with_env(
+        Some(&directory.0),
+        &["shell", "--no-profile", "-c", "echo \"$TOKEN\""],
+        b"",
+        &[("ASH_PROFILE", "profile.ash")],
+    );
+    assert!(disabled.status.success(), "stderr={:?}", disabled.stderr);
+    assert_eq!(disabled.stdout, b"\n");
+    assert!(disabled.stderr.is_empty());
+
+    let explicit_after_input = run_in(
+        &directory,
+        &["shell", "-c", "echo \"$TOKEN\"", "--profile", "profile.ash"],
+        b"",
+    );
+    assert!(
+        explicit_after_input.status.success(),
+        "stderr={:?}",
+        explicit_after_input.stderr
+    );
+    assert_eq!(
+        explicit_after_input.stdout,
+        b"profile-loaded\nprofile value\n"
+    );
+    assert!(explicit_after_input.stderr.is_empty());
+
+    let anchored_script = run_in(
+        &directory,
+        &["shell", "--profile", "profile.ash", "script.ash"],
+        b"",
+    );
+    assert!(
+        anchored_script.status.success(),
+        "stderr={:?}",
+        anchored_script.stderr
+    );
+    assert_eq!(anchored_script.stdout, b"profile-loaded\nscript-loaded\n");
+    assert!(anchored_script.stderr.is_empty());
+}
+
+#[cfg(feature = "human-shell")]
+#[test]
+fn malformed_profiles_do_not_partially_execute_and_profile_exit_stops_startup() {
+    let directory = TestDirectory::new();
+    fs::write(
+        directory.0.join("profile.ash"),
+        b"echo partial; echo 'unterminated",
+    )
+    .expect("malformed profile");
+
+    let malformed = run_in(
+        &directory,
+        &["shell", "--profile", "profile.ash", "-c", "echo main"],
+        b"",
+    );
+    assert_eq!(malformed.status.code(), Some(2));
+    assert!(malformed.stdout.is_empty());
+    assert_eq!(
+        malformed.stderr,
+        b"ash: single-quoted text is missing its closing quote at bytes 19..32\n"
+    );
+
+    fs::write(
+        directory.0.join("profile.ash"),
+        b"echo profile; exit 19; echo skipped",
+    )
+    .expect("exiting profile");
+    let exited = run_in(
+        &directory,
+        &["shell", "--profile", "profile.ash", "-c", "echo main"],
+        b"",
+    );
+    assert_eq!(exited.status.code(), Some(19));
+    assert_eq!(exited.stdout, b"profile\n");
+    assert!(exited.stderr.is_empty());
+}
+
+#[cfg(feature = "human-shell")]
+#[test]
+fn shell_exit_stops_remaining_commands_and_sets_process_status() {
+    let output = run(
+        &[
+            "shell",
+            "--no-profile",
+            "-c",
+            "echo before; exit 7; echo after",
+        ],
+        b"",
+    );
+
+    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(output.stdout, b"before\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[cfg(feature = "human-shell")]
+#[test]
 fn shell_command_launches_native_argv_with_persistent_cwd_and_environment() {
     let directory = TestDirectory::new();
     let executable = compile_shell_helper(&directory);
@@ -633,6 +773,72 @@ fn shell_command_accepts_bounded_stdin_and_file_sources() {
             .stderr
             .starts_with(b"ash: cannot open shell script: ")
     );
+
+    fs::write(
+        directory.0.join("profile-at-limit.ash"),
+        vec![b'#'; 1024 * 1024],
+    )
+    .expect("at-limit profile");
+    let profile_at_limit = run_in(
+        &directory,
+        &[
+            "shell",
+            "--profile",
+            "profile-at-limit.ash",
+            "-c",
+            "echo ready",
+        ],
+        b"",
+    );
+    assert!(
+        profile_at_limit.status.success(),
+        "stderr={:?}",
+        profile_at_limit.stderr
+    );
+    assert_eq!(profile_at_limit.stdout, b"ready\n");
+    assert!(profile_at_limit.stderr.is_empty());
+
+    fs::write(
+        directory.0.join("profile-over-limit.ash"),
+        vec![b'#'; 1024 * 1024 + 1],
+    )
+    .expect("over-limit profile");
+    let profile_over_limit = run_in(
+        &directory,
+        &[
+            "shell",
+            "--profile",
+            "profile-over-limit.ash",
+            "-c",
+            "echo skipped",
+        ],
+        b"",
+    );
+    assert_eq!(profile_over_limit.status.code(), Some(2));
+    assert!(profile_over_limit.stdout.is_empty());
+    assert_eq!(
+        profile_over_limit.stderr,
+        b"ash: shell profile exceeds the 1 MiB input ceiling\n"
+    );
+
+    fs::write(directory.0.join("profile-invalid.ash"), [0xff]).expect("invalid profile");
+    let profile_invalid = run_in(
+        &directory,
+        &[
+            "shell",
+            "--profile",
+            "profile-invalid.ash",
+            "-c",
+            "echo skipped",
+        ],
+        b"",
+    );
+    assert_eq!(profile_invalid.status.code(), Some(2));
+    assert!(profile_invalid.stdout.is_empty());
+    assert_eq!(
+        profile_invalid.stderr,
+        b"ash: shell profile must be valid UTF-8\n"
+    );
 }
 
 #[cfg(feature = "human-shell")]
@@ -643,8 +849,21 @@ fn shell_usage_and_parse_failures_are_human_diagnostics() {
     assert!(usage.stdout.is_empty());
     assert_eq!(
         usage.stderr,
-        b"ash: usage: ash shell [--no-profile] [-c SOURCE | FILE]\n"
+        b"ash: usage: ash shell [--no-profile | --profile FILE] [-c SOURCE | FILE]\n"
     );
+
+    for arguments in [
+        &["shell", "--profile"][..],
+        &["shell", "--profile", "one", "--no-profile"][..],
+        &["shell", "-c", "one", "two"][..],
+    ] {
+        let conflict = run(arguments, b"");
+        assert_eq!(conflict.status.code(), Some(2));
+        assert_eq!(
+            conflict.stderr,
+            b"ash: usage: ash shell [--no-profile | --profile FILE] [-c SOURCE | FILE]\n"
+        );
+    }
 
     let parse = run(&["shell", "-c", "echo 'unterminated"], b"");
     assert_eq!(parse.status.code(), Some(2));

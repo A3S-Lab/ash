@@ -1,6 +1,6 @@
 # Portable Human Shell Architecture
 
-- Status: accepted; H1 in progress
+- Status: accepted; H1 implemented
 - Target: post-ASH/1 version one
 - Last updated: 2026-08-07
 
@@ -17,13 +17,15 @@ The current source checkpoint has completed H0 with the independent
 persistent state types, deterministic command classification, locked parser and
 resolution fixtures, and provider-neutral raw read/list/search semantic
 services. Existing ASH/1 adapters reuse those services while retaining permit,
-deadline, budget, projection, retention, and ASON ownership. H1 has started with
-a feature-gated `ash shell` route for inline plus bounded stdin and native
-script-file sources, with sequential `pwd`, `echo`, `cd`, `export`/`unset`,
-portable `ls` plus bounded raw-byte `cat` and text `grep`, source-spanned named
-parameter and last-status expansion, and direct-argv native host commands.
-Interactive input, pipelines, jobs, streaming stdio, broader expansion, and WSL
-launch remain unimplemented.
+deadline, budget, projection, retention, and ASON ownership. H1 now provides a
+feature-gated, line-edited `ash shell` REPL with configurable prompt, private
+persistent history, opt-in Profile startup, and `exit`, plus inline, bounded
+stdin, and native script-file sources. One persistent state executes sequential
+`pwd`, `echo`, `cd`, `export`/`unset`, portable `ls`, bounded raw-byte `cat` and
+text `grep`, source-spanned named and last-status expansion, and direct-argv
+native host commands. Pipelines, foreground interactive programs and jobs,
+streaming stdio, broader expansion, mutations, and WSL launch remain
+unimplemented.
 
 ## 1. Executive decision
 
@@ -667,17 +669,38 @@ status.
 The initial entrypoint is:
 
 ```text
-ash shell
+ash shell [--no-profile | --profile FILE] [-c SOURCE | FILE]
 ```
 
 Configuration owns only shell concerns: prompt, history, completion, aliases,
 portable command options, backend policy, and WSL distribution selection. It
 does not duplicate engine governor or machine security configuration.
 
-Startup files are opt-in and use the `ash` dialect. The shell starts with a
-`--no-profile` option for deterministic recovery. A malformed startup file
-reports a source-spanned error and continues in a safe interactive mode rather
-than executing a partial remainder silently.
+Startup Profiles are opt-in and use the `ash` dialect. `--profile FILE` selects
+one explicitly, while a non-empty native `ASH_PROFILE` value supplies the
+configured default. `--no-profile` disables both for deterministic recovery.
+Relative Profile paths are anchored to the shell's initial cwd. Profile and
+ordinary file/stdin sources share the 1 MiB valid-UTF-8 ceiling. Each Profile is
+parsed completely before execution, so a parse failure never applies a prefix.
+Non-interactive startup returns status 2 after the source-spanned diagnostic;
+interactive startup reports the same diagnostic and opens in safe mode.
+
+Terminal input uses a cross-platform line editor. The default prompt is
+`ash> `; `ASH_PROMPT` replaces it and must be valid UTF-8. Ctrl+C at the prompt
+sets status 130 and presents another prompt, while EOF returns the previous
+status. `exit [STATUS]` stops the remaining submitted source and the REPL;
+an omitted status reuses `$?`, explicit values are limited to 0 through 255,
+and invalid arguments return status 2 without exiting.
+
+Persistent history is configured after the Profile, but relative
+`ASH_HISTORY` paths remain anchored to the initial cwd. An empty
+`ASH_HISTORY` disables persistence. Without it, Unix-like hosts use
+`$XDG_STATE_HOME/ash/history` or `$HOME/.local/state/ash/history`, and Windows
+uses `%LOCALAPPDATA%\ash\history`. Lines beginning with an ASCII space or tab
+are omitted for sensitive-command suppression. A history target must be a
+regular non-symbolic-link file; Unix files are forced to mode `0600`. An
+unavailable or unsafe target disables only persistent history, emits a warning,
+and leaves the line editor and in-memory session usable.
 
 ## 19. Verification strategy
 
@@ -740,10 +763,10 @@ than executing a partial remainder silently.
 Current checkpoint: every H0 item is implemented. Semantic paths use
 provider-owned `PathBuf` values plus collision-free stable ordering keys, and
 byte-exact regression fixtures prove that the ASH/1 read/list/search responses
-remain unchanged. H1 begins with the non-interactive CLI route and portable
-builtin adapters.
+remain unchanged. H1 began with the non-interactive CLI route and portable
+builtin adapters, then added the terminal lifecycle without changing ASH/1.
 
-### H1: native non-interactive shell
+### H1: native shell foundation
 
 - implement `ash shell`, prompt, history, simple commands, `cd`, environment,
   status, and native executable resolution;
@@ -751,22 +774,28 @@ builtin adapters.
 - support script files without pipelines or background jobs;
 - verify Linux, macOS, and Windows behavior.
 
-Current checkpoint: `ash shell -c SOURCE`, `ash shell < script.ash`, and
-`ash shell script.ash` parse the H0 syntax subset, execute sequential `pwd`,
-`echo`, `cd`, expanded `export`/`unset`, portable `ls`, bounded raw-byte `cat`,
-and bounded text `grep` commands plus native host executables against one native
-`ShellState`, emit source-spanned human diagnostics, and return the last command
-status. Named `$NAME`/`${NAME}` parameters and `$?` expand in a distinct,
-quote-aware stage with native-string preservation and the fixed field contract
-in section 7.1. Stdin and file sources share a 1 MiB valid-UTF-8 ceiling, while
-file and external-command operands retain native representation. `ls`, `cat`,
-and `grep` reuse the provider-neutral list/read/search services with an
-unconfined native provider and the option contracts in section 10. Native
-programs resolve from the persistent environment, launch through the owned
-`ash-platform` process boundary with exact argv/cwd/environment, and use the
-bounded dual-stream contract in section 11. The `human-shell` feature is enabled
-for the normal binary and can be disabled for a minimal machine-only build.
-Interactive input, profiles, broader expansion, streaming stdio, and WSL launch
+Current checkpoint: `ash shell` opens a cross-platform line-edited terminal
+loop with the prompt, persistent-history, interruption, EOF, and `exit`
+contracts in section 18. The same entrypoint accepts `-c SOURCE`, bounded stdin,
+or one native script path. Opt-in `--profile FILE`/`ASH_PROFILE` startup uses
+the same dialect and input ceiling, while `--no-profile` remains the recovery
+route. Every source parses the H0 subset and executes sequential `pwd`, `echo`,
+`cd`, expanded `export`/`unset`, portable `ls`, bounded raw-byte `cat`, bounded
+text `grep`, and native host executables against one native `ShellState`, with
+source-spanned human diagnostics and conventional status propagation. Named
+`$NAME`/`${NAME}` parameters and `$?` expand in a distinct, quote-aware stage
+with native-string preservation and the fixed field contract in section 7.1.
+File, stdin, and Profile sources share a 1 MiB valid-UTF-8 ceiling, while file
+and external-command operands retain native representation. `ls`, `cat`, and
+`grep` reuse the provider-neutral list/read/search services with an unconfined
+native provider and the option contracts in section 10. Native programs resolve
+from the persistent environment, launch through the owned `ash-platform`
+process boundary with exact argv/cwd/environment, and still use the bounded
+dual-stream contract in section 11. Their stdin remains closed, so foreground
+terminal programs and Ctrl+C job-tree delivery remain H4 rather than being
+claimed by this REPL checkpoint. The `human-shell` feature is enabled for the
+normal binary and can be disabled for a minimal machine-only build. Broader
+expansion, streaming stdio, mutations, pipelines, job control, and WSL launch
 remain for later increments.
 
 ### H2: streaming execution
