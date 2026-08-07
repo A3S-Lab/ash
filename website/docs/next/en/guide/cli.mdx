@@ -133,16 +133,20 @@ the remaining 128 MiB allowance. Status defaults to the final stage. With
 `128 + signal`; an all-success pipeline still uses its final stage. Stateful and
 portable commands, aliases, functions, and WSL stages fail before spawn until
 their streaming adapters exist.
-The first stage may redirect stdin, the final stage may redirect stdout, and any
-stage may redirect stderr or duplicate it into that stage's stdout. Replacing an
-internal pipeline stdin or stdout endpoint returns status 2 before opening files
-or starting children.
+Any native stage may redirect stdin, stdout, or stderr, with descriptor
+duplication still applied in source order. If a producer no longer references
+an internal pipe, ash closes its parent writer and the downstream reader sees
+EOF. If a consumer replaces its pipe stdin, ash closes the parent reader and the
+upstream writer sees native broken-pipe behavior. Final-stage or `pipefail`
+selection then determines the visible status. A descriptor copy that still
+references the pipe remains connected even if the original descriptor is later
+redirected.
 
 Broader expansion (including command substitution and globbing), mutations,
-terminal streaming, unified pipeline supervision, internal pipeline endpoint
-replacement, builtin/portable/WSL redirection and pipeline adapters, foreground
-interactive programs and jobs, and WSL execution are not implemented yet. The
-regular binary enables the `human-shell`
+terminal streaming, unified pipeline supervision, builtin/portable/WSL
+redirection and pipeline adapters, foreground interactive programs and jobs,
+and WSL execution are not implemented yet. The regular binary enables the
+`human-shell`
 feature;
 `cargo build -p a3s-ash --no-default-features` keeps a minimal machine-only
 build.

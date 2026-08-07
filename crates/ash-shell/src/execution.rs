@@ -11,9 +11,9 @@ use ash_ops::{
     SemanticServices,
 };
 use ash_platform::{
-    EnvironmentChange, NativeProcessFile, NativeProcessFileMode, NativeProcessSpec, PlatformError,
-    ProcessCaptureId, ProcessExit, ProcessFileId, ProcessHandle, ProcessPipeId, ProcessStdio,
-    spawn_native, spawn_native_graph,
+    ClosedProcessPipeEnd, EnvironmentChange, NativeProcessFile, NativeProcessFileMode,
+    NativeProcessSpec, PlatformError, ProcessCaptureId, ProcessExit, ProcessFileId, ProcessHandle,
+    ProcessPipeId, ProcessStdio, spawn_native, spawn_native_graph_with_closed_pipe_ends,
 };
 use futures::future::try_join_all;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -440,6 +440,7 @@ struct NativeStdio {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NativePipelineInvocation {
     stages: Vec<NativeInvocation>,
+    closed_pipe_ends: Vec<ClosedProcessPipeEnd>,
     capture_limit: u64,
 }
 
@@ -567,10 +568,14 @@ impl NativeCommandRunner for DirectNativeCommandRunner {
 async fn run_native_pipeline(
     invocation: NativePipelineInvocation,
 ) -> Result<NativePipelineOutput, NativeCommandError> {
-    let capture_limit = invocation.capture_limit;
-    let stage_count = invocation.stages.len();
+    let NativePipelineInvocation {
+        stages,
+        closed_pipe_ends,
+        capture_limit,
+    } = invocation;
+    let stage_count = stages.len();
     let mut specs = Vec::with_capacity(stage_count);
-    for stage in invocation.stages {
+    for stage in stages {
         specs.push(NativeProcessSpec {
             executable: stage.executable.into_os_string(),
             argv: stage.arguments,
@@ -588,7 +593,8 @@ async fn run_native_pipeline(
         });
     }
 
-    let mut processes = spawn_native_graph(&specs).map_err(classify_native_spawn_error)?;
+    let mut processes = spawn_native_graph_with_closed_pipe_ends(&specs, &closed_pipe_ends)
+        .map_err(classify_native_spawn_error)?;
     let mut stdout_streams = Vec::with_capacity(processes.len());
     let mut stderr_streams = Vec::with_capacity(processes.len());
     for (process, spec) in processes.iter_mut().zip(&specs) {
@@ -827,37 +833,23 @@ where
         }
     }
 
+    let mut closed_pipe_ends = Vec::with_capacity((stages.len() - 1).saturating_mul(2));
     for index in 0..stages.len() - 1 {
-        let pipe = ProcessStdio::Pipe(ProcessPipeId::new(
-            u32::try_from(index).expect("pipeline stage ceiling fits u32"),
-        ));
-        let (span, replaced) = if stages[index].stdout != pipe {
-            (
-                last_redirection_span(&commands[index], RedirectionDescriptor::Stdout),
-                "stdout",
-            )
-        } else if stages[index + 1].stdin != pipe {
-            (
-                last_redirection_span(&commands[index + 1], RedirectionDescriptor::Stdin),
-                "stdin",
-            )
-        } else {
-            continue;
-        };
-        return unsupported(
-            format!(
-                "redirection of an internal pipeline {replaced} endpoint is not implemented yet"
-            ),
-            span,
-            &mut output.diagnostics,
-            ShellStatusKind::Exited,
-            2,
-        );
+        let pipe_id =
+            ProcessPipeId::new(u32::try_from(index).expect("pipeline stage ceiling fits u32"));
+        let pipe = ProcessStdio::Pipe(pipe_id);
+        if stages[index].stdout != pipe && stages[index].stderr != pipe {
+            closed_pipe_ends.push(ClosedProcessPipeEnd::Writer(pipe_id));
+        }
+        if stages[index + 1].stdin != pipe {
+            closed_pipe_ends.push(ClosedProcessPipeEnd::Reader(pipe_id));
+        }
     }
 
     match runner
         .run_pipeline(NativePipelineInvocation {
             stages,
+            closed_pipe_ends,
             capture_limit,
         })
         .await
@@ -1066,15 +1058,6 @@ fn native_invocation(
 struct RedirectionPlanError {
     message: String,
     span: SourceSpan,
-}
-
-fn last_redirection_span(command: &SimpleCommand, descriptor: RedirectionDescriptor) -> SourceSpan {
-    command
-        .redirections()
-        .iter()
-        .rev()
-        .find(|redirection| redirection.descriptor() == descriptor)
-        .map_or(command.span(), Redirection::span)
 }
 
 fn remaining_capture(output: &ExecutionOutput) -> u64 {
@@ -2016,7 +1999,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use ash_platform::{ProcessExit, ProcessStdio};
+    use ash_platform::{ClosedProcessPipeEnd, ProcessExit, ProcessPipeId, ProcessStdio};
 
     use super::{
         ExecutionDiagnosticCode, NativeCommandError, NativeCommandOutput, NativeCommandRunner,
@@ -2523,20 +2506,98 @@ fn main() {
             b"merged-stderr\n"
         );
 
-        let blocked_source =
-            format!("{executable} produce 1 >blocked.bin | {executable} copy final");
-        let blocked = execute_source(&blocked_source, &mut state).await;
-        assert_eq!(blocked.status().code(), 2);
-        assert_eq!(blocked.diagnostics().len(), 1);
+        let producer_redirect_source = format!(
+            "{executable} produce 1 >producer-only.bin | {executable} copy eof >eof.bin 2>eof.err"
+        );
+        let producer_redirect = execute_source(&producer_redirect_source, &mut state).await;
+        assert_eq!(producer_redirect.status().code(), 0);
+        assert_eq!(producer_redirect.stderr(), b"producer-stderr\n");
+        assert!(producer_redirect.stdout().is_empty());
+        assert!(producer_redirect.diagnostics().is_empty());
         assert_eq!(
-            blocked.diagnostics()[0].code(),
-            ExecutionDiagnosticCode::Unsupported
+            fs::read(directory.0.join("producer-only.bin")).expect("producer output"),
+            [0]
+        );
+        assert!(
+            fs::read(directory.0.join("eof.bin"))
+                .expect("EOF output")
+                .is_empty()
         );
         assert_eq!(
-            blocked.diagnostics()[0].span().source_text(&blocked_source),
-            Some(">blocked.bin")
+            fs::read(directory.0.join("eof.err")).expect("EOF stderr"),
+            b"eof-stderr\n"
         );
-        assert!(!directory.0.join("blocked.bin").exists());
+
+        let descriptor_source = format!(
+            "{executable} ordered 2>&1 >descriptor-stdout.log | {executable} copy descriptor >descriptor-pipe.log 2>descriptor-final.err"
+        );
+        let descriptor = execute_source(&descriptor_source, &mut state).await;
+        assert_eq!(descriptor.status().code(), 0);
+        assert!(descriptor.stdout().is_empty());
+        assert!(descriptor.stderr().is_empty());
+        assert!(descriptor.diagnostics().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("descriptor-stdout.log")).expect("descriptor stdout"),
+            b"stdout-a\nstdout-b\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("descriptor-pipe.log")).expect("descriptor pipe"),
+            b"stderr-a\nstderr-b\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("descriptor-final.err")).expect("descriptor final stderr"),
+            b"descriptor-stderr\n"
+        );
+
+        let both_source = format!(
+            "{executable} produce 1 >both-producer.bin 2>both-producer.err | {executable} copy both <input.bin >both-consumer.bin 2>both-consumer.err"
+        );
+        let both = execute_source(&both_source, &mut state).await;
+        assert_eq!(both.status().code(), 0);
+        assert!(both.stdout().is_empty());
+        assert!(both.stderr().is_empty());
+        assert!(both.diagnostics().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("both-producer.bin")).expect("both producer output"),
+            [0]
+        );
+        assert_eq!(
+            fs::read(directory.0.join("both-producer.err")).expect("both producer stderr"),
+            b"producer-stderr\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("both-consumer.bin")).expect("both consumer output"),
+            b"pipeline-input"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("both-consumer.err")).expect("both consumer stderr"),
+            b"both-stderr\n"
+        );
+
+        state.options_mut().set_pipefail(true);
+        let reader_redirect_source = format!(
+            "{executable} produce {} 2>broken-producer.err | {executable} copy redirected <input.bin >reader-redirect.bin 2>reader-redirect.err",
+            8 * 1024 * 1024
+        );
+        let reader_redirect = execute_source(&reader_redirect_source, &mut state).await;
+        state.options_mut().set_pipefail(false);
+        assert_ne!(reader_redirect.status().code(), 0);
+        assert!(reader_redirect.stdout().is_empty());
+        assert!(reader_redirect.stderr().is_empty());
+        assert!(reader_redirect.diagnostics().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("reader-redirect.bin")).expect("redirected reader output"),
+            b"pipeline-input"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("reader-redirect.err")).expect("redirected reader stderr"),
+            b"redirected-stderr\n"
+        );
+        assert!(
+            !fs::read(directory.0.join("broken-producer.err"))
+                .expect("broken producer stderr")
+                .is_empty()
+        );
 
         let initial_cwd = state.cwd().to_owned();
         let builtin = execute_source("cd nowhere >builtin.log", &mut state).await;
@@ -2642,12 +2703,87 @@ fn main() {
             [OsString::from("beta gamma")]
         );
         assert_eq!(invocation.capture_limit, super::MAX_READ_FILE_BYTES);
+        assert!(invocation.closed_pipe_ends.is_empty());
         assert!(
             invocation
                 .stages
                 .iter()
                 .all(|stage| stage.capture_limit == invocation.capture_limit)
         );
+
+        let redirected_runner = RecordingPipelineRunner::new(NativePipelineOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exits: vec![
+                ProcessExit {
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                },
+                ProcessExit {
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                },
+            ],
+        });
+        let redirected = execute_source_with_runner(
+            "native:first >producer.log | native:second <consumer.log",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &redirected_runner,
+        )
+        .await;
+        assert_eq!(redirected.status().code(), 0);
+        assert!(redirected.diagnostics().is_empty());
+        let redirected_invocation = redirected_runner
+            .invocation
+            .lock()
+            .expect("redirected invocation lock")
+            .clone()
+            .expect("redirected pipeline invocation");
+        assert_eq!(
+            redirected_invocation.closed_pipe_ends,
+            [
+                ClosedProcessPipeEnd::Writer(ProcessPipeId::new(0)),
+                ClosedProcessPipeEnd::Reader(ProcessPipeId::new(0)),
+            ]
+        );
+
+        let duplicated_runner = RecordingPipelineRunner::new(NativePipelineOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exits: vec![
+                ProcessExit {
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                },
+                ProcessExit {
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                },
+            ],
+        });
+        let duplicated = execute_source_with_runner(
+            "native:first 2>&1 >producer.log | native:second",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &duplicated_runner,
+        )
+        .await;
+        assert_eq!(duplicated.status().code(), 0);
+        assert!(duplicated.diagnostics().is_empty());
+        let duplicated_invocation = duplicated_runner
+            .invocation
+            .lock()
+            .expect("duplicated invocation lock")
+            .clone()
+            .expect("duplicated pipeline invocation");
+        assert!(duplicated_invocation.closed_pipe_ends.is_empty());
 
         state.options_mut().set_pipefail(true);
         let successful_runner = RecordingPipelineRunner::new(NativePipelineOutput {

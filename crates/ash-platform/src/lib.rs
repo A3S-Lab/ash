@@ -11,9 +11,10 @@ mod workspace;
 pub use identity::FileIdentity;
 pub use mutation::{MutationGuard, ReplaceOutcome};
 pub use process::{
-    EnvironmentChange, NativeProcessFile, NativeProcessFileMode, NativeProcessSpec,
-    ProcessCaptureId, ProcessExit, ProcessFileId, ProcessHandle, ProcessPipeId, ProcessSpec,
-    ProcessStdio, spawn_native, spawn_native_graph,
+    ClosedProcessPipeEnd, EnvironmentChange, NativeProcessFile, NativeProcessFileMode,
+    NativeProcessSpec, ProcessCaptureId, ProcessExit, ProcessFileId, ProcessHandle, ProcessPipeId,
+    ProcessSpec, ProcessStdio, spawn_native, spawn_native_graph,
+    spawn_native_graph_with_closed_pipe_ends,
 };
 pub use transaction::{
     FileAction, FileActionKind, FileActionOutcome, FileActionState, FileTransactionFailure,
