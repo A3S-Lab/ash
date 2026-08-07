@@ -1,6 +1,6 @@
 # Portable Human Shell Architecture
 
-- Status: accepted; H1 and the first native H2 pipeline slice implemented
+- Status: accepted; H1 plus native pipeline and `pipefail` H2 slices implemented
 - Target: post-ASH/1 version one
 - Last updated: 2026-08-07
 
@@ -21,16 +21,16 @@ deadline, budget, projection, retention, and ASON ownership. H1 now provides a
 feature-gated, line-edited `ash shell` REPL with configurable prompt, private
 persistent history, opt-in Profile startup, and `exit`, plus inline, bounded
 stdin, and native script-file sources. One persistent state executes sequential
-`pwd`, `echo`, `cd`, `export`/`unset`, portable `ls`, bounded raw-byte `cat` and
-text `grep`, source-spanned named and last-status expansion, and direct-argv
-native host commands. H2 adds explicit per-stream modes, validated direct OS
+`pwd`, `echo`, `cd`, `export`/`unset`, `set` pipefail control, portable `ls`,
+bounded raw-byte `cat` and text `grep`, source-spanned named and last-status
+expansion, and direct-argv native host commands. H2 adds explicit per-stream modes, validated direct OS
 pipe graphs, and same-line native-only pipelines of two to 32 stages. All stages
 are expanded and resolved before spawn; intermediate stdout uses direct pipes,
-final stdout and stage-ordered stderr remain bounded captures, and the last
-stage selects status. Foreground interactive programs and jobs, terminal
-streaming, redirections, `pipefail`, unified pipeline supervision, portable/WSL
-pipeline stages, broader expansion, mutations, and WSL launch remain
-unimplemented.
+final stdout and stage-ordered stderr remain bounded captures. Status defaults
+to the last stage, while `pipefail` selects the rightmost failure. Foreground
+interactive programs and jobs, terminal streaming, redirections, unified
+pipeline supervision, portable/WSL pipeline stages, broader expansion,
+mutations, and WSL launch remain unimplemented.
 
 ## 1. Executive decision
 
@@ -536,6 +536,14 @@ reaps all handles after capture or wait failure, and returns the final stage's
 status. A three-process 8 MiB regression locks exact bytes, backpressure, EOF,
 and deterministic stderr order.
 
+The fourth H2 checkpoint activates the pre-existing persistent `ShellOptions`
+policy. `set -o pipefail` enables rightmost-unsuccessful pipeline status and
+`set +o pipefail` restores final-stage status. The selection consumes the
+already ordered `ProcessExit` vector after every member has completed; signals
+retain their conventional `128 + signal` mapping. An all-success pipeline still
+uses its final stage. Any other `set` form returns status 2, and a `set` stage is
+rejected during complete pipeline preflight without mutating parent state.
+
 Redirections remain an ordered vector because these are observably different:
 
 ```sh
@@ -574,9 +582,9 @@ Pipeline construction follows this lifecycle:
 
 The current checkpoint implements native graph validation, pipe creation,
 consumer-first spawn, parent-handle closure, the bounded native-only shell
-lowering, and default final-stage status selection. Capacity reservation,
-unified job supervision, `pipefail`, portable in-process stages, and
-redirections remain open.
+lowering, default final-stage status, and configurable rightmost-failure
+selection. Capacity reservation, unified job supervision, portable in-process
+stages, and redirections remain open.
 
 Data flows directly through OS pipes. It does not pass through ASON or the
 result store, and it is not materialized in memory before the next command
@@ -706,11 +714,12 @@ native exit are distinct diagnostic categories. Human diagnostics carry source
 spans and remediation where known. Machine errors remain stable numeric ASH/1
 records.
 
-The current native-only pipeline slice implements the default last-command
-status. A future documented `pipefail` option returns the rightmost unsuccessful
-status. Backend-specific native codes remain available through job inspection
-once unified supervision exists, even when the language exposes a normalized
-status.
+The current native-only pipeline slice defaults to last-command status.
+`set -o pipefail` persistently selects the rightmost unsuccessful status;
+`set +o pipefail` restores the default, and all-success pipelines still use the
+last command. Signals map to `128 + signal`. Backend-specific native codes remain
+available through job inspection once unified supervision exists, even when the
+language exposes a normalized status.
 
 ## 18. Configuration and startup
 
@@ -828,8 +837,8 @@ contracts in section 18. The same entrypoint accepts `-c SOURCE`, bounded stdin,
 or one native script path. Opt-in `--profile FILE`/`ASH_PROFILE` startup uses
 the same dialect and input ceiling, while `--no-profile` remains the recovery
 route. Every source parses the current subset and executes `pwd`, `echo`,
-`cd`, expanded `export`/`unset`, portable `ls`, bounded raw-byte `cat`, bounded
-text `grep`, and native host executables against one native `ShellState`, with
+`cd`, expanded `export`/`unset`, `set` pipefail control, portable `ls`, bounded
+raw-byte `cat`, bounded text `grep`, and native host executables against one native `ShellState`, with
 source-spanned human diagnostics and conventional status propagation. Named
 `$NAME`/`${NAME}` parameters and `$?` expand in a distinct, quote-aware stage
 with native-string preservation and the fixed field contract in section 7.1.
@@ -840,22 +849,23 @@ native provider and the option contracts in section 10. Native programs resolve
 from the persistent environment, launch through the owned `ash-platform`
 process boundary with exact argv/cwd/environment, and use the bounded capture
 contract in section 11. A same-line native-only pipeline connects two to 32
-fully preflighted stages with direct OS pipes and returns the final stage's
-status. A simple native command and the first pipeline stage still receive null
-stdin, so foreground terminal programs and Ctrl+C job-tree delivery remain H4
+fully preflighted stages with direct OS pipes. Status defaults to the final
+stage; `set -o pipefail` selects the rightmost unsuccessful stage and
+`set +o pipefail` restores the default. A simple native command and the first
+pipeline stage still receive null stdin, so foreground terminal programs and Ctrl+C job-tree delivery remain H4
 rather than being claimed by this REPL checkpoint. The `human-shell` feature is
 enabled for the normal binary and can be disabled for a minimal machine-only
-build. Broader expansion, terminal streaming, redirections, `pipefail`, unified
+build. Broader expansion, terminal streaming, redirections, unified
 pipeline supervision, mutations, portable/WSL pipeline stages, job control, and
 WSL launch remain for later increments.
 
 ### H2: streaming execution
 
 - generalized stdio endpoints and validated direct OS pipes are implemented;
-- native-only foreground pipeline lowering and final-stage status are
-  implemented;
+- native-only foreground pipeline lowering, final-stage status, and configurable
+  rightmost-failure `pipefail` are implemented;
 - ordered redirections and portable/WSL streaming adapters remain open;
-- unified multi-process supervision and `pipefail` remain open.
+- unified multi-process supervision remains open.
 
 Current checkpoint: the shared platform process boundary requires explicit
 selection for every standard stream. Existing machine and single-command shell
@@ -865,9 +875,10 @@ acyclic native process graphs directly through OS pipes, with consumers spawned
 first and parent copies closed before return. The shell now lowers same-line,
 two-to-32-stage native-only pipelines after complete preflight. Three 8 MiB
 regressions lock parent-facing, child-to-child, and shell-level exact bytes, EOF,
-backpressure, deterministic stderr order, and cross-platform completion. Unified
-shell supervision, portable/WSL stages, file redirection, descriptor ordering,
-and `pipefail` remain open.
+backpressure, deterministic stderr order, and cross-platform completion. The
+persistent `set -o pipefail`/`set +o pipefail` policy is applied to the ordered exit vector after
+all members complete. Unified shell supervision, portable/WSL stages, file
+redirection, and descriptor ordering remain open.
 
 ### H3: mutations and command language
 

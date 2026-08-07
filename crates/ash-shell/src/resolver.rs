@@ -137,6 +137,7 @@ pub enum StatefulBuiltin {
     Cd,
     Export,
     Unset,
+    Set,
     Exit,
     Alias,
     Jobs,
@@ -151,6 +152,7 @@ impl StatefulBuiltin {
             Self::Cd => "cd",
             Self::Export => "export",
             Self::Unset => "unset",
+            Self::Set => "set",
             Self::Exit => "exit",
             Self::Alias => "alias",
             Self::Jobs => "jobs",
@@ -324,6 +326,7 @@ fn stateful_builtin(command: &str) -> Option<StatefulBuiltin> {
         "cd" => Some(StatefulBuiltin::Cd),
         "export" => Some(StatefulBuiltin::Export),
         "unset" => Some(StatefulBuiltin::Unset),
+        "set" => Some(StatefulBuiltin::Set),
         "exit" => Some(StatefulBuiltin::Exit),
         "alias" => Some(StatefulBuiltin::Alias),
         "jobs" => Some(StatefulBuiltin::Jobs),
@@ -395,6 +398,10 @@ mod tests {
         assert_eq!(
             resolver.resolve("cd"),
             Ok(ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Cd))
+        );
+        assert_eq!(
+            resolver.resolve("set"),
+            Ok(ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Set))
         );
         assert!(matches!(
             resolver.resolve("pwd"),

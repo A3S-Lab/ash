@@ -55,9 +55,9 @@ The current source checkpoint has completed H0 and implemented H1. The
 independent `a3s-ash-shell` crate now owns source-spanned parsing, persistent
 state, deterministic command resolution, a cross-platform line editor, private
 file history, and a sequential executor for `pwd`, `echo`, `cd`, expanded
-`export`/`unset` environment updates, `exit`, portable `ls`, bounded raw-byte
-`cat`, bounded text `grep`, named and last-status parameter expansion, and
-native host executables. Parameter nodes retain exact quote and source-span
+`export`/`unset` environment updates, `set` pipefail control, `exit`, portable
+`ls`, bounded raw-byte `cat`, bounded text `grep`, named and last-status
+parameter expansion, and native host executables. Parameter nodes retain exact quote and source-span
 metadata; a separate native-string expansion stage performs the documented
 fixed field splitting before resolution. Shared provider-neutral semantic
 services live below the ASH/1 adapters in `a3s-ash-ops`; the portable commands
@@ -75,11 +75,13 @@ the shared platform boundary plus the first shell pipeline lowering. A
 same-line `|` connects two to 32 native host stages after expansion and complete
 resolution preflight. The first stage receives null stdin, intermediate stdout
 travels directly through OS pipes, and final stdout plus every stage's stderr
-share the bounded capture allowance. Stderr is appended in stage order and the
-final stage selects status. Parent-facing, child-to-child, and three-process
-8 MiB regressions lock backpressure, exact bytes, EOF, and handle closure;
+share the bounded capture allowance. Stderr is appended in stage order; status
+defaults to the final stage, while persistent `set -o pipefail` selects the
+rightmost unsuccessful stage and `set +o pipefail` restores the default.
+Parent-facing, child-to-child, and three-process 8 MiB regressions lock
+backpressure, exact bytes, EOF, and handle closure;
 incomplete or cyclic graphs fail before spawn. Unified supervision, visible
-terminal streaming, redirections, `pipefail`, portable/WSL pipeline stages,
+terminal streaming, redirections, portable/WSL pipeline stages,
 broader expansion, foreground interactive programs and jobs, mutations, and
 WSL execution remain staged work.
 

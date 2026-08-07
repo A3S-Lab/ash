@@ -111,6 +111,14 @@ fn main() {
             output.flush().expect("flush stdout");
             return;
         }
+        Some("--exit") => {
+            let code = arguments
+                .get(1)
+                .expect("exit status")
+                .parse::<i32>()
+                .expect("numeric exit status");
+            process::exit(code);
+        }
         _ => {}
     }
     let cwd = env::current_dir().expect("current directory");
@@ -739,6 +747,18 @@ fn shell_command_launches_native_argv_with_persistent_cwd_and_environment() {
     assert!(pipeline.status.success(), "stderr={:?}", pipeline.stderr);
     assert_eq!(pipeline.stdout, b"pipeline-data\n");
     assert!(pipeline.stderr.is_empty());
+
+    let pipefail_source = format!(
+        "export PATH=bin; {executable} --exit 9 | {executable} --exit 7 | {executable} --copy; echo $?; set -o pipefail; {executable} --exit 9 | {executable} --exit 7 | {executable} --copy; echo $?; set +o pipefail; {executable} --exit 9 | {executable} --exit 7 | {executable} --copy; echo $?"
+    );
+    let pipefail = run_in(
+        &directory,
+        &["shell", "--no-profile", "-c", &pipefail_source],
+        b"",
+    );
+    assert!(pipefail.status.success(), "stderr={:?}", pipefail.stderr);
+    assert_eq!(pipefail.stdout, b"0\n7\n0\n");
+    assert!(pipefail.stderr.is_empty());
 }
 
 #[cfg(feature = "human-shell")]

@@ -28,10 +28,10 @@ The optional human frontend has reached an interactive H1 checkpoint with a
 feature-gated `ash shell` route. A terminal invocation opens a line-edited REPL
 with a configurable prompt, private persistent history, opt-in startup Profile,
 and `exit [STATUS]`. The same persistent state executes sequential `pwd`,
-`echo`, `cd`, `export`, `unset`, portable `ls`, `cat`, and `grep`, plus native
-host executables with direct argument vectors. Inline source, native script
-files, and bounded stdin remain available without changing the machine
-contracts of `ash run` and `ash rpc`. H2 has begun below the language surface
+`echo`, `cd`, `export`, `unset`, `set` pipefail control, portable `ls`, `cat`,
+and `grep`, plus native host executables with direct argument vectors. Inline
+source, native script files, and bounded stdin remain available without changing
+the machine contracts of `ash run` and `ash rpc`. H2 has begun below the language surface
 with explicit process-stdio modes and validated native OS pipe graphs. Its first
 language slice accepts a same-line `|` between two to 32 native host stages,
 preflights every stage before spawn, and connects them through direct OS pipes.
@@ -50,7 +50,7 @@ remaining bounded capture allowance.
 | Retained evidence    | `/ # ? - \| >`                        | Byte and line slices, search, release, ordered table projection, and capability-gated materialization                                                                  |
 | Model context        | ASON, `×N`, `×N#K`, `⋯N`              | Columnar records, path dictionaries, explicit reductions, stable merge, and references back to the full source                                                         |
 | Trust and delivery   | capabilities, permits, signed updates | Least-privilege negotiation, session/action/policy/expiry-bound one-time permits, replay rejection, transactional activation, recovery, rollback, SBOM, and provenance |
-| Human shell          | `ash shell`                           | H1 REPL lifecycle and commands plus H2 same-line, native-only foreground pipelines over direct OS pipes                                                            |
+| Human shell          | `ash shell`                           | H1 REPL lifecycle and commands plus H2 native-only foreground pipelines with configurable `pipefail`                                                               |
 
 The [complete capability map](https://a3s-lab.github.io/ash/guide/capabilities.html)
 documents guarantees, evidence, and deliberate non-goals for the full surface.
@@ -131,6 +131,12 @@ and unsetting a missing name succeeds. Quote values that may contain field
 separators, for example `export COPY="$SOURCE"`. Listing and multiple names
 remain explicit non-features in this checkpoint.
 
+`set -o pipefail` enables rightmost-failure pipeline status for the persistent
+shell state, while `set +o pipefail` restores the default final-stage policy.
+Other `set` forms remain explicit errors. A Profile can select the policy before
+the main source runs; using `set` as a pipeline stage is rejected before spawn
+and cannot mutate parent state.
+
 `$NAME`, `${NAME}`, and `$?` expand immediately before each command resolves.
 Single quotes and escaped dollars remain literal; double quotes preserve one
 field, while unquoted values split on fixed ASCII space, tab, and LF separators.
@@ -150,14 +156,16 @@ A same-line `|` forms a foreground pipeline of two to 32 native host commands.
 Every stage is expanded, UTF-8 checked, resolved, and confirmed native before
 any child starts. Intermediate stdout travels directly through OS pipes; only
 final stdout is returned, while stderr is captured concurrently and appended in
-stage order. The pipeline status is the final stage's status. Stateful and
-portable commands, aliases, functions, and WSL stages fail explicitly before
-spawn because their streaming adapters do not exist yet.
+stage order. Pipeline status defaults to the final stage. With
+`set -o pipefail`, it becomes the rightmost unsuccessful stage, including
+conventional `128 + signal` mapping; an all-success pipeline still uses its
+final stage. Stateful and portable commands, aliases, functions, and WSL stages
+fail explicitly before spawn because their streaming adapters do not exist yet.
 
-User-visible terminal streaming, redirections, `pipefail`, unified pipeline job
-supervision, foreground interactive programs and job control, broader
-expansion, mutations, portable/WSL pipeline adapters, and WSL execution are not
-implemented yet. A minimal machine-only binary can be built with
+User-visible terminal streaming, redirections, unified pipeline job supervision,
+foreground interactive programs and job control, broader expansion, mutations,
+portable/WSL pipeline adapters, and WSL execution are not implemented yet. A
+minimal machine-only binary can be built with
 `--no-default-features`.
 
 ## First typed request
@@ -217,7 +225,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **283 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **284 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, and signed updates.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB
   retained capture crossing the 4 MiB memory ceiling and fetching only its final

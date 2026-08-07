@@ -1,5 +1,6 @@
 # command	expected resolution
 cd	builtin:cd
+set	builtin:set
 ll	alias:ll:ls -la
 deploy	function:deploy
 cat	portable:cat

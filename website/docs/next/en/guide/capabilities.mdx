@@ -108,7 +108,7 @@ ARM64, with checksums, SBOMs, and provenance.
 
 ## Evidence behind the claims
 
-- 283 Rust workspace tests cover typed schemas, RPC, operations, store,
+- 284 Rust workspace tests cover typed schemas, RPC, operations, store,
   transactions, recovery, cancellation, updates, and deterministic scheduling.
 - The schema-14 runtime harness contains 22 scenarios across worker matrices,
   including an 8 MiB spill/fetch proof over the 4 MiB memory ceiling.
@@ -133,8 +133,8 @@ typed contract portable and auditable.
 The separate, feature-gated `ash shell` H1 checkpoint adds a line-edited REPL,
 configurable prompt, safety-checked persistent history, opt-in Profile startup,
 and `exit`, and can execute sequential `pwd`, `echo`, `cd`, expanded
-`export`/`unset`, portable `ls`, bounded raw-byte `cat`, bounded text `grep`, and
-direct-argv native host commands from terminal, inline source, or bounded
+`export`/`unset`, `set` pipefail control, portable `ls`, bounded raw-byte `cat`,
+bounded text `grep`, and direct-argv native host commands from terminal, inline source, or bounded
 stdin/native script files. Source-spanned `$NAME`, `${NAME}`, and `$?` nodes
 expand in a quote-aware native-string stage with fixed unquoted field splitting
 before resolution. Stateful and portable commands use ordinary user authority,
@@ -150,10 +150,12 @@ the first shell pipeline lowering. A same-line `|` connects two to 32 native
 host stages only after every stage expands and resolves successfully. The first
 stage receives null stdin, intermediate stdout flows through direct OS pipes,
 and final stdout plus every stage's stderr share the bounded capture allowance.
-Stderr is appended in stage order and the final stage selects status.
+Stderr is appended in stage order. Status defaults to the final stage;
+`set -o pipefail` selects the rightmost failure and `set +o pipefail` restores
+the default.
 Parent-facing, direct child-to-child, and three-process shell 8 MiB regressions
 lock backpressure, exact bytes, EOF closure, and handle exposure across
-platforms. Unified supervision, visible terminal streaming, redirections,
-`pipefail`, and portable/WSL stages remain later slices.
+platforms. Unified supervision, visible terminal streaming, redirections, and
+portable/WSL stages remain later slices.
 
 For Agent adoption, continue with [Coding Agent integration](/guide/coding-agents).
