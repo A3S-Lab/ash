@@ -108,7 +108,7 @@ ARM64, with checksums, SBOMs, and provenance.
 
 ## Evidence behind the claims
 
-- 224 Rust workspace tests cover typed schemas, RPC, operations, store,
+- 231 Rust workspace tests cover typed schemas, RPC, operations, store,
   transactions, recovery, cancellation, updates, and deterministic scheduling.
 - The schema-14 runtime harness contains 22 scenarios across worker matrices,
   including an 8 MiB spill/fetch proof over the 4 MiB memory ceiling.
@@ -129,5 +129,9 @@ a remote executor, or a universal process sandbox. It does not provide an
 interactive terminal, shell-language evaluation, overwrite, recursive directory
 mutation, or runtime value piping between batch nodes. These boundaries keep the
 typed contract portable and auditable.
+
+The separate, feature-gated `ash shell` H1 checkpoint can execute sequential
+`pwd`, `echo`, and `cd` commands. It is a human frontend, not a free-form ASH/1
+operation, and does not change any machine capability or confinement claim.
 
 For Agent adoption, continue with [Coding Agent integration](/guide/coding-agents).

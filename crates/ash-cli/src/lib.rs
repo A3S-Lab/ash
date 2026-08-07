@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Embeddable entrypoints for the ash machine shell.
+//! Embeddable machine entrypoints plus the feature-gated human-shell route.
 
 mod ason_command;
 mod cli_error;
@@ -8,6 +8,8 @@ mod execution;
 mod rpc;
 mod run_command;
 mod self_command;
+#[cfg(feature = "human-shell")]
+mod shell_command;
 
 use std::process::ExitCode;
 
@@ -18,15 +20,21 @@ pub use cli_error::CliError;
 pub use execution::ExecutionSession;
 
 /// Runs the command selected by the process argument vector.
-pub async fn run_cli() -> Result<(), CliError> {
+pub async fn run_cli() -> Result<ExitCode, CliError> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     match arguments.as_slice() {
-        [command] if command == "--version" || command == "version" => version().await,
-        [command] if command == "--build-info" => build_info().await,
-        [command] if command == "ason" => ason_command::run().await,
-        [command] if command == "run" => run_command::run().await,
-        [command] if command == "rpc" => rpc::run().await,
-        [command, tail @ ..] if command == "self" => self_command::run(tail).await,
+        [command] if command == "--version" || command == "version" => {
+            version().await.map(|()| ExitCode::SUCCESS)
+        }
+        [command] if command == "--build-info" => build_info().await.map(|()| ExitCode::SUCCESS),
+        [command] if command == "ason" => ason_command::run().await.map(|()| ExitCode::SUCCESS),
+        [command] if command == "run" => run_command::run().await.map(|()| ExitCode::SUCCESS),
+        [command] if command == "rpc" => rpc::run().await.map(|()| ExitCode::SUCCESS),
+        [command, tail @ ..] if command == "self" => {
+            self_command::run(tail).await.map(|()| ExitCode::SUCCESS)
+        }
+        #[cfg(feature = "human-shell")]
+        [command, tail @ ..] if command == "shell" => shell_command::run(tail).await,
         _ => Err(CliError::Usage),
     }
 }
@@ -111,7 +119,7 @@ async fn version() -> Result<(), CliError> {
 /// Converts the CLI result into the stable process exit contract.
 pub async fn entrypoint() -> ExitCode {
     match run_cli().await {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(exit_code) => exit_code,
         Err(error) => {
             error.emit().await;
             ExitCode::from(error.exit_code())

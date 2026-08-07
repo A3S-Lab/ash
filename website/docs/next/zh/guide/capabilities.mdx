@@ -90,7 +90,7 @@ Windows 的 x86-64 和 ARM64，并生成校验和、SBOM 与来源证明。
 
 ## 支撑这些描述的证据
 
-- 224 个 Rust 工作区测试覆盖类型化 Schema、RPC、操作、存储、事务、恢复、取消、
+- 231 个 Rust 工作区测试覆盖类型化 Schema、RPC、操作、存储、事务、恢复、取消、
   更新与确定性调度。
 - schema-14 运行时 Harness 包含 22 个场景，并在不同 Worker 配置下验证 8 MiB 输出
   跨越 4 MiB 内存上限后的落盘与区间取回。
@@ -108,5 +108,8 @@ Windows 的 x86-64 和 ARM64，并生成校验和、SBOM 与来源证明。
 ASH/1 不是人类 REPL、POSIX Shell 兼容层、内嵌模型、远程执行器或通用进程沙箱。
 它不提供交互式终端、Shell 语言求值、覆盖写入、递归目录修改，也不在 Batch 节点间
 传递运行时值。这些边界让类型化契约保持可移植、可审计。
+
+独立且受 feature 控制的 `ash shell` H1 检查点可以顺序执行 `pwd`、`echo` 与 `cd`。
+它是人类前端，不是自由形式的 ASH/1 操作，也不会改变任何机器能力或约束声明。
 
 要让 Agent 采用这套能力，请继续阅读 [Coding Agent 接入](/guide/coding-agents)。

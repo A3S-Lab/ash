@@ -51,10 +51,15 @@ The human shell:
 The detailed accepted contract is defined in
 [`../portable-human-shell.md`](../portable-human-shell.md).
 
-The current source checkpoint has started H0 with the independent
-`a3s-ash-shell` crate, source-spanned simple-command parsing, persistent state
-types, deterministic command classification, and locked parser/resolution
-fixtures. It does not yet expose `ash shell` or execute human-shell commands.
+The current source checkpoint has completed H0 and started H1. The independent
+`a3s-ash-shell` crate now owns source-spanned parsing, persistent state,
+deterministic command resolution, and a sequential executor for `pwd`, `echo`,
+and `cd`. Shared provider-neutral semantic services live below the ASH/1
+adapters in `a3s-ash-ops` and remain available to later portable commands. A
+feature-gated `ash shell` route accepts `-c SOURCE` or a bounded stdin script
+without changing the machine diagnostics of `ash run` or `ash rpc`; interactive
+input, external process execution, and the remaining portable commands are
+still staged work.
 
 ## Rejected alternatives
 
