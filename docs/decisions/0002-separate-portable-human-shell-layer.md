@@ -71,17 +71,21 @@ native script path. Startup Profiles are explicit through `--profile FILE` or
 `ASH_PROFILE`, with `--no-profile` as the deterministic recovery path. These
 human features do not change the machine diagnostics of `ash run` or `ash rpc`.
 H2 now includes explicit per-stream modes and validated native OS pipe graphs in
-the shared platform boundary plus native/portable pipeline lowering. A same-line
-`|` connects two to 32 native host stages or implemented portable `pwd`,
-`echo`, `ls`, `cat`, and `grep` stages after expansion and complete resolution,
+the shared platform boundary plus native/portable/stateful pipeline lowering. A
+same-line `|` connects two to 32 native host stages, implemented portable `pwd`,
+`echo`, `ls`, `cat`, and `grep` stages, or implemented stateful `cd`, `export`,
+`unset`, `set`, and `exit` stages after expansion and complete resolution,
 argument, regular-expression, and redirection preflight. Native-to-native stdout
 travels directly through OS pipes. Boundaries involving a portable task use only
 explicitly retained asynchronous parent ends and remain concurrent, bounded,
 and backpressured; `cat -` and `grep PATTERN -` consume the incoming stream.
 Final stdout and native stderr use bounded named captures. Status defaults to
 the final stage, while persistent `set -o pipefail` selects the rightmost
-unsuccessful native or portable stage and `set +o pipefail` restores the
-default. Native commands also accept source-spanned `<`, `>`, `>>`, `2>`,
+unsuccessful native, portable, or stateful stage and `set +o pipefail` restores
+the default. Stateful stages run concurrently on independent state clones,
+close non-consumed input and empty output ends, cannot mutate the parent shell,
+and let pipeline `exit` contribute a status without stopping the parent source.
+Native commands also accept source-spanned `<`, `>`, `>>`, `2>`,
 `2>>`, `2>&1`, and `1>&2`.
 Targets expand to exactly one field, relative paths resolve from persistent cwd,
 descriptor assignments apply left to right, files attach directly to child
@@ -95,9 +99,9 @@ observe native broken-pipe behavior, and descriptor copies that still name the
 pipe remain connected. A third graph entry classifies each end as child-owned,
 closed, or parent-owned and returns only explicitly declared readers and
 writers. Parent-facing, child-to-child, native, mixed, portable-only,
-closed-reader, and ordered-redirection regressions lock backpressure, exact
-bytes, EOF, handle closure, and descriptor sharing. Unified job supervision,
-visible terminal streaming, stateful-builtin and WSL pipeline adapters,
+stateful, closed-reader, and ordered-redirection regressions lock backpressure,
+exact bytes, EOF, handle closure, cloned-state isolation, and descriptor sharing.
+Unified job supervision, visible terminal streaming, WSL pipeline adapters,
 non-native redirection adapters, broader expansion, foreground interactive
 programs and jobs, mutations, and WSL execution remain staged work.
 

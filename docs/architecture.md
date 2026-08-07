@@ -22,7 +22,8 @@ process trees, bounded capture, and native status propagation.
 
 H2 now includes explicit `ProcessStdio` modes, complete acyclic native
 pipe-graph validation, consumer-first spawning, and same-line pipelines of two
-to 32 native or portable stages. Native-to-native edges remain direct OS pipes;
+to 32 native, portable, or implemented stateful-builtin stages.
+Native-to-native edges remain direct OS pipes;
 unredirected final stdout plus stage-ordered native stderr share the bounded
 capture allowance, and status defaults to the final stage or selects the
 rightmost unsuccessful stage when persistent `pipefail` is enabled. The fifth
@@ -38,11 +39,16 @@ parent-owned pipe ends and a graph wrapper that returns only declared async
 readers and writers. Portable `pwd`, `echo`, `ls`, `cat`, and `grep` now run as
 concurrent bounded tasks on those ends; `cat -` and `grep PATTERN -` consume an
 incoming stream, mixed native/portable pipelines preserve backpressure, and a
-final portable stage is captured concurrently. Eight-megabyte parent-facing,
+final portable stage is captured concurrently. The eighth checkpoint runs
+`cd`, `export`, `unset`, `set`, and `exit` against independent state clones on
+the same retained ends. These stages close incoming readers, emit EOF
+downstream, cannot mutate the parent shell, and contribute ordinary ordered
+statuses without allowing pipeline `exit` to stop the parent source.
+Eight-megabyte parent-facing,
 child-to-child, native, mixed, and closed-reader regressions lock exact bytes,
 EOF, backpressure, and completion; ordered-output regressions lock file,
 capture, and surviving-pipe sharing. Unified job supervision, user-visible
-terminal streaming, stateful-builtin and WSL pipeline adapters, non-native
+terminal streaming, WSL pipeline adapters, non-native
 redirection adapters, foreground interactive programs and job control, broader
 expansion and mutations, and WSL launch remain open.
 Release-key and platform-signing credential provisioning, the first published release, enough accumulated fuzz duration to claim a soak gate, captured real multi-model Coding Agent runs, medium/large task families, and published hardware-labelled runtime measurements remain open.
@@ -432,19 +438,24 @@ reader with a closed writer and broken-pipe behavior for a real writer with a
 closed reader. A writer may attach both stdout and stderr to one pipe for
 descriptor-duplication lowering.
 
-The shell accepts same-line `|` syntax for two to 32 native or implemented
-portable stages after complete expansion, resolution, argument, regular
-expression, and redirection preflight. Native-to-native edges remain direct OS
-pipes. Boundaries involving portable `pwd`, `echo`, `ls`, `cat`, or `grep`
-retain the required async parent ends and poll their bounded task futures
-concurrently with native capture and waits. Only `cat -` and
-`grep PATTERN -` consume an incoming pipe; a non-consuming portable stage closes
-that reader so the upstream producer observes native broken-pipe behavior. A
-final portable stage writes to a parent-to-parent pipe whose reader joins the
-same aggregate 128 MiB capture. Native stderr is concatenated in stage order.
+The shell accepts same-line `|` syntax for two to 32 native, implemented
+portable, or implemented stateful-builtin stages after complete expansion,
+resolution, argument, regular-expression, and redirection preflight.
+Native-to-native edges remain direct OS pipes. Boundaries involving portable
+`pwd`, `echo`, `ls`, `cat`, or `grep` retain the required async parent ends and
+poll their bounded task futures concurrently with native capture and waits. Only
+`cat -` and `grep PATTERN -` consume an incoming pipe; a non-consuming portable
+stage closes that reader so the upstream producer observes native broken-pipe
+behavior. A
+stateful `cd`, `export`, `unset`, `set`, or `exit` stage also closes its reader,
+runs on an independent state clone, and closes its empty output when complete;
+the parent shell is unchanged and downstream readers receive EOF. Pipeline
+`exit` supplies a status without ending the parent source. A final in-process
+stage writes to a parent-to-parent pipe whose reader joins the same aggregate
+128 MiB capture. Native stderr is concatenated in stage order.
 Status defaults to the final stage; persistent `set -o pipefail` instead selects
-the rightmost unsuccessful native or portable exit, while `set +o pipefail`
-restores the default.
+the rightmost unsuccessful native, portable, or stateful exit, while
+`set +o pipefail` restores the default.
 
 Native shell commands lower `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`
 from left to right after assigning default capture or pipeline endpoints. A file
@@ -461,7 +472,7 @@ final stdout nor stderr still references that pipe, so
 internal producer endpoint delivers EOF downstream; replacing a consumer stdin
 exposes broken-pipe behavior upstream. Applying a redirection to a builtin,
 portable command, or WSL stage still fails before file opens or spawn. Job-wide
-supervision, stateful-builtin and WSL pipeline adapters, and non-native
+supervision, WSL pipeline adapters, and non-native
 redirection adapters remain later layers.
 
 Inputs include:

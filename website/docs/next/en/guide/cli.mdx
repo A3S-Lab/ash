@@ -96,8 +96,8 @@ missing name succeeds. Quote values that can contain separators, as in
 
 `set -o pipefail` persistently enables rightmost-failure pipeline status;
 `set +o pipefail` restores the default final-stage policy. Any other `set` form
-returns status 2. A startup Profile can select the policy, while a `set` pipeline
-stage is rejected before spawn and cannot mutate parent state.
+returns status 2. A startup Profile can select the policy. In a pipeline, `set`
+uses that stage's state clone and cannot mutate the parent policy.
 
 `$NAME`, `${NAME}`, and `$?` expand immediately before each command resolves.
 Shell variables precede host-aware environment lookup and undefined names are
@@ -127,18 +127,23 @@ return status 1 with a redirection diagnostic. Stateful, portable, and WSL
 commands reject redirections before execution or filesystem side effects.
 
 A same-line `|` forms a pipeline of two to 32 stages. Each may be a native host
-command or portable `pwd`, `echo`, `ls`, `cat`, or `grep`; stateful commands,
-aliases, functions, and WSL stages fail during complete preflight. Native pairs
-remain connected by direct OS pipes. Boundaries involving a portable stage keep
-only explicit asynchronous parent ends and poll the bounded portable task
+command, portable `pwd`, `echo`, `ls`, `cat`, or `grep`, or implemented stateful
+`cd`, `export`, `unset`, `set`, or `exit`; aliases, functions, unimplemented
+stateful commands, and WSL stages fail during complete preflight. Native pairs
+remain connected by direct OS pipes. Boundaries involving an in-process stage
+keep only explicit asynchronous parent ends and poll the bounded task
 concurrently with native capture and waits, preserving OS backpressure without
 materializing native or portable `cat`/`grep` streams in full. Only `cat -` and
 `grep PATTERN -` consume incoming stdin; other portable forms close that reader,
-so an upstream producer can observe broken-pipe failure. Final portable output,
+so an upstream producer can observe broken-pipe failure. Final in-process output,
 final native output, and captured native stderr share the remaining 128 MiB
 allowance. Status defaults to the final stage. With `set -o pipefail`, the
-rightmost unsuccessful native or portable stage is selected, including
-`128 + signal`; an all-success pipeline still uses its final stage.
+rightmost unsuccessful native, portable, or stateful stage is selected,
+including `128 + signal`; an all-success pipeline still uses its final stage.
+Stateful stages never consume stdin, execute against independent `ShellState`
+clones, and close their empty stdout on completion. The parent cwd, variables,
+environment, options, and exit request remain unchanged; downstream readers see
+EOF, and pipeline `exit` contributes only an ordinary stage status.
 Any native stage may redirect stdin, stdout, or stderr, with descriptor
 duplication still applied in source order. If a producer no longer references
 an internal pipe, ash closes its parent writer and the downstream reader sees
@@ -146,12 +151,12 @@ EOF. If a consumer replaces its pipe stdin, ash closes the parent reader and the
 upstream writer sees native broken-pipe behavior. Final-stage or `pipefail`
 selection then determines the visible status. A descriptor copy that still
 references the pipe remains connected even if the original descriptor is later
-redirected. Portable-stage redirections remain unsupported and fail before
+redirected. Non-native stage redirections remain unsupported and fail before
 runner or file side effects.
 
 Broader expansion (including command substitution and globbing), mutations,
-terminal streaming, unified job supervision, stateful-builtin and WSL pipeline
-adapters, non-native redirection adapters, foreground interactive programs and
+terminal streaming, unified job supervision, WSL pipeline adapters, non-native
+redirection adapters, foreground interactive programs and
 jobs, and WSL execution are not implemented yet. The regular binary enables the
 `human-shell`
 feature;
