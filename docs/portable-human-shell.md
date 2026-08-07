@@ -18,10 +18,10 @@ persistent state types, deterministic command classification, locked parser and
 resolution fixtures, and provider-neutral raw read/list/search semantic
 services. Existing ASH/1 adapters reuse those services while retaining permit,
 deadline, budget, projection, retention, and ASON ownership. H1 has started with
-a feature-gated `ash shell -c SOURCE` and bounded-stdin route plus sequential
-`pwd`, `echo`, and `cd` execution. Interactive input, external execution, the
-remaining portable commands, expansion, pipelines, jobs, and WSL launch remain
-unimplemented.
+a feature-gated `ash shell` route for inline plus bounded stdin and native
+script-file sources, with sequential `pwd`, `echo`, and `cd` execution.
+Interactive input, external execution, the remaining portable commands,
+expansion, pipelines, jobs, and WSL launch remain unimplemented.
 
 ## 1. Executive decision
 
@@ -649,13 +649,14 @@ builtin adapters.
 - support script files without pipelines or background jobs;
 - verify Linux, macOS, and Windows behavior.
 
-Current checkpoint: `ash shell -c SOURCE` and `ash shell < script.ash` parse the
-H0 syntax subset, execute sequential `pwd`, `echo`, and `cd` commands against
-one native `ShellState`, emit source-spanned human diagnostics, and return the
-last command status. The `human-shell` feature is enabled for the normal binary
-and can be disabled for a minimal machine-only build. Interactive input,
-profiles, native process launch, script-file arguments, and `ls`/`cat`/`grep`
-remain for later H1 increments.
+Current checkpoint: `ash shell -c SOURCE`, `ash shell < script.ash`, and
+`ash shell script.ash` parse the H0 syntax subset, execute sequential `pwd`,
+`echo`, and `cd` commands against one native `ShellState`, emit source-spanned
+human diagnostics, and return the last command status. Stdin and file sources
+share a 1 MiB valid-UTF-8 ceiling, while file operands retain native path
+representation. The `human-shell` feature is enabled for the normal binary and
+can be disabled for a minimal machine-only build. Interactive input, profiles,
+native process launch, and `ls`/`cat`/`grep` remain for later H1 increments.
 
 ### H2: streaming execution
 

@@ -56,10 +56,10 @@ The current source checkpoint has completed H0 and started H1. The independent
 deterministic command resolution, and a sequential executor for `pwd`, `echo`,
 and `cd`. Shared provider-neutral semantic services live below the ASH/1
 adapters in `a3s-ash-ops` and remain available to later portable commands. A
-feature-gated `ash shell` route accepts `-c SOURCE` or a bounded stdin script
-without changing the machine diagnostics of `ash run` or `ash rpc`; interactive
-input, external process execution, and the remaining portable commands are
-still staged work.
+feature-gated `ash shell` route accepts `-c SOURCE`, a bounded stdin script, or
+a bounded native script-file path without changing the machine diagnostics of
+`ash run` or `ash rpc`; interactive input, external process execution, and the
+remaining portable commands are still staged work.
 
 ## Rejected alternatives
 

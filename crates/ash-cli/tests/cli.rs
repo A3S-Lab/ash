@@ -468,11 +468,34 @@ fn shell_command_executes_stateful_sequence_without_machine_framing() {
         format!("{}\nhello world\n{}\ndone", root.display(), child.display()).as_bytes()
     );
     assert!(output.stderr.is_empty());
+
+    fs::write(
+        directory.0.join("script.ash"),
+        b"cd .; echo from-file; cd child; pwd",
+    )
+    .expect("script file");
+    let file = run_in(&directory, &["shell", "--no-profile", "script.ash"], b"");
+    assert!(file.status.success(), "stderr={:?}", file.stderr);
+    assert_eq!(
+        file.stdout,
+        format!("from-file\n{}\n", child.display()).as_bytes()
+    );
+    assert!(file.stderr.is_empty());
+
+    fs::write(directory.0.join("-script.ash"), b"echo leading-dash").expect("leading-dash script");
+    let leading_dash = run_in(&directory, &["shell", "--", "-script.ash"], b"");
+    assert!(
+        leading_dash.status.success(),
+        "stderr={:?}",
+        leading_dash.stderr
+    );
+    assert_eq!(leading_dash.stdout, b"leading-dash\n");
+    assert!(leading_dash.stderr.is_empty());
 }
 
 #[cfg(feature = "human-shell")]
 #[test]
-fn shell_command_accepts_a_bounded_stdin_script() {
+fn shell_command_accepts_bounded_stdin_and_file_sources() {
     let output = run(&["shell"], b"echo from-stdin\n");
 
     assert!(output.status.success(), "stderr={:?}", output.stderr);
@@ -491,6 +514,45 @@ fn shell_command_accepts_a_bounded_stdin_script() {
         over_limit.stderr,
         b"ash: shell source exceeds the 1 MiB input ceiling\n"
     );
+
+    let directory = TestDirectory::new();
+    fs::write(directory.0.join("at-limit.ash"), vec![b'#'; 1024 * 1024]).expect("at-limit script");
+    let file_at_limit = run_in(&directory, &["shell", "at-limit.ash"], b"");
+    assert!(
+        file_at_limit.status.success(),
+        "stderr={:?}",
+        file_at_limit.stderr
+    );
+    assert!(file_at_limit.stdout.is_empty());
+    assert!(file_at_limit.stderr.is_empty());
+
+    fs::write(
+        directory.0.join("over-limit.ash"),
+        vec![b'#'; 1024 * 1024 + 1],
+    )
+    .expect("over-limit script");
+    let file_over_limit = run_in(&directory, &["shell", "over-limit.ash"], b"");
+    assert_eq!(file_over_limit.status.code(), Some(2));
+    assert!(file_over_limit.stdout.is_empty());
+    assert_eq!(
+        file_over_limit.stderr,
+        b"ash: shell source exceeds the 1 MiB input ceiling\n"
+    );
+
+    fs::write(directory.0.join("invalid.ash"), [0xff]).expect("invalid script");
+    let invalid = run_in(&directory, &["shell", "invalid.ash"], b"");
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(invalid.stdout.is_empty());
+    assert_eq!(invalid.stderr, b"ash: shell source must be valid UTF-8\n");
+
+    let missing = run_in(&directory, &["shell", "missing.ash"], b"");
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(missing.stdout.is_empty());
+    assert!(
+        missing
+            .stderr
+            .starts_with(b"ash: cannot open shell script: ")
+    );
 }
 
 #[cfg(feature = "human-shell")]
@@ -501,7 +563,7 @@ fn shell_usage_and_parse_failures_are_human_diagnostics() {
     assert!(usage.stdout.is_empty());
     assert_eq!(
         usage.stderr,
-        b"ash: usage: ash shell [--no-profile] [-c SOURCE]\n"
+        b"ash: usage: ash shell [--no-profile] [-c SOURCE | FILE]\n"
     );
 
     let parse = run(&["shell", "-c", "echo 'unterminated"], b"");
