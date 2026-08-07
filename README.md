@@ -26,8 +26,8 @@ becomes part of the contract.
 
 The optional human frontend has entered H1 with a feature-gated,
 non-interactive `ash shell` route. It currently executes sequential `pwd`,
-`echo`, and `cd` commands from `-c SOURCE` or bounded stdin while preserving the
-machine contracts of `ash run` and `ash rpc`.
+`echo`, and `cd` commands from `-c SOURCE`, a native script-file path, or bounded
+stdin while preserving the machine contracts of `ash run` and `ash rpc`.
 
 ## What ash covers
 
@@ -72,12 +72,17 @@ or inspect the [Skill source](./.agents/skills/use-ash/SKILL.md).
 
 ## First human command
 
-The current non-interactive H1 subset accepts source directly or through stdin:
+The current non-interactive H1 subset accepts source directly, from a native
+script-file path, or through stdin:
 
 ```sh
 ash shell -c 'pwd; echo hello; cd crates; pwd'
+ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ```
+
+Every file or stdin source is limited to 1 MiB of valid UTF-8. Use
+`ash shell -- ./-script.ash` when a file operand begins with `-`.
 
 Interactive prompts, profiles, external processes, and portable
 `ls`/`cat`/`grep` execution are not implemented yet. A minimal machine-only

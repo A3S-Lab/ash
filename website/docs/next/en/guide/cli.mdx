@@ -10,19 +10,19 @@ diagnostics use stable ASON, with no human help page, color, or progress bar.
 The separate, feature-gated `ash shell` route is explicitly human-facing and
 uses conventional bytes, diagnostics, and exit statuses instead of ASON.
 
-| Command                                        | Input                                | Output                                                         |
-| ---------------------------------------------- | ------------------------------------ | -------------------------------------------------------------- |
-| `ash --version`                                | None                                 | Stable version string                                          |
-| `ash --build-info`                             | None                                 | Version, target, protocol, ASON, commit, and trust fingerprint |
-| `ash ason`                                     | Bare ASON on stdin                   | Unique canonical ASON                                          |
-| `ash run`                                      | One typed request on stdin           | One final response                                             |
-| `ash rpc`                                      | Length-framed stdin/stdout           | Handshake and ordered response frames                          |
-| `ash shell [--no-profile] [-c SOURCE]`         | Source argument or bounded stdin     | Human command output and source-spanned diagnostics            |
-| `ash self status [--prefix PATH]`              | Installation prefix                  | Current/previous version and install state                     |
-| `ash self check --candidate FILE`              | Candidate binary                     | Health, version, and target                                    |
-| `ash self update [--prefix PATH] [--from DIR]` | Signed metadata or offline directory | Activation result                                              |
-| `ash self rollback [--prefix PATH]`            | Installation state                   | Rollback or scheduled result                                   |
-| `ash self recover [--prefix PATH]`             | Installation journal                 | Recovery result                                                |
+| Command                                        | Input                                 | Output                                                         |
+| ---------------------------------------------- | ------------------------------------- | -------------------------------------------------------------- |
+| `ash --version`                                | None                                  | Stable version string                                          |
+| `ash --build-info`                             | None                                  | Version, target, protocol, ASON, commit, and trust fingerprint |
+| `ash ason`                                     | Bare ASON on stdin                    | Unique canonical ASON                                          |
+| `ash run`                                      | One typed request on stdin            | One final response                                             |
+| `ash rpc`                                      | Length-framed stdin/stdout            | Handshake and ordered response frames                          |
+| `ash shell [--no-profile] [-c SOURCE \| FILE]` | Inline, native file, or bounded stdin | Human command output and source-spanned diagnostics            |
+| `ash self status [--prefix PATH]`              | Installation prefix                   | Current/previous version and install state                     |
+| `ash self check --candidate FILE`              | Candidate binary                      | Health, version, and target                                    |
+| `ash self update [--prefix PATH] [--from DIR]` | Signed metadata or offline directory  | Activation result                                              |
+| `ash self rollback [--prefix PATH]`            | Installation state                    | Rollback or scheduled result                                   |
+| `ash self recover [--prefix PATH]`             | Installation journal                  | Recovery result                                                |
 
 `ash self replace` is an internal Windows helper used by activation, not a normal
 Harness interface.
@@ -31,16 +31,19 @@ Harness interface.
 
 The current H1 checkpoint executes the H0 simple-command syntax sequentially
 against one persistent native state. It implements `pwd`, `echo` (with `-n`),
-and `cd`; source may come from `-c SOURCE` or at most 1 MiB of stdin:
+and `cd`; source may come from `-c SOURCE`, a native script-file path, or stdin:
 
 ```sh
 ash shell -c 'pwd; echo hello; cd crates; pwd'
+ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ```
 
-Interactive input, profiles, script-file arguments, external processes, and
-portable `ls`/`cat`/`grep` execution are not implemented yet. The regular binary
-enables the `human-shell` feature; `cargo build -p a3s-ash
+File and stdin sources must be valid UTF-8 and cannot exceed 1 MiB. Native file
+paths are not converted to UTF-8; use `ash shell -- ./-script.ash` for an
+operand beginning with `-`. Interactive input, profiles, external processes,
+and portable `ls`/`cat`/`grep` execution are not implemented yet. The regular
+binary enables the `human-shell` feature; `cargo build -p a3s-ash
 --no-default-features` keeps a minimal machine-only build.
 
 ## Error contract

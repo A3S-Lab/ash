@@ -9,36 +9,37 @@ ash 的主要 CLI 是机器接口：成功输出和错误诊断都使用稳定�
 颜色或进度条。独立且受 feature 控制的 `ash shell` 入口明确面向人类，使用普通字节、
 诊断与退出状态，而不是 ASON。
 
-| 命令                                           | 输入                 | 输出                                   |
-| ---------------------------------------------- | -------------------- | -------------------------------------- |
-| `ash --version`                                | 无                   | 稳定版本字符串                         |
-| `ash --build-info`                             | 无                   | 版本、目标、协议、ASON、提交与信任指纹 |
-| `ash ason`                                     | stdin 裸 ASON        | 唯一规范 ASON                          |
-| `ash run`                                      | stdin 单个类型化请求 | 单个最终响应                           |
-| `ash rpc`                                      | stdin/stdout 长度帧  | 握手与有序响应帧                       |
-| `ash shell [--no-profile] [-c SOURCE]`         | 源码参数或有界 stdin | 人类命令输出与带源码位置的诊断         |
-| `ash self status [--prefix PATH]`              | 安装前缀             | 当前/前一版本与安装状态                |
-| `ash self check --candidate FILE`              | 候选二进制           | 健康、版本与目标                       |
-| `ash self update [--prefix PATH] [--from DIR]` | 签名元数据或离线目录 | 激活结果                               |
-| `ash self rollback [--prefix PATH]`            | 安装状态             | 回滚或计划结果                         |
-| `ash self recover [--prefix PATH]`             | 安装日志             | 恢复结果                               |
+| 命令                                           | 输入                       | 输出                                   |
+| ---------------------------------------------- | -------------------------- | -------------------------------------- |
+| `ash --version`                                | 无                         | 稳定版本字符串                         |
+| `ash --build-info`                             | 无                         | 版本、目标、协议、ASON、提交与信任指纹 |
+| `ash ason`                                     | stdin 裸 ASON              | 唯一规范 ASON                          |
+| `ash run`                                      | stdin 单个类型化请求       | 单个最终响应                           |
+| `ash rpc`                                      | stdin/stdout 长度帧        | 握手与有序响应帧                       |
+| `ash shell [--no-profile] [-c SOURCE \| FILE]` | 内联、原生文件或有界 stdin | 人类命令输出与带源码位置的诊断         |
+| `ash self status [--prefix PATH]`              | 安装前缀                   | 当前/前一版本与安装状态                |
+| `ash self check --candidate FILE`              | 候选二进制                 | 健康、版本与目标                       |
+| `ash self update [--prefix PATH] [--from DIR]` | 签名元数据或离线目录       | 激活结果                               |
+| `ash self rollback [--prefix PATH]`            | 安装状态                   | 回滚或计划结果                         |
+| `ash self recover [--prefix PATH]`             | 安装日志                   | 恢复结果                               |
 
 `ash self replace` 是更新流程使用的内部 Windows 辅助入口，不是普通 Harness API。
 
 ## 人类 Shell 检查点
 
 当前 H1 检查点针对同一份持久原生状态，顺序执行 H0 的简单命令语法。已实现 `pwd`、
-`echo`（含 `-n`）和 `cd`；源码可以来自 `-c SOURCE`，也可以来自不超过 1 MiB 的
-stdin：
+`echo`（含 `-n`）和 `cd`；源码可以来自 `-c SOURCE`、原生脚本文件路径或 stdin：
 
 ```sh
 ash shell -c 'pwd; echo hello; cd crates; pwd'
+ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ```
 
-交互输入、Profile、脚本文件参数、外部进程以及可移植 `ls`/`cat`/`grep` 执行尚未
-实现。常规二进制启用 `human-shell` feature；`cargo build -p a3s-ash
---no-default-features` 保留最小机器专用构建。
+文件和 stdin 源码必须是有效 UTF-8，且不能超过 1 MiB；原生文件路径本身不会转换为
+UTF-8。以 `-` 开头的文件参数可写成 `ash shell -- ./-script.ash`。交互输入、Profile、
+外部进程以及可移植 `ls`/`cat`/`grep` 执行尚未实现。常规二进制启用 `human-shell`
+feature；`cargo build -p a3s-ash --no-default-features` 保留最小机器专用构建。
 
 ## 错误契约
 
