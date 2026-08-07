@@ -70,13 +70,18 @@ route opens a terminal REPL or accepts `-c SOURCE`, bounded stdin, or a bounded
 native script path. Startup Profiles are explicit through `--profile FILE` or
 `ASH_PROFILE`, with `--no-profile` as the deterministic recovery path. These
 human features do not change the machine diagnostics of `ash run` or `ash rpc`.
-H2 has begun below the language surface with explicit per-stream modes and
-validated native OS pipe graphs in the shared platform boundary. ASH/1 and the
-H1 shell map their existing stdin/capture behavior explicitly. Parent-facing and
-child-to-child 8 MiB regressions lock backpressure, exact bytes, EOF, and handle
-closure; incomplete or cyclic graphs fail before spawn. User-visible pipeline
-syntax and supervision, streaming stdio, broader expansion, foreground
-interactive programs and jobs, mutations, and WSL execution remain staged work.
+H2 now includes explicit per-stream modes and validated native OS pipe graphs in
+the shared platform boundary plus the first shell pipeline lowering. A
+same-line `|` connects two to 32 native host stages after expansion and complete
+resolution preflight. The first stage receives null stdin, intermediate stdout
+travels directly through OS pipes, and final stdout plus every stage's stderr
+share the bounded capture allowance. Stderr is appended in stage order and the
+final stage selects status. Parent-facing, child-to-child, and three-process
+8 MiB regressions lock backpressure, exact bytes, EOF, and handle closure;
+incomplete or cyclic graphs fail before spawn. Unified supervision, visible
+terminal streaming, redirections, `pipefail`, portable/WSL pipeline stages,
+broader expansion, foreground interactive programs and jobs, mutations, and
+WSL execution remain staged work.
 
 ## Rejected alternatives
 

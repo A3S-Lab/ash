@@ -25,9 +25,9 @@ fn parameter_ast_fixture_is_stable() {
 
 #[test]
 fn parser_diagnostic_fixture_is_stable() {
-    let source = include_str!("fixtures/parser/unsupported-pipeline.ash");
-    let expected = include_str!("fixtures/parser/unsupported-pipeline.diagnostic");
-    let diagnostic = parse(source).expect_err("pipeline is not in H0");
+    let source = include_str!("fixtures/parser/unsupported-redirection.ash");
+    let expected = include_str!("fixtures/parser/unsupported-redirection.diagnostic");
+    let diagnostic = parse(source).expect_err("redirection is not implemented");
     assert_eq!(render_diagnostic(&diagnostic), expected);
 }
 
@@ -74,45 +74,60 @@ fn render_script(script: &Script) -> String {
         script.span().end()
     )
     .expect("string write");
-    for command in script.commands() {
+    for pipeline in script.pipelines() {
         writeln!(
             output,
-            "command {}..{}",
-            command.span().start(),
-            command.span().end()
+            "pipeline {}..{}",
+            pipeline.span().start(),
+            pipeline.span().end()
         )
         .expect("string write");
-        for word in command.words() {
+        for (stage, command) in script.commands()[pipeline.command_range()]
+            .iter()
+            .enumerate()
+        {
             writeln!(
                 output,
-                "  word {}..{}",
-                word.span().start(),
-                word.span().end()
+                "  command {}..{}",
+                command.span().start(),
+                command.span().end()
             )
             .expect("string write");
-            for part in word.parts() {
-                if let Some(parameter) = part.parameter() {
-                    let (kind, name) = parameter_name(parameter);
-                    writeln!(
-                        output,
-                        "    parameter {} {}..{} {kind} \"{}\"",
-                        quote_name(part.quote()),
-                        part.span().start(),
-                        part.span().end(),
-                        name.escape_debug()
-                    )
-                    .expect("string write");
-                } else {
-                    writeln!(
-                        output,
-                        "    literal {} {}..{} \"{}\"",
-                        quote_name(part.quote()),
-                        part.span().start(),
-                        part.span().end(),
-                        part.value().escape_debug()
-                    )
-                    .expect("string write");
+            for word in command.words() {
+                writeln!(
+                    output,
+                    "    word {}..{}",
+                    word.span().start(),
+                    word.span().end()
+                )
+                .expect("string write");
+                for part in word.parts() {
+                    if let Some(parameter) = part.parameter() {
+                        let (kind, name) = parameter_name(parameter);
+                        writeln!(
+                            output,
+                            "      parameter {} {}..{} {kind} \"{}\"",
+                            quote_name(part.quote()),
+                            part.span().start(),
+                            part.span().end(),
+                            name.escape_debug()
+                        )
+                        .expect("string write");
+                    } else {
+                        writeln!(
+                            output,
+                            "      literal {} {}..{} \"{}\"",
+                            quote_name(part.quote()),
+                            part.span().start(),
+                            part.span().end(),
+                            part.value().escape_debug()
+                        )
+                        .expect("string write");
+                    }
                 }
+            }
+            if let Some(pipe) = pipeline.pipe_spans().get(stage) {
+                writeln!(output, "  pipe {}..{}", pipe.start(), pipe.end()).expect("string write");
             }
         }
     }

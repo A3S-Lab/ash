@@ -93,13 +93,30 @@ fn compile_shell_helper(directory: &TestDirectory) -> String {
     fs::write(
         &source,
         r#"
-use std::{env, process};
+use std::{env, io, io::Write, process};
 
 fn main() {
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    match arguments.first().map(String::as_str) {
+        Some("--emit") => {
+            let value = arguments.get(1).expect("emit value");
+            let mut output = io::stdout().lock();
+            writeln!(output, "{value}").expect("emit stdout");
+            return;
+        }
+        Some("--copy") => {
+            let mut input = io::stdin().lock();
+            let mut output = io::stdout().lock();
+            io::copy(&mut input, &mut output).expect("copy stdin");
+            output.flush().expect("flush stdout");
+            return;
+        }
+        _ => {}
+    }
     let cwd = env::current_dir().expect("current directory");
     println!("cwd={}", cwd.file_name().expect("directory name").to_string_lossy());
     println!("token={}", env::var("ASH_NATIVE_TOKEN").expect("environment"));
-    println!("arguments={}", env::args().skip(1).collect::<Vec<_>>().join("|"));
+    println!("arguments={}", arguments.join("|"));
     eprintln!("native-stderr");
     process::exit(23);
 }
@@ -711,6 +728,17 @@ fn shell_command_launches_native_argv_with_persistent_cwd_and_environment() {
         b"cwd=work\ntoken=alpha beta\narguments=prealpha|betapost|alpha beta\n23\n"
     );
     assert_eq!(expanded.stderr, b"native-stderr\n");
+
+    let pipeline_source =
+        format!("export PATH=bin; {executable} --emit pipeline-data | {executable} --copy");
+    let pipeline = run_in(
+        &directory,
+        &["shell", "--no-profile", "-c", &pipeline_source],
+        b"",
+    );
+    assert!(pipeline.status.success(), "stderr={:?}", pipeline.stderr);
+    assert_eq!(pipeline.stdout, b"pipeline-data\n");
+    assert!(pipeline.stderr.is_empty());
 }
 
 #[cfg(feature = "human-shell")]

@@ -30,11 +30,12 @@ Harness interface.
 ## Human shell checkpoint
 
 The current H1 checkpoint opens a cross-platform line-edited REPL when stdin is
-a terminal and executes the H0 simple-command syntax sequentially against one
-persistent native state. It implements `pwd`, `echo` (with `-n`), `cd`, expanded
-`export`/`unset`, `exit`, portable `ls`, raw-byte `cat`, text `grep`, named and
-last-status parameter expansion, and native host executables. Source may also
-come from `-c SOURCE`, a native script-file path, or stdin:
+a terminal and executes the current command and pipeline syntax sequentially
+against one persistent native state. It implements `pwd`, `echo` (with `-n`),
+`cd`, expanded `export`/`unset`, `exit`, portable `ls`, raw-byte `cat`, text
+`grep`, named and last-status parameter expansion, native host executables, and
+same-line native-only pipelines. Source may also come from `-c SOURCE`, a native
+script-file path, or stdin:
 
 ```sh
 ash shell
@@ -100,16 +101,26 @@ remain lossless through expansion and direct argv launch.
 Native programs resolve through the persistent `PATH` or an explicit `native:`
 prefix. The resolved host executable receives the parsed argument vector,
 current directory, and exported environment directly; ash never inserts a host
-shell command string. Child stdin is still closed and output is synchronously
-captured, so programs that require their own foreground terminal remain part of
-H4 job control rather than this line-edited REPL. Stdout and stderr share the
-remaining 128 MiB capture allowance, and a normal nonzero native exit becomes
-the command status without an added diagnostic.
+shell command string. A standalone child receives null stdin and synchronously
+captured output, so programs that require their own foreground terminal remain
+part of H4 job control rather than this line-edited REPL. Stdout and stderr share
+the remaining 128 MiB capture allowance, and a normal nonzero native exit
+becomes the command status without an added diagnostic.
+
+A same-line `|` forms a pipeline of two to 32 native host stages. Every stage is
+expanded, UTF-8 checked, resolved, and confirmed native before any child starts.
+The first stage receives null stdin, intermediate stdout flows through direct OS
+pipes, and only final stdout is returned. Every stage's stderr is captured
+concurrently and appended in stage order; final stdout and all stderr share the
+remaining 128 MiB allowance. Status follows the final stage. Stateful and
+portable commands, aliases, functions, and WSL stages fail before spawn until
+their streaming adapters exist.
 
 Broader expansion (including command substitution and globbing), mutations,
-streaming stdio and pipelines, foreground interactive programs and jobs, and
-WSL execution are not implemented yet. The regular binary enables the
-`human-shell` feature;
+terminal streaming, redirections, `pipefail`, unified pipeline supervision,
+portable/WSL pipeline stages, foreground interactive programs and jobs, and WSL
+execution are not implemented yet. The regular binary enables the `human-shell`
+feature;
 `cargo build -p a3s-ash --no-default-features` keeps a minimal machine-only
 build.
 

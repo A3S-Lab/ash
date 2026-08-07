@@ -11,8 +11,10 @@ use ash_ops::{
     SemanticServices,
 };
 use ash_platform::{
-    EnvironmentChange, NativeProcessSpec, PlatformError, ProcessExit, ProcessStdio, spawn_native,
+    EnvironmentChange, NativeProcessSpec, PlatformError, ProcessExit, ProcessHandle, ProcessPipeId,
+    ProcessStdio, spawn_native, spawn_native_graph,
 };
+use futures::future::try_join_all;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::expand::expand_words;
@@ -20,8 +22,11 @@ use crate::state::validate_identifier;
 use crate::{
     CommandResolver, DiagnosticCode, ExecutionBackend, HostPlatform, NativeCommandLookup,
     PathCommandLookup, PortableCommand, ResolutionError, ResolvedCommand, ShellState, ShellStatus,
-    ShellStatusKind, SourceSpan, StatefulBuiltin, parse,
+    ShellStatusKind, SimpleCommand, SourceSpan, StatefulBuiltin, parse,
 };
+
+/// Maximum native stages accepted by one foreground pipeline checkpoint.
+pub const MAX_NATIVE_PIPELINE_STAGES: usize = 32;
 
 /// Stable category for a human-shell execution diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,11 +127,14 @@ struct ExecutionOutput {
 
 /// Parses and executes the currently implemented foreground shell subset.
 ///
-/// Commands run sequentially against one mutable `ShellState`. The current H1
-/// slice performs quote-aware native-string parameter expansion before
-/// resolution, implements stateful environment updates and the portable command
-/// set, and provides bounded direct-argv native execution. Unresolved backends
-/// produce explicit diagnostics without invoking a host shell.
+/// Commands and pipelines run sequentially against one mutable `ShellState`.
+/// The current H1 slice performs quote-aware native-string parameter expansion
+/// before resolution, implements stateful environment updates and the portable
+/// command set, provides bounded direct-argv native execution, and connects
+/// two-to-32-stage native-only foreground pipelines with direct operating-system
+/// pipes. Pipeline status follows the final stage; final stdout and every stage's
+/// stderr share the synchronous capture ceiling. Unresolved backends produce
+/// explicit diagnostics without invoking a host shell.
 #[must_use]
 pub async fn execute_source(source: &str, state: &mut ShellState) -> ShellExecution {
     execute_source_with(source, state, &PathCommandLookup, HostPlatform::current()).await
@@ -180,53 +188,31 @@ where
     let mut output = ExecutionOutput::default();
     let mut final_status = state.last_status().clone();
     let mut exit_requested = None;
-    for command in script.commands() {
-        let expanded = expand_words(command.words(), state);
-        let name_span = expanded.first().map(|word| word.span());
-        let words: Vec<OsString> = expanded
-            .into_iter()
-            .map(crate::expand::ExpandedWord::into_value)
-            .collect();
+    for pipeline in script.pipelines() {
+        let commands = &script.commands()[pipeline.command_range()];
         let diagnostic_start = output.diagnostics.len();
-        final_status = if words.is_empty() {
-            ShellStatus::success()
-        } else if let Some(name) = words[0].to_str() {
-            let resolved = {
-                let resolver = CommandResolver::for_platform(
-                    state,
-                    |command: &str,
-                     cwd: &std::path::Path,
-                     environment: &crate::PlatformEnvironment| {
-                        lookup.resolve(command, cwd, environment)
-                    },
-                    host,
-                );
-                resolver.resolve(name)
-            };
-            match resolved {
-                Ok(resolved) => {
-                    execute_command(
-                        state,
-                        resolved,
-                        &words[1..],
-                        command.span(),
-                        &mut output,
-                        &mut exit_requested,
-                        runner,
-                    )
-                    .await
-                }
-                Err(error) => resolution_failure(
-                    error,
-                    name_span.expect("a non-empty expansion retains a source span"),
-                    &mut output.diagnostics,
-                ),
-            }
-        } else {
-            invalid_command_name(
-                name_span.expect("a non-empty expansion retains a source span"),
-                &mut output.diagnostics,
+        final_status = if commands.len() == 1 {
+            execute_simple_command(
+                &commands[0],
+                state,
+                lookup,
+                host,
+                &mut output,
+                &mut exit_requested,
+                runner,
             )
+            .await
+        } else {
+            execute_native_pipeline(
+                commands,
+                pipeline.span(),
+                state,
+                lookup,
+                host,
+                &mut output,
+                runner,
+            )
+            .await
         };
         for diagnostic in &output.diagnostics[diagnostic_start..] {
             output
@@ -244,6 +230,65 @@ where
         diagnostics: output.diagnostics,
         status: final_status,
         exit_requested,
+    }
+}
+
+async fn execute_simple_command<L, R>(
+    command: &SimpleCommand,
+    state: &mut ShellState,
+    lookup: &L,
+    host: HostPlatform,
+    output: &mut ExecutionOutput,
+    exit_requested: &mut Option<i64>,
+    runner: &R,
+) -> ShellStatus
+where
+    L: NativeCommandLookup + ?Sized,
+    R: NativeCommandRunner + ?Sized,
+{
+    let expanded = expand_words(command.words(), state);
+    let name_span = expanded.first().map(|word| word.span());
+    let words: Vec<OsString> = expanded
+        .into_iter()
+        .map(crate::expand::ExpandedWord::into_value)
+        .collect();
+    if words.is_empty() {
+        return ShellStatus::success();
+    }
+    let Some(name) = words[0].to_str() else {
+        return invalid_command_name(
+            name_span.expect("a non-empty expansion retains a source span"),
+            &mut output.diagnostics,
+        );
+    };
+    let resolved = {
+        let resolver = CommandResolver::for_platform(
+            state,
+            |command: &str, cwd: &std::path::Path, environment: &crate::PlatformEnvironment| {
+                lookup.resolve(command, cwd, environment)
+            },
+            host,
+        );
+        resolver.resolve(name)
+    };
+    match resolved {
+        Ok(resolved) => {
+            execute_command(
+                state,
+                resolved,
+                &words[1..],
+                command.span(),
+                output,
+                exit_requested,
+                runner,
+            )
+            .await
+        }
+        Err(error) => resolution_failure(
+            error,
+            name_span.expect("a non-empty expansion retains a source span"),
+            &mut output.diagnostics,
+        ),
     }
 }
 
@@ -348,11 +393,24 @@ struct NativeInvocation {
     capture_limit: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NativePipelineInvocation {
+    stages: Vec<NativeInvocation>,
+    capture_limit: u64,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct NativeCommandOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     exit: ProcessExit,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct NativePipelineOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exits: Vec<ProcessExit>,
 }
 
 #[derive(Debug)]
@@ -389,6 +447,11 @@ trait NativeCommandRunner {
         &self,
         invocation: NativeInvocation,
     ) -> Result<NativeCommandOutput, NativeCommandError>;
+
+    async fn run_pipeline(
+        &self,
+        invocation: NativePipelineInvocation,
+    ) -> Result<NativePipelineOutput, NativeCommandError>;
 }
 
 struct DirectNativeCommandRunner;
@@ -441,6 +504,99 @@ impl NativeCommandRunner for DirectNativeCommandRunner {
             exit,
         })
     }
+
+    async fn run_pipeline(
+        &self,
+        invocation: NativePipelineInvocation,
+    ) -> Result<NativePipelineOutput, NativeCommandError> {
+        run_native_pipeline(invocation).await
+    }
+}
+
+async fn run_native_pipeline(
+    invocation: NativePipelineInvocation,
+) -> Result<NativePipelineOutput, NativeCommandError> {
+    let capture_limit = invocation.capture_limit;
+    let stage_count = invocation.stages.len();
+    let mut specs = Vec::with_capacity(stage_count);
+    for (index, stage) in invocation.stages.into_iter().enumerate() {
+        let stdin = if index == 0 {
+            ProcessStdio::Null
+        } else {
+            ProcessStdio::Pipe(ProcessPipeId::new(u32::try_from(index - 1).map_err(
+                |_| NativeCommandError::Platform(PlatformError::InvalidProcessGraph),
+            )?))
+        };
+        let stdout = if index + 1 == stage_count {
+            ProcessStdio::Piped
+        } else {
+            ProcessStdio::Pipe(ProcessPipeId::new(u32::try_from(index).map_err(|_| {
+                NativeCommandError::Platform(PlatformError::InvalidProcessGraph)
+            })?))
+        };
+        specs.push(NativeProcessSpec {
+            executable: stage.executable.into_os_string(),
+            argv: stage.arguments,
+            cwd: stage.cwd,
+            environment: stage
+                .environment
+                .into_iter()
+                .map(|(name, value)| EnvironmentChange::Set(name, value))
+                .collect(),
+            clear_environment: true,
+            stdin,
+            stdout,
+            stderr: ProcessStdio::Piped,
+        });
+    }
+
+    let mut processes = spawn_native_graph(&specs).map_err(NativeCommandError::Platform)?;
+    let Some(stdout) = processes.last_mut().and_then(ProcessHandle::take_stdout) else {
+        terminate_and_reap(&mut processes).await;
+        return Err(NativeCommandError::MissingStream("final stdout"));
+    };
+    let mut stderr_streams = Vec::with_capacity(processes.len());
+    for process in &mut processes {
+        let Some(stderr) = process.take_stderr() else {
+            terminate_and_reap(&mut processes).await;
+            return Err(NativeCommandError::MissingStream("stage stderr"));
+        };
+        stderr_streams.push(stderr);
+    }
+
+    let captured = Arc::new(AtomicU64::new(0));
+    let stdout_capture = capture_process_stream(stdout, Arc::clone(&captured), capture_limit);
+    let stderr_capture = try_join_all(
+        stderr_streams
+            .into_iter()
+            .map(|stderr| capture_process_stream(stderr, Arc::clone(&captured), capture_limit)),
+    );
+    let wait_all = async {
+        try_join_all(processes.iter_mut().map(|process| async move {
+            process.wait().await.map_err(NativeCommandError::Platform)
+        }))
+        .await
+    };
+    match tokio::try_join!(stdout_capture, stderr_capture, wait_all) {
+        Ok((stdout, stderr, exits)) => Ok(NativePipelineOutput {
+            stdout,
+            stderr: stderr.into_iter().flatten().collect(),
+            exits,
+        }),
+        Err(error) => {
+            terminate_and_reap(&mut processes).await;
+            Err(error)
+        }
+    }
+}
+
+async fn terminate_and_reap(processes: &mut [ProcessHandle]) {
+    for process in &mut *processes {
+        let _ = process.terminate().await;
+    }
+    for process in processes {
+        let _ = process.wait().await;
+    }
 }
 
 async fn capture_process_stream<R>(
@@ -472,6 +628,139 @@ where
     }
 }
 
+async fn execute_native_pipeline<L, R>(
+    commands: &[SimpleCommand],
+    span: SourceSpan,
+    state: &ShellState,
+    lookup: &L,
+    host: HostPlatform,
+    output: &mut ExecutionOutput,
+    runner: &R,
+) -> ShellStatus
+where
+    L: NativeCommandLookup + ?Sized,
+    R: NativeCommandRunner + ?Sized,
+{
+    if commands.len() > MAX_NATIVE_PIPELINE_STAGES {
+        return invalid_arguments(
+            &format!("native pipelines support at most {MAX_NATIVE_PIPELINE_STAGES} stages"),
+            span,
+            &mut output.diagnostics,
+        );
+    }
+
+    let capture_limit = remaining_capture(output);
+    let mut stages = Vec::with_capacity(commands.len());
+    for command in commands {
+        let expanded = expand_words(command.words(), state);
+        let name_span = expanded.first().map(|word| word.span());
+        let words: Vec<OsString> = expanded
+            .into_iter()
+            .map(crate::expand::ExpandedWord::into_value)
+            .collect();
+        if words.is_empty() {
+            return invalid_arguments(
+                "a native pipeline stage expands to no command",
+                command.span(),
+                &mut output.diagnostics,
+            );
+        }
+        let Some(name) = words[0].to_str() else {
+            return invalid_command_name(
+                name_span.expect("a non-empty expansion retains a source span"),
+                &mut output.diagnostics,
+            );
+        };
+        let resolved = {
+            let resolver = CommandResolver::for_platform(
+                state,
+                |command: &str, cwd: &std::path::Path, environment: &crate::PlatformEnvironment| {
+                    lookup.resolve(command, cwd, environment)
+                },
+                host,
+            );
+            resolver.resolve(name)
+        };
+        match resolved {
+            Ok(ResolvedCommand::Native { executable, .. }) => stages.push(native_invocation(
+                state,
+                executable,
+                &words[1..],
+                capture_limit,
+            )),
+            Ok(ResolvedCommand::StatefulBuiltin(builtin)) => {
+                return unsupported_pipeline_stage(
+                    builtin.name(),
+                    command.span(),
+                    &mut output.diagnostics,
+                );
+            }
+            Ok(ResolvedCommand::Portable(portable)) => {
+                return unsupported_pipeline_stage(
+                    portable.name(),
+                    command.span(),
+                    &mut output.diagnostics,
+                );
+            }
+            Ok(
+                ResolvedCommand::Alias { name, .. }
+                | ResolvedCommand::Function { name }
+                | ResolvedCommand::Wsl { command: name, .. },
+            ) => {
+                return unsupported_pipeline_stage(&name, command.span(), &mut output.diagnostics);
+            }
+            Err(error) => {
+                return resolution_failure(
+                    error,
+                    name_span.expect("a non-empty expansion retains a source span"),
+                    &mut output.diagnostics,
+                );
+            }
+        }
+    }
+
+    match runner
+        .run_pipeline(NativePipelineInvocation {
+            stages,
+            capture_limit,
+        })
+        .await
+    {
+        Ok(native) if native.exits.len() == commands.len() => {
+            let exit = *native
+                .exits
+                .last()
+                .expect("a multi-stage pipeline has a final exit");
+            output.stdout.extend_from_slice(&native.stdout);
+            output.stderr.extend_from_slice(&native.stderr);
+            native_exit_status(exit)
+        }
+        Ok(_) => process_failure(
+            "native pipeline supervision returned incomplete exit status".to_owned(),
+            span,
+            &mut output.diagnostics,
+            ShellStatusKind::SpawnError,
+            126,
+        ),
+        Err(NativeCommandError::CaptureLimit { .. }) => process_failure(
+            format!(
+                "native pipeline output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
+            ),
+            span,
+            &mut output.diagnostics,
+            ShellStatusKind::Exited,
+            1,
+        ),
+        Err(error) => process_failure(
+            format!("cannot execute native pipeline: {error}"),
+            span,
+            &mut output.diagnostics,
+            ShellStatusKind::SpawnError,
+            126,
+        ),
+    }
+}
+
 async fn execute_native<R>(
     state: &ShellState,
     executable: PathBuf,
@@ -483,20 +772,12 @@ async fn execute_native<R>(
 where
     R: NativeCommandRunner + ?Sized,
 {
-    let captured = u64::try_from(output.stdout.len())
-        .unwrap_or(u64::MAX)
-        .saturating_add(u64::try_from(output.stderr.len()).unwrap_or(u64::MAX));
-    let invocation = NativeInvocation {
-        executable: executable.clone(),
-        arguments: arguments.to_vec(),
-        cwd: state.cwd().to_owned(),
-        environment: state
-            .environment()
-            .iter()
-            .map(|(name, value)| (name.to_owned(), value.to_owned()))
-            .collect(),
-        capture_limit: MAX_READ_FILE_BYTES.saturating_sub(captured),
-    };
+    let invocation = native_invocation(
+        state,
+        executable.clone(),
+        arguments,
+        remaining_capture(output),
+    );
     match runner.run(invocation).await {
         Ok(native) => {
             output.stdout.extend_from_slice(&native.stdout);
@@ -523,6 +804,46 @@ where
             126,
         ),
     }
+}
+
+fn native_invocation(
+    state: &ShellState,
+    executable: PathBuf,
+    arguments: &[OsString],
+    capture_limit: u64,
+) -> NativeInvocation {
+    NativeInvocation {
+        executable,
+        arguments: arguments.to_vec(),
+        cwd: state.cwd().to_owned(),
+        environment: state
+            .environment()
+            .iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect(),
+        capture_limit,
+    }
+}
+
+fn remaining_capture(output: &ExecutionOutput) -> u64 {
+    let captured = u64::try_from(output.stdout.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(u64::try_from(output.stderr.len()).unwrap_or(u64::MAX));
+    MAX_READ_FILE_BYTES.saturating_sub(captured)
+}
+
+fn unsupported_pipeline_stage(
+    name: &str,
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    unsupported(
+        format!("pipeline stage `{name}` requires a streaming adapter that is not implemented yet"),
+        span,
+        diagnostics,
+        ShellStatusKind::Exited,
+        2,
+    )
 }
 
 fn native_exit_status(exit: ProcessExit) -> ShellStatus {
@@ -1392,6 +1713,7 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1399,7 +1721,8 @@ mod tests {
 
     use super::{
         ExecutionDiagnosticCode, NativeCommandError, NativeCommandOutput, NativeCommandRunner,
-        NativeInvocation, execute_source, execute_source_with, execute_source_with_runner,
+        NativeInvocation, NativePipelineInvocation, NativePipelineOutput, execute_source,
+        execute_source_with, execute_source_with_runner,
     };
     use crate::{HostPlatform, ShellState, ShellStatusKind, SourceSpan};
 
@@ -1421,6 +1744,67 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn compile_pipeline_helper(directory: &TestDirectory) -> String {
+        let bin_directory = directory.0.join("bin");
+        fs::create_dir(&bin_directory).expect("bin directory");
+        let source = directory.0.join("pipeline-helper.rs");
+        fs::write(
+            &source,
+            r#"
+use std::{convert::TryFrom, env, io, io::Write, process};
+
+fn main() {
+    let mut arguments = env::args().skip(1);
+    match arguments.next().as_deref() {
+        Some("produce") => {
+            let length = arguments
+                .next()
+                .expect("payload length")
+                .parse::<usize>()
+                .expect("numeric payload length");
+            let mut output = io::stdout().lock();
+            let mut buffer = vec![0_u8; 64 * 1024];
+            let mut offset = 0_usize;
+            while offset < length {
+                let count = (length - offset).min(buffer.len());
+                for (index, byte) in buffer[..count].iter_mut().enumerate() {
+                    *byte = u8::try_from((offset + index) % 251).expect("bounded byte");
+                }
+                output.write_all(&buffer[..count]).expect("write payload");
+                offset += count;
+            }
+            output.flush().expect("flush payload");
+            eprintln!("producer-stderr");
+        }
+        Some("copy") => {
+            let label = arguments.next().expect("copy label");
+            let mut input = io::stdin().lock();
+            let mut output = io::stdout().lock();
+            io::copy(&mut input, &mut output).expect("copy pipeline stream");
+            output.flush().expect("flush copied stream");
+            eprintln!("{label}-stderr");
+        }
+        _ => process::exit(2),
+    }
+}
+"#,
+        )
+        .expect("write pipeline helper");
+        let executable_name = if cfg!(windows) {
+            "pipeline-helper.exe"
+        } else {
+            "pipeline-helper"
+        };
+        let status = Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(bin_directory.join(executable_name))
+            .status()
+            .expect("run rustc");
+        assert!(status.success(), "compile pipeline helper");
+        executable_name.to_owned()
     }
 
     struct RecordingRunner {
@@ -1450,6 +1834,13 @@ mod tests {
                 .take()
                 .expect("one output"))
         }
+
+        async fn run_pipeline(
+            &self,
+            _invocation: NativePipelineInvocation,
+        ) -> Result<NativePipelineOutput, NativeCommandError> {
+            panic!("single-command recording runner received a pipeline")
+        }
     }
 
     struct FailingRunner {
@@ -1468,6 +1859,55 @@ mod tests {
             } else {
                 Err(NativeCommandError::MissingStream("stdout"))
             }
+        }
+
+        async fn run_pipeline(
+            &self,
+            invocation: NativePipelineInvocation,
+        ) -> Result<NativePipelineOutput, NativeCommandError> {
+            if self.capture_limit {
+                Err(NativeCommandError::CaptureLimit {
+                    max: invocation.capture_limit,
+                })
+            } else {
+                Err(NativeCommandError::MissingStream("final stdout"))
+            }
+        }
+    }
+
+    struct RecordingPipelineRunner {
+        invocation: Mutex<Option<NativePipelineInvocation>>,
+        output: Mutex<Option<NativePipelineOutput>>,
+    }
+
+    impl RecordingPipelineRunner {
+        fn new(output: NativePipelineOutput) -> Self {
+            Self {
+                invocation: Mutex::new(None),
+                output: Mutex::new(Some(output)),
+            }
+        }
+    }
+
+    impl NativeCommandRunner for RecordingPipelineRunner {
+        async fn run(
+            &self,
+            _invocation: NativeInvocation,
+        ) -> Result<NativeCommandOutput, NativeCommandError> {
+            panic!("pipeline recording runner received a simple command")
+        }
+
+        async fn run_pipeline(
+            &self,
+            invocation: NativePipelineInvocation,
+        ) -> Result<NativePipelineOutput, NativeCommandError> {
+            *self.invocation.lock().expect("invocation lock") = Some(invocation);
+            Ok(self
+                .output
+                .lock()
+                .expect("output lock")
+                .take()
+                .expect("one pipeline output"))
         }
     }
 
@@ -1669,6 +2109,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_pipelines_preflight_every_stage_and_use_the_final_status() {
+        let mut state = ShellState::new("/fixture/work");
+        state.environment_mut().insert("PATH", "/fixture/bin");
+        let lookup =
+            |command: &str, _cwd: &std::path::Path, _environment: &crate::PlatformEnvironment| {
+                match command {
+                    "first" | "second" => Some(PathBuf::from(format!("/fixture/bin/{command}"))),
+                    _ => None,
+                }
+            };
+        let runner = RecordingPipelineRunner::new(NativePipelineOutput {
+            stdout: b"pipeline-stdout\n".to_vec(),
+            stderr: b"first-stderr\nsecond-stderr\n".to_vec(),
+            exits: vec![
+                ProcessExit {
+                    success: false,
+                    code: Some(9),
+                    signal: None,
+                },
+                ProcessExit {
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                },
+            ],
+        });
+
+        let execution = execute_source_with_runner(
+            "native:first alpha | native:second 'beta gamma'; echo $?",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &runner,
+        )
+        .await;
+
+        assert_eq!(execution.stdout(), b"pipeline-stdout\n0\n");
+        assert_eq!(execution.stderr(), b"first-stderr\nsecond-stderr\n");
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(execution.status().code(), 0);
+        let invocation = runner
+            .invocation
+            .lock()
+            .expect("invocation lock")
+            .clone()
+            .expect("pipeline invocation");
+        assert_eq!(invocation.stages.len(), 2);
+        assert_eq!(
+            invocation.stages[0].executable,
+            PathBuf::from("/fixture/bin/first")
+        );
+        assert_eq!(invocation.stages[0].arguments, [OsString::from("alpha")]);
+        assert_eq!(
+            invocation.stages[1].executable,
+            PathBuf::from("/fixture/bin/second")
+        );
+        assert_eq!(
+            invocation.stages[1].arguments,
+            [OsString::from("beta gamma")]
+        );
+        assert_eq!(invocation.capture_limit, super::MAX_READ_FILE_BYTES);
+        assert!(
+            invocation
+                .stages
+                .iter()
+                .all(|stage| stage.capture_limit == invocation.capture_limit)
+        );
+
+        let rejected_runner = RecordingPipelineRunner::new(NativePipelineOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exits: vec![],
+        });
+        let unsupported = execute_source_with_runner(
+            "echo hi | native:second",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &rejected_runner,
+        )
+        .await;
+        assert_eq!(unsupported.status().code(), 2);
+        assert_eq!(unsupported.diagnostics().len(), 1);
+        assert_eq!(
+            unsupported.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Unsupported
+        );
+        assert_eq!(unsupported.diagnostics()[0].span(), SourceSpan::new(0, 7));
+        assert!(
+            rejected_runner
+                .invocation
+                .lock()
+                .expect("invocation lock")
+                .is_none(),
+            "unsupported stages must fail before spawn"
+        );
+
+        let too_many = std::iter::repeat_n("native:first", super::MAX_NATIVE_PIPELINE_STAGES + 1)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let oversized = execute_source_with_runner(
+            &too_many,
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &rejected_runner,
+        )
+        .await;
+        assert_eq!(oversized.status().code(), 2);
+        assert_eq!(oversized.diagnostics().len(), 1);
+        assert_eq!(
+            oversized.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::InvalidArguments
+        );
+        assert!(
+            rejected_runner
+                .invocation
+                .lock()
+                .expect("invocation lock")
+                .is_none(),
+            "oversized pipelines must fail before resolution or spawn"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_pipeline_streams_eight_megabytes_through_multiple_processes() {
+        const PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+
+        let directory = TestDirectory::new();
+        let executable = compile_pipeline_helper(&directory);
+        let mut state = ShellState::from_process().expect("process shell state");
+        state.set_cwd(&directory.0);
+        state
+            .environment_mut()
+            .insert("PATH", directory.0.join("bin").into_os_string());
+        let source = format!(
+            "{executable} produce {PAYLOAD_BYTES} | {executable} copy middle | {executable} copy final"
+        );
+
+        let execution = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            execute_source(&source, &mut state),
+        )
+        .await
+        .expect("native pipeline completes without deadlock");
+
+        assert_eq!(execution.status().code(), 0);
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(
+            execution.stderr(),
+            b"producer-stderr\nmiddle-stderr\nfinal-stderr\n"
+        );
+        let expected: Vec<u8> = (0..PAYLOAD_BYTES)
+            .map(|index| u8::try_from(index % 251).expect("bounded byte"))
+            .collect();
+        assert_eq!(execution.stdout().len(), expected.len());
+        assert!(execution.stdout() == expected, "pipeline payload changed");
+    }
+
+    #[tokio::test]
     async fn parameter_expansion_preserves_native_argv_fields_and_observes_previous_status() {
         let mut state = ShellState::new("/fixture/work");
         state
@@ -1764,43 +2364,54 @@ mod tests {
             |_command: &str, _cwd: &std::path::Path, _environment: &crate::PlatformEnvironment| {
                 Some(PathBuf::from("/fixture/bin/tool"))
             };
-        for (capture_limit, code, kind, message) in [
+        for (capture_limit, code, kind, command_message, pipeline_message) in [
             (
                 false,
                 126,
                 ShellStatusKind::SpawnError,
                 "cannot execute `/fixture/bin/tool`: the process did not expose its captured stdout",
+                "cannot execute native pipeline: the process did not expose its captured final stdout",
             ),
             (
                 true,
                 1,
                 ShellStatusKind::Exited,
                 "native command output exceeds the 134217728-byte synchronous shell capture ceiling",
+                "native pipeline output exceeds the 134217728-byte synchronous shell capture ceiling",
             ),
         ] {
-            let mut state = ShellState::new("/fixture");
-            let failure = execute_source_with_runner(
-                "tool",
-                &mut state,
-                &lookup,
-                HostPlatform::Linux,
-                &FailingRunner { capture_limit },
-            )
-            .await;
+            for (source, message) in [("tool", command_message), ("tool | tool", pipeline_message)]
+            {
+                let mut state = ShellState::new("/fixture");
+                let failure = execute_source_with_runner(
+                    source,
+                    &mut state,
+                    &lookup,
+                    HostPlatform::Linux,
+                    &FailingRunner { capture_limit },
+                )
+                .await;
 
-            assert!(failure.stdout().is_empty());
-            assert_eq!(failure.diagnostics().len(), 1);
-            assert_eq!(
-                failure.diagnostics()[0].code(),
-                ExecutionDiagnosticCode::Process
-            );
-            assert_eq!(failure.diagnostics()[0].message(), message);
-            assert_eq!(failure.status().code(), code);
-            assert_eq!(failure.status().kind(), kind);
-            assert_eq!(
-                failure.rendered_stderr(),
-                failure.diagnostics()[0].render().into_bytes()
-            );
+                assert!(failure.stdout().is_empty(), "source={source}");
+                assert_eq!(failure.diagnostics().len(), 1, "source={source}");
+                assert_eq!(
+                    failure.diagnostics()[0].code(),
+                    ExecutionDiagnosticCode::Process,
+                    "source={source}"
+                );
+                assert_eq!(
+                    failure.diagnostics()[0].message(),
+                    message,
+                    "source={source}"
+                );
+                assert_eq!(failure.status().code(), code, "source={source}");
+                assert_eq!(failure.status().kind(), kind, "source={source}");
+                assert_eq!(
+                    failure.rendered_stderr(),
+                    failure.diagnostics()[0].render().into_bytes(),
+                    "source={source}"
+                );
+            }
         }
     }
 

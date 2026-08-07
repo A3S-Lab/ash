@@ -18,8 +18,8 @@ mod syntax;
 
 pub use diagnostic::{Diagnostic, DiagnosticCode};
 pub use execution::{
-    ExecutionDiagnostic, ExecutionDiagnosticCode, ShellExecution, execute_source,
-    execute_source_with,
+    ExecutionDiagnostic, ExecutionDiagnosticCode, MAX_NATIVE_PIPELINE_STAGES, ShellExecution,
+    execute_source, execute_source_with,
 };
 pub use interactive::{
     DEFAULT_INTERACTIVE_PROMPT, InteractiveConfig, InteractiveEditor, InteractiveError,
@@ -34,4 +34,6 @@ pub use state::{
     ExecutionBackend, JobState, JobSummary, JobTable, PlatformEnvironment, ShellFunction,
     ShellOptions, ShellState, ShellStatus, ShellStatusKind, StateError,
 };
-pub use syntax::{Parameter, QuoteMode, Script, SimpleCommand, SourceSpan, Word, WordPart};
+pub use syntax::{
+    Parameter, Pipeline, QuoteMode, Script, SimpleCommand, SourceSpan, Word, WordPart,
+};

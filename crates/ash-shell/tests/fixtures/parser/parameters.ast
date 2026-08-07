@@ -1,14 +1,15 @@
 script 0..39
-command 0..38
-  word 0..4
-    literal unquoted 0..4 "echo"
-  word 5..10
-    parameter unquoted 5..10 named "NAME"
-  word 11..23
-    parameter double 12..19 braced "NAME"
-    literal double 19..20 ":"
-    parameter double 20..22 status "?"
-  word 24..31
-    literal single 24..31 "$NAME"
-  word 32..38
-    literal unquoted 32..38 "$NAME"
+pipeline 0..38
+  command 0..38
+    word 0..4
+      literal unquoted 0..4 "echo"
+    word 5..10
+      parameter unquoted 5..10 named "NAME"
+    word 11..23
+      parameter double 12..19 braced "NAME"
+      literal double 19..20 ":"
+      parameter double 20..22 status "?"
+    word 24..31
+      literal single 24..31 "$NAME"
+    word 32..38
+      literal unquoted 32..38 "$NAME"

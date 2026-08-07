@@ -1,16 +1,19 @@
-script 0..46
-command 0..29
-  word 0..4
-    literal unquoted 0..4 "echo"
-  word 5..18
-    literal single 5..18 "hello world"
-  word 19..29
-    literal double 19..29 "from ash"
-command 30..33
-  word 30..33
-    literal unquoted 30..33 "pwd"
-command 35..45
-  word 35..40
-    literal unquoted 35..40 "cargo"
-  word 41..45
-    literal unquoted 41..45 "test"
+script 0..47
+pipeline 0..29
+  command 0..29
+    word 0..4
+      literal unquoted 0..4 "echo"
+    word 5..18
+      literal single 5..18 "hello world"
+    word 19..29
+      literal double 19..29 "from ash"
+pipeline 30..46
+  command 30..33
+    word 30..33
+      literal unquoted 30..33 "pwd"
+  pipe 34..35
+  command 36..46
+    word 36..41
+      literal unquoted 36..41 "cargo"
+    word 42..46
+      literal unquoted 42..46 "test"

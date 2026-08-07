@@ -210,16 +210,68 @@ impl SimpleCommand {
     }
 }
 
+/// One foreground pipeline over a contiguous range of parsed commands.
+///
+/// A single command is represented as a one-stage pipeline. Pipe operator spans
+/// are retained in source order and therefore number one fewer than the stages.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Pipeline {
+    command_range: Range<usize>,
+    pipe_spans: Vec<SourceSpan>,
+    span: SourceSpan,
+}
+
+impl Pipeline {
+    pub(crate) fn new(
+        command_range: Range<usize>,
+        pipe_spans: Vec<SourceSpan>,
+        span: SourceSpan,
+    ) -> Self {
+        debug_assert!(!command_range.is_empty());
+        debug_assert_eq!(pipe_spans.len() + 1, command_range.len());
+        Self {
+            command_range,
+            pipe_spans,
+            span,
+        }
+    }
+
+    /// Returns the stage range in [`Script::commands`].
+    #[must_use]
+    pub fn command_range(&self) -> Range<usize> {
+        self.command_range.clone()
+    }
+
+    #[must_use]
+    pub fn pipe_spans(&self) -> &[SourceSpan] {
+        &self.pipe_spans
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
 /// A parsed script retaining its exact original source and byte spans.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Script {
     source: String,
     commands: Vec<SimpleCommand>,
+    pipelines: Vec<Pipeline>,
 }
 
 impl Script {
-    pub(crate) fn new(source: String, commands: Vec<SimpleCommand>) -> Self {
-        Self { source, commands }
+    pub(crate) fn new(
+        source: String,
+        commands: Vec<SimpleCommand>,
+        pipelines: Vec<Pipeline>,
+    ) -> Self {
+        Self {
+            source,
+            commands,
+            pipelines,
+        }
     }
 
     #[must_use]
@@ -230,6 +282,11 @@ impl Script {
     #[must_use]
     pub fn commands(&self) -> &[SimpleCommand] {
         &self.commands
+    }
+
+    #[must_use]
+    pub fn pipelines(&self) -> &[Pipeline] {
+        &self.pipelines
     }
 
     #[must_use]
