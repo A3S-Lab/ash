@@ -103,7 +103,7 @@ pub async fn run(arguments: &[OsString]) -> Result<ExitCode, CliError> {
 
     if let Some(path) = profile_path(&invocation.profile, &state, &initial_cwd) {
         let source = read_profile(&path).await?;
-        let execution = execute_source(&source, &mut state).await;
+        let execution = execute_shell_source(&source, &mut state).await;
         write_execution(&execution).await?;
         if execution.exit_requested().is_some() {
             return Ok(exit_code(execution.status().code()));
@@ -125,7 +125,7 @@ pub async fn run(arguments: &[OsString]) -> Result<ExitCode, CliError> {
             read_script(&path).await?
         }
     };
-    let execution = execute_source(&source, &mut state).await;
+    let execution = execute_shell_source(&source, &mut state).await;
     write_execution(&execution).await?;
     Ok(exit_code(execution.status().code()))
 }
@@ -142,7 +142,7 @@ async fn run_interactive(state: &mut ShellState, initial_cwd: &Path) -> Result<E
         write_editor_warnings(&mut editor).await?;
         match event {
             InteractiveEvent::Line(source) => {
-                let execution = execute_source(&source, state).await;
+                let execution = execute_shell_source(&source, state).await;
                 write_execution(&execution).await?;
                 if execution.exit_requested().is_some() {
                     return Ok(exit_code(execution.status().code()));
@@ -162,6 +162,13 @@ async fn run_interactive(state: &mut ShellState, initial_cwd: &Path) -> Result<E
             _ => {}
         }
     }
+}
+
+async fn execute_shell_source(source: &str, state: &mut ShellState) -> ShellExecution {
+    // Native execution owns sizeable capture buffers inside its future. Keep
+    // that state on the heap so the REPL branch cannot exhaust the smaller
+    // default main-thread stack used by Windows executables.
+    Box::pin(execute_source(source, state)).await
 }
 
 async fn write_editor_warnings(editor: &mut InteractiveEditor) -> Result<(), CliError> {
