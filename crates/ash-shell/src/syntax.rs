@@ -187,21 +187,103 @@ impl Word {
     }
 }
 
+/// One standard descriptor that may be redirected by the current shell dialect.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RedirectionDescriptor {
+    Stdin,
+    Stdout,
+    Stderr,
+}
+
+/// File-open behavior for one redirection target.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RedirectionFileMode {
+    Read,
+    Write,
+    Append,
+}
+
+/// Expanded-later target of one ordered redirection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RedirectionTarget {
+    File {
+        path: Word,
+        mode: RedirectionFileMode,
+    },
+    Descriptor(RedirectionDescriptor),
+}
+
+/// One source-ordered standard-descriptor redirection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Redirection {
+    descriptor: RedirectionDescriptor,
+    target: RedirectionTarget,
+    operator_span: SourceSpan,
+    span: SourceSpan,
+}
+
+impl Redirection {
+    pub(crate) const fn new(
+        descriptor: RedirectionDescriptor,
+        target: RedirectionTarget,
+        operator_span: SourceSpan,
+        span: SourceSpan,
+    ) -> Self {
+        Self {
+            descriptor,
+            target,
+            operator_span,
+            span,
+        }
+    }
+
+    #[must_use]
+    pub const fn descriptor(&self) -> RedirectionDescriptor {
+        self.descriptor
+    }
+
+    #[must_use]
+    pub const fn target(&self) -> &RedirectionTarget {
+        &self.target
+    }
+
+    #[must_use]
+    pub const fn operator_span(&self) -> SourceSpan {
+        self.operator_span
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
 /// A foreground simple command in the currently implemented syntax subset.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SimpleCommand {
     words: Vec<Word>,
+    redirections: Vec<Redirection>,
     span: SourceSpan,
 }
 
 impl SimpleCommand {
-    pub(crate) fn new(words: Vec<Word>, span: SourceSpan) -> Self {
-        Self { words, span }
+    pub(crate) fn new(words: Vec<Word>, redirections: Vec<Redirection>, span: SourceSpan) -> Self {
+        Self {
+            words,
+            redirections,
+            span,
+        }
     }
 
     #[must_use]
     pub fn words(&self) -> &[Word] {
         &self.words
+    }
+
+    #[must_use]
+    pub fn redirections(&self) -> &[Redirection] {
+        &self.redirections
     }
 
     #[must_use]

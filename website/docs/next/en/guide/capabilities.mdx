@@ -108,8 +108,9 @@ ARM64, with checksums, SBOMs, and provenance.
 
 ## Evidence behind the claims
 
-- 284 Rust workspace tests cover typed schemas, RPC, operations, store,
-  transactions, recovery, cancellation, updates, and deterministic scheduling.
+- 288 Rust workspace tests cover typed schemas, RPC, operations, store,
+  transactions, recovery, cancellation, updates, deterministic scheduling, and
+  the human shell.
 - The schema-14 runtime harness contains 22 scenarios across worker matrices,
   including an 8 MiB spill/fetch proof over the 4 MiB memory ceiling.
 - Seven locked coding tasks compare a native-shell Agent trace with an ash Agent
@@ -139,23 +140,26 @@ stdin/native script files. Source-spanned `$NAME`, `${NAME}`, and `$?` nodes
 expand in a quote-aware native-string stage with fixed unquoted field splitting
 before resolution. Stateful and portable commands use ordinary user authority,
 while native programs inherit the persistent shell cwd/environment and OS
-authority through the owned platform process boundary. Standalone native stdin,
-and the first stage's stdin in a pipeline, remain null; foreground interactive
+authority through the owned platform process boundary. Unredirected standalone
+native stdin and first-stage pipeline stdin remain null; foreground interactive
 programs and job control remain H4. The route is a human frontend, not a
 free-form ASH/1 operation, and does not change any machine capability or
 confinement claim.
 
 H2 now provides explicit per-stream modes, validated native OS pipe graphs, and
-the first shell pipeline lowering. A same-line `|` connects two to 32 native
-host stages only after every stage expands and resolves successfully. The first
-stage receives null stdin, intermediate stdout flows through direct OS pipes,
-and final stdout plus every stage's stderr share the bounded capture allowance.
-Stderr is appended in stage order. Status defaults to the final stage;
+native-only pipeline lowering. A same-line `|` connects two to 32 native host
+stages only after every stage expands and resolves successfully. Intermediate
+stdout flows through direct OS pipes, while unredirected final stdout and stderr
+use bounded captures. Status defaults to the final stage;
 `set -o pipefail` selects the rightmost failure and `set +o pipefail` restores
-the default.
-Parent-facing, direct child-to-child, and three-process shell 8 MiB regressions
-lock backpressure, exact bytes, EOF closure, and handle exposure across
-platforms. Unified supervision, visible terminal streaming, redirections, and
-portable/WSL stages remain later slices.
+the default. Native commands also accept source-ordered `<`, `>`, `>>`, `2>`,
+`2>>`, `2>&1`, and `1>&2`. File targets expand to exactly one field, relative
+paths resolve against persistent cwd, and files attach directly to OS handles; shared files or captures
+preserve real descriptor write order. Parent-facing, direct child-to-child,
+three-process, and ordered-redirection regressions lock backpressure, exact
+bytes, EOF closure, handle exposure, and side-effect ordering across platforms.
+Unified supervision, visible terminal streaming, internal pipeline endpoint
+replacement, and builtin/portable/WSL redirection and pipeline adapters remain
+later slices.
 
 For Agent adoption, continue with [Coding Agent integration](/guide/coding-agents).

@@ -5,7 +5,7 @@ Status: architecture baseline plus implementation checkpoint
 This document defines the intended architecture of `ash` and is normative for component ownership and runtime boundaries. Statements explicitly labeled as the current source checkpoint describe implemented behavior; the remaining contracts are design targets rather than release claims.
 
 The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution with quota-bound disk-backed lossless retained output and conservative crash-orphan cleanup, deterministic byte-saving repeated-line, repeated-block, and failure-diagnostic projection, bounded read/list/search, durable compare-and-swap patching and file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, a locked seven-task cross-platform ASH/native-shell tool-plan corpus, a strict provider-neutral paired Agent trace validator/replayer, a stateless OpenAI Responses capture adapter with canonical raw audit binding, a twenty-two-scenario host-local runtime harness with three dual-stream capture profiles and paired disk I/O under idle versus fully occupied compute, four twice-weekly ASON/frame/update-metadata fuzz targets with bounded evolving corpora and source-bound evidence artifacts, deterministic six-target packaging, and a fail-closed native release workflow.
-The accepted post-ASH/1 human frontend has completed H0 with an independent `a3s-ash-shell` crate, source-spanned simple-command parsing, persistent state types, deterministic command classification, locked parser/resolution fixtures, and provider-neutral raw read/list/search semantic services reused by the ASH/1 adapters. H1 now includes a feature-gated, line-edited `ash shell` REPL with configurable prompt, safety-checked persistent history, opt-in Profile startup, prompt Ctrl+C/EOF handling, and `exit [STATUS]`, alongside inline plus bounded stdin/native-file sources. One persistent state executes expanded `export`/`unset`, `set -o pipefail`/`set +o pipefail`, sequential `pwd`, `echo`, `cd`, portable `ls`, bounded raw-byte `cat`, bounded text `grep`, source-spanned `$NAME`/`${NAME}`/`$?` expansion with quote-aware fixed field splitting and native-string preservation, and native host executables launched through `ash-platform` with exact argument vectors, persistent cwd/environment, owned process trees, bounded dual-stream capture, and native status propagation. H2 now includes an explicit `ProcessStdio` mode for every child stream, complete acyclic native pipe-graph validation, consumer-first spawning, immediate parent-handle closure, and a first shell lowering for same-line native-only pipelines of two to 32 stages. Every stage is expanded and resolved before spawn; intermediate stdout uses direct OS pipes, final stdout plus stage-ordered stderr share the bounded capture allowance, and status defaults to the final stage or selects the rightmost unsuccessful stage when persistent `pipefail` is enabled. Eight-megabyte parent-facing, child-to-child, and three-process shell regressions lock exact bytes, EOF, backpressure, and completion. Unified job supervision, user-visible terminal streaming, redirections, portable/WSL stages, foreground interactive programs and job control, broader expansion and mutations, and WSL launch remain open.
+The accepted post-ASH/1 human frontend has completed H0 with an independent `a3s-ash-shell` crate, source-spanned simple-command parsing, persistent state types, deterministic command classification, locked parser/resolution fixtures, and provider-neutral raw read/list/search semantic services reused by the ASH/1 adapters. H1 now includes a feature-gated, line-edited `ash shell` REPL with configurable prompt, safety-checked persistent history, opt-in Profile startup, prompt Ctrl+C/EOF handling, and `exit [STATUS]`, alongside inline plus bounded stdin/native-file sources. One persistent state executes expanded `export`/`unset`, `set -o pipefail`/`set +o pipefail`, sequential `pwd`, `echo`, `cd`, portable `ls`, bounded raw-byte `cat`, bounded text `grep`, source-spanned `$NAME`/`${NAME}`/`$?` expansion with quote-aware fixed field splitting and native-string preservation, and native host executables launched through `ash-platform` with exact argument vectors, persistent cwd/environment, owned process trees, bounded capture, and native status propagation. H2 now includes explicit `ProcessStdio` modes, complete acyclic native pipe-graph validation, consumer-first spawning, immediate parent-handle closure, and same-line native-only pipelines of two to 32 stages. Every stage is expanded and resolved before spawn; intermediate stdout uses direct OS pipes, unredirected final stdout plus stage-ordered stderr share the bounded capture allowance, and status defaults to the final stage or selects the rightmost unsuccessful stage when persistent `pipefail` is enabled. The fifth H2 checkpoint adds source-spanned `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2` parsing plus left-to-right native lowering. Source-ordered file plans open directly against the persistent cwd before spawn, duplicate descriptors share real OS resources, and missing, ambiguous, or unopenable targets produce a redirection status without running the child. Eight-megabyte parent-facing, child-to-child, and three-process shell regressions lock exact bytes, EOF, backpressure, and completion; ordered-output regressions lock file and capture sharing. Unified job supervision, user-visible terminal streaming, internal pipeline endpoint replacement, builtin/portable/WSL redirection and pipeline adapters, foreground interactive programs and job control, broader expansion and mutations, and WSL launch remain open.
 Release-key and platform-signing credential provisioning, the first published release, enough accumulated fuzz duration to claim a soak gate, captured real multi-model Coding Agent runs, medium/large task families, and published hardware-labelled runtime measurements remain open.
 
 The runtime evidence covers fifteen end-to-end paths: recursive listing, literal and regular-expression search, snapshot, disk spill/fetch, paired disk-spill I/O with the compute plane idle and fully occupied, fresh `ash run` startup, empty child spawn, steady, fragmented, and paced-bursty simultaneous disk-backed stdout/stderr capture, repeated cancellation of a parent plus pipe-inheriting descendant, warm framed RPC dispatch, and retained ASON table projection. The mixed-load pair alternates sample order, consumes identical bytes, times only `capture` through asynchronous flush, and checks that every Rayon worker remains inside a bounded integer workload at I/O completion. It releases that workload before BLAKE3 retention and exact tail validation, so compute queueing cannot contaminate the I/O interval. Capture metadata records exact producer chunk cycles, flush boundaries, pacing, and output seeds; the compiled helper must independently describe the same profiles before timing starts. List and search split the deterministic fixture into disjoint roots so traversal and scanning can use the bounded worker pool. Structured projection reads and parses the retained value, applies ordered column reduction across the configured Rayon pool, and emits the same canonical row order at every worker count. Three compute-plane reducer scenarios separately process 131,072 deterministic lines as 512-line runs, eight-line blocks repeated 64 times, and sparse failure diagnostics with fixed context windows; all require the same compact evidence at every worker count. Four isolated single-caller scenarios additionally measure 4,096 hot lookups in a 1,024-entry path dictionary and DAG validation/scheduling at 64, 256, and 1,024 nodes. They report no scaling curve because they bypass the configurable engine worker pools. Cold startup launches and reaps a real shell process for every observation. Warm dispatch uses the same embeddable gateway as `ash rpc`, excludes its handshake, and keeps one session alive per worker configuration. Cancellation is recorded only after the owned native process group or Job Object has emptied and the final response is canonicalized; it is not merely a signal-delivery timer.
@@ -362,15 +362,18 @@ The current request IR is a closed data-formula enum rather than a mode record w
 
 `exec` starts an executable directly with an argument vector. It never silently inserts `sh -c`, `cmd /c`, or `pwsh -Command`.
 
-Every platform process specification now selects `Null`, `Piped`, or `Inherit`
-independently for stdin, stdout, and stderr. Only `Piped` exposes a corresponding
-handle on `ProcessHandle`. The ASH/1 adapter preserves its contract by selecting
-piped stdin only when a bounded input exists and always piping both output
-streams. A single native human-shell command selects null stdin and piped
-output. A native shell pipeline selects null stdin for its first stage, graph
-pipes between stages, piped final stdout, and piped stderr for every stage.
-Inherited handles are available to later shell plans but are not selected by a
-machine request or claimed as foreground terminal support yet.
+Every platform process specification selects `Null`, `Piped`, `Inherit`,
+`Pipe`, `File`, or `Capture` independently for stdin, stdout, and stderr.
+`Piped` exposes a descriptor-specific Tokio child handle. `Capture(id)` exposes
+one named parent-facing OS pipe through `ProcessHandle::take_capture`; attaching
+both output descriptors to the same ID preserves their real write order.
+`File(id)` references a source-ordered native file-open plan, and cloned handles
+for the same ID share one open-file description. The ASH/1 adapter preserves its
+contract by selecting piped stdin only when bounded input exists and always
+piping both output streams. Unredirected human-shell output uses captures so
+descriptor duplication can retain its original destination. `Inherit` remains
+available to later foreground-terminal plans but is not claimed as interactive
+support yet.
 
 `ProcessStdio::Pipe(ProcessPipeId)` names a child-to-child connection that is
 valid only inside a complete process graph. The platform rejects missing ends,
@@ -381,12 +384,24 @@ before returning handles in plan order. A writer may attach both stdout and
 stderr to one pipe for later descriptor-duplication lowering. Internal graph
 endpoints expose no parent handle. The first shell layer accepts same-line `|`
 syntax only when all two to 32 stages resolve to native host executables. It
-preflights the complete pipeline, captures final stdout plus all stderr under
-one 128 MiB allowance, and concatenates stderr in stage order. Status defaults
-to the final stage; persistent `set -o pipefail` instead selects the rightmost
-unsuccessful exit, while `set +o pipefail` restores the default. Job-wide
-supervision, ordered file redirections, and portable or cross-backend stages
-remain later layers.
+preflights the complete pipeline, captures default final stdout plus default
+stderr under one 128 MiB allowance, and concatenates stderr in stage order.
+Status defaults to the final stage; persistent `set -o pipefail` instead selects
+the rightmost unsuccessful exit, while `set +o pipefail` restores the default.
+
+Native shell commands lower `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`
+from left to right after assigning default capture or pipeline endpoints. A file
+target must expand to exactly one native field and is resolved against the
+persistent shell cwd. The platform validates the complete graph and every
+redirection resource plan before file-open side effects, then opens all file
+entries in plan order before any child starts. This intentionally creates or
+truncates superseded targets while final descriptors reference only their last
+assignment. File output bypasses shell memory; shared file or capture IDs retain
+kernel ordering. The first pipeline stage may replace stdin, the final stage may
+replace stdout, and every stage may replace stderr. Replacing an internal stdin
+or stdout pipe, or applying a redirection to a builtin, portable command, or WSL
+stage, fails before file opens or spawn. Job-wide supervision, those remaining
+adapters, and internal endpoint replacement remain later layers.
 
 Inputs include:
 

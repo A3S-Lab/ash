@@ -1,4 +1,4 @@
-script 0..47
+script 0..63
 pipeline 0..29
   command 0..29
     word 0..4
@@ -7,13 +7,18 @@ pipeline 0..29
       literal single 5..18 "hello world"
     word 19..29
       literal double 19..29 "from ash"
-pipeline 30..46
-  command 30..33
+pipeline 30..62
+  command 30..39
     word 30..33
       literal unquoted 30..33 "pwd"
-  pipe 34..35
-  command 36..46
-    word 36..41
-      literal unquoted 36..41 "cargo"
-    word 42..46
-      literal unquoted 42..46 "test"
+    redirection stdin read 33..39 operator 33..34
+      target 34..39 "input"
+  pipe 40..41
+  command 42..62
+    word 42..47
+      literal unquoted 42..47 "cargo"
+    word 48..52
+      literal unquoted 48..52 "test"
+    redirection stdout write 53..57 operator 53..54
+      target 54..57 "out"
+    redirection stderr duplicate-stdout 58..62 operator 58..62

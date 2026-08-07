@@ -31,12 +31,12 @@ and `exit [STATUS]`. The same persistent state executes sequential `pwd`,
 `echo`, `cd`, `export`, `unset`, `set` pipefail control, portable `ls`, `cat`,
 and `grep`, plus native host executables with direct argument vectors. Inline
 source, native script files, and bounded stdin remain available without changing
-the machine contracts of `ash run` and `ash rpc`. H2 has begun below the language surface
-with explicit process-stdio modes and validated native OS pipe graphs. Its first
-language slice accepts a same-line `|` between two to 32 native host stages,
-preflights every stage before spawn, and connects them through direct OS pipes.
-The first stage keeps null stdin; final stdout and every stage's stderr share the
-remaining bounded capture allowance.
+the machine contracts of `ash run` and `ash rpc`. H2 now provides explicit
+process-stdio modes, validated native OS pipe graphs, same-line native pipelines
+of two to 32 stages, configurable `pipefail`, and source-ordered native
+redirections. Every stage is preflighted before spawn and connected through
+direct OS handles. Unredirected final stdout and stderr share the remaining
+bounded capture allowance.
 
 ## What ash covers
 
@@ -50,7 +50,7 @@ remaining bounded capture allowance.
 | Retained evidence    | `/ # ? - \| >`                        | Byte and line slices, search, release, ordered table projection, and capability-gated materialization                                                                  |
 | Model context        | ASON, `×N`, `×N#K`, `⋯N`              | Columnar records, path dictionaries, explicit reductions, stable merge, and references back to the full source                                                         |
 | Trust and delivery   | capabilities, permits, signed updates | Least-privilege negotiation, session/action/policy/expiry-bound one-time permits, replay rejection, transactional activation, recovery, rollback, SBOM, and provenance |
-| Human shell          | `ash shell`                           | H1 REPL lifecycle and commands plus H2 native-only foreground pipelines with configurable `pipefail`                                                               |
+| Human shell          | `ash shell`                           | H1 REPL lifecycle and commands plus H2 native pipelines, configurable `pipefail`, and ordered native redirections                                                  |
 
 The [complete capability map](https://a3s-lab.github.io/ash/guide/capabilities.html)
 documents guarantees, evidence, and deliberate non-goals for the full surface.
@@ -146,26 +146,42 @@ empty, and native argument units are preserved through direct argv launch.
 Native commands resolve through the shell state's `PATH` or an explicit
 `native:` prefix, then launch the resolved executable directly with the parsed
 argument vector, current directory, and exported environment. No `sh -c`,
-`cmd /c`, or PowerShell command string is inserted. A standalone child's stdin
-remains null and output remains synchronously captured, so native programs that
-themselves require a foreground terminal are still deferred to the H4
-job-control work. Stdout and stderr share the remaining 128 MiB capture
+`cmd /c`, or PowerShell command string is inserted. An unredirected standalone
+child's stdin remains null and output remains synchronously captured, so native
+programs that themselves require a foreground terminal are still deferred to
+the H4 job-control work. Stdout and stderr share the remaining 128 MiB capture
 allowance, and the native exit status is returned.
+
+Native commands accept `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
+Redirections are applied from left to right, so `command >out 2>&1` merges both
+streams into `out`, while `command 2>&1 >out` leaves stderr on the original
+stdout capture. File targets expand to exactly one native field, resolve from
+the persistent cwd, and connect directly to child OS handles without buffering
+file output in shell memory. Superseded targets are still opened in source
+order. Missing, ambiguous, or unopenable targets return status 1 with a
+redirection diagnostic. Redirections on stateful, portable, or WSL commands are
+rejected before side effects.
 
 A same-line `|` forms a foreground pipeline of two to 32 native host commands.
 Every stage is expanded, UTF-8 checked, resolved, and confirmed native before
-any child starts. Intermediate stdout travels directly through OS pipes; only
-final stdout is returned, while stderr is captured concurrently and appended in
-stage order. Pipeline status defaults to the final stage. With
+any child starts. Intermediate stdout travels directly through OS pipes;
+unredirected final stdout is returned, while unredirected stderr is captured
+concurrently and appended in stage order. Pipeline status defaults to the final
+stage. With
 `set -o pipefail`, it becomes the rightmost unsuccessful stage, including
 conventional `128 + signal` mapping; an all-success pipeline still uses its
 final stage. Stateful and portable commands, aliases, functions, and WSL stages
 fail explicitly before spawn because their streaming adapters do not exist yet.
+The first stage may redirect stdin, the final stage may redirect stdout, and any
+stage may redirect stderr or duplicate it into that stage's stdout. Replacing an
+internal pipeline stdin or stdout endpoint is rejected before files are opened
+or children start.
 
-User-visible terminal streaming, redirections, unified pipeline job supervision,
-foreground interactive programs and job control, broader expansion, mutations,
-portable/WSL pipeline adapters, and WSL execution are not implemented yet. A
-minimal machine-only binary can be built with
+User-visible terminal streaming, unified pipeline job supervision, internal
+pipeline endpoint replacement, builtin/portable/WSL redirection and pipeline
+adapters, foreground interactive programs and job control, broader expansion,
+mutations, and WSL execution are not implemented yet. A minimal machine-only
+binary can be built with
 `--no-default-features`.
 
 ## First typed request
@@ -225,8 +241,9 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **284 Rust workspace tests** across protocol schemas, RPC, every operation,
-  transactions, recovery, the retained store, cancellation, and signed updates.
+- **288 Rust workspace tests** across protocol schemas, RPC, every operation,
+  transactions, recovery, the retained store, cancellation, signed updates, and
+  the human shell.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB
   retained capture crossing the 4 MiB memory ceiling and fetching only its final
   64 KiB.

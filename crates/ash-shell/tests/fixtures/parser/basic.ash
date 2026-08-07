@@ -1,2 +1,2 @@
 echo 'hello world' "from ash"
-pwd | cargo test
+pwd<input | cargo test >out 2>&1

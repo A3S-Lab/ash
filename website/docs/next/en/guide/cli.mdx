@@ -34,7 +34,7 @@ a terminal and executes the current command and pipeline syntax sequentially
 against one persistent native state. It implements `pwd`, `echo` (with `-n`),
 `cd`, expanded `export`/`unset`, `set` pipefail control, `exit`, portable `ls`,
 raw-byte `cat`, text `grep`, named and last-status parameter expansion, native host executables, and
-same-line native-only pipelines. Source may also come from `-c SOURCE`, a native
+same-line native-only pipelines with ordered native redirections. Source may also come from `-c SOURCE`, a native
 script-file path, or stdin:
 
 ```sh
@@ -42,6 +42,7 @@ ash shell
 ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
 ash shell -c 'export NAME=world; echo "hello $NAME"; echo $?'
 ash shell -c "native:rustc --version"
+ash shell -c 'native:rustc --version >version.txt 2>&1'
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ash shell --profile ./profile.ash
@@ -106,27 +107,42 @@ remain lossless through expansion and direct argv launch.
 Native programs resolve through the persistent `PATH` or an explicit `native:`
 prefix. The resolved host executable receives the parsed argument vector,
 current directory, and exported environment directly; ash never inserts a host
-shell command string. A standalone child receives null stdin and synchronously
+shell command string. An unredirected standalone child receives null stdin and synchronously
 captured output, so programs that require their own foreground terminal remain
 part of H4 job control rather than this line-edited REPL. Stdout and stderr share
 the remaining 128 MiB capture allowance, and a normal nonzero native exit
 becomes the command status without an added diagnostic.
 
+Native commands accept `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
+Assignments apply from left to right: `command >out 2>&1` merges both streams
+into `out`, while `command 2>&1 >out` leaves stderr on the original stdout
+capture. Every file target must expand to exactly one native field; relative
+paths resolve against persistent cwd. Files connect directly to child OS handles, so redirected
+output does not consume the synchronous capture allowance; superseded targets
+are still opened in source order. Missing, ambiguous, or unopenable targets
+return status 1 with a redirection diagnostic. Stateful, portable, and WSL
+commands reject redirections before execution or filesystem side effects.
+
 A same-line `|` forms a pipeline of two to 32 native host stages. Every stage is
 expanded, UTF-8 checked, resolved, and confirmed native before any child starts.
 The first stage receives null stdin, intermediate stdout flows through direct OS
-pipes, and only final stdout is returned. Every stage's stderr is captured
-concurrently and appended in stage order; final stdout and all stderr share the
-remaining 128 MiB allowance. Status defaults to the final stage. With
+pipes, and unredirected final stdout is returned. Unredirected stderr is captured
+concurrently and appended in stage order; final stdout and captured stderr share
+the remaining 128 MiB allowance. Status defaults to the final stage. With
 `set -o pipefail`, the rightmost unsuccessful stage is selected, including
 `128 + signal`; an all-success pipeline still uses its final stage. Stateful and
 portable commands, aliases, functions, and WSL stages fail before spawn until
 their streaming adapters exist.
+The first stage may redirect stdin, the final stage may redirect stdout, and any
+stage may redirect stderr or duplicate it into that stage's stdout. Replacing an
+internal pipeline stdin or stdout endpoint returns status 2 before opening files
+or starting children.
 
 Broader expansion (including command substitution and globbing), mutations,
-terminal streaming, redirections, unified pipeline supervision,
-portable/WSL pipeline stages, foreground interactive programs and jobs, and WSL
-execution are not implemented yet. The regular binary enables the `human-shell`
+terminal streaming, unified pipeline supervision, internal pipeline endpoint
+replacement, builtin/portable/WSL redirection and pipeline adapters, foreground
+interactive programs and jobs, and WSL execution are not implemented yet. The
+regular binary enables the `human-shell`
 feature;
 `cargo build -p a3s-ash --no-default-features` keeps a minimal machine-only
 build.
