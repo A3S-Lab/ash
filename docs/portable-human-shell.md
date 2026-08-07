@@ -1,15 +1,23 @@
 # Portable Human Shell Architecture
 
-- Status: proposed
+- Status: accepted; H0 in progress
 - Target: post-ASH/1 version one
-- Last updated: 2026-08-03
+- Last updated: 2026-08-07
 
-This document proposes an optional human-facing shell for `ash`. It does not
-describe implemented behavior and it does not change the current ASH/1 machine
-protocol contract. The current product remains an agent-first, typed execution
-boundary. The human shell is a separate frontend that reuses the portable
-execution and filesystem foundations without weakening their machine-facing
-semantics.
+This document defines the accepted architecture for an optional human-facing
+shell for `ash`. Contracts not explicitly labeled as the current source
+checkpoint remain design targets, and this architecture does not change the
+current ASH/1 machine protocol contract. The current product remains an
+agent-first, typed execution boundary. The human shell is a separate frontend
+that reuses the portable execution and filesystem foundations without
+weakening their machine-facing semantics.
+
+The current source checkpoint has added the independent `a3s-ash-shell` crate
+with a source-spanned H0 simple-command parser, AST, diagnostics, persistent
+state types, deterministic command classification, and locked parser and
+resolution fixtures. Reusable raw semantic services, the `ash shell` CLI route,
+command execution, expansion, pipelines, jobs, and WSL launch remain
+unimplemented.
 
 ## 1. Executive decision
 
@@ -130,7 +138,7 @@ The human adapter renders terminal output and maintains shell state.
 
 ### 6.1 New `a3s-ash-shell` crate
 
-The proposed crate owns:
+The crate owns:
 
 - line editing, prompt integration, history, and completion;
 - lexer, parser, shell AST, expansion, and lowering;
@@ -623,6 +631,11 @@ than executing a partial remainder silently.
 - refactor reusable semantic services without changing ASH/1 output;
 - lock initial parser and command-resolution fixtures.
 
+Current checkpoint: the decision, crate boundary, parser/AST/diagnostics,
+`ShellState`, deterministic command classification, and initial fixtures are
+implemented. The reusable semantic-service refactor remains before H0 is
+complete.
+
 ### H1: native non-interactive shell
 
 - implement `ash shell`, prompt, history, simple commands, `cd`, environment,
@@ -660,7 +673,7 @@ than executing a partial remainder silently.
 
 ## 21. Completion criteria
 
-The proposal is implemented only when all of the following are true:
+The architecture is fully implemented only when all of the following are true:
 
 - `ash shell` can replace the default interactive profile in Windows Terminal;
 - `cd` and environment changes persist across commands;

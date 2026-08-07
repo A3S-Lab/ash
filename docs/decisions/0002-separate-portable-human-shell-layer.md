@@ -1,7 +1,8 @@
 # ADR 0002: Separate the portable human shell from ASH/1
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-08-03
+- Accepted: 2026-08-07
 
 ## Context
 
@@ -23,7 +24,7 @@ backpressure.
 
 ## Decision
 
-If the human shell is implemented:
+The human shell:
 
 1. It will live in a separate `a3s-ash-shell` crate and be exposed as
    `ash shell`.
@@ -47,8 +48,13 @@ If the human shell is implemented:
     workspace confinement will not be represented as a sandbox for arbitrary
     child processes.
 
-The detailed proposed contract is defined in
+The detailed accepted contract is defined in
 [`../portable-human-shell.md`](../portable-human-shell.md).
+
+The current source checkpoint has started H0 with the independent
+`a3s-ash-shell` crate, source-spanned simple-command parsing, persistent state
+types, deterministic command classification, and locked parser/resolution
+fixtures. It does not yet expose `ash shell` or execute human-shell commands.
 
 ## Rejected alternatives
 

@@ -6,6 +6,7 @@ members = [
     "crates/ash-ops",
     "crates/ash-platform",
     "crates/ash-protocol",
+    "crates/ash-shell",
     "crates/ash-store",
     "crates/ash-update",
     "tools/release",
@@ -27,6 +28,7 @@ ash-engine = { package = "a3s-ash-engine", path = "crates/ash-engine" }
 ash-ops = { package = "a3s-ash-ops", path = "crates/ash-ops" }
 ash-platform = { package = "a3s-ash-platform", path = "crates/ash-platform" }
 ash-protocol = { package = "a3s-ash-protocol", path = "crates/ash-protocol" }
+ash-shell = { package = "a3s-ash-shell", path = "crates/ash-shell" }
 ash-store = { package = "a3s-ash-store", path = "crates/ash-store" }
 ash-update = { package = "a3s-ash-update", path = "crates/ash-update" }
 atomicwrites = "0.4.4"
