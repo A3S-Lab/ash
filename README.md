@@ -121,7 +121,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **200 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **220 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, and signed updates.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB
   retained capture crossing the 4 MiB memory ceiling and fetching only its final
