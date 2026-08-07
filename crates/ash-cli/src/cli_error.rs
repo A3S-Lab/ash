@@ -19,6 +19,8 @@ pub enum CliError {
     Usage,
     #[error("stdin exceeds the hard input ceiling")]
     InputTooLarge,
+    #[error("{message}")]
+    Human { message: String, exit_code: u8 },
     #[error(transparent)]
     InvalidUtf8(#[from] FromUtf8Error),
     #[error(transparent)]
@@ -54,10 +56,19 @@ pub enum CliError {
 }
 
 impl CliError {
+    #[cfg(feature = "human-shell")]
+    pub(crate) fn human(message: impl Into<String>, exit_code: u8) -> Self {
+        Self::Human {
+            message: message.into(),
+            exit_code,
+        }
+    }
+
     pub const fn diagnostic_code(&self) -> u16 {
         match self {
             Self::Usage => 1,
             Self::InputTooLarge => 2,
+            Self::Human { .. } => 12,
             Self::InvalidUtf8(_) => 3,
             Self::Ason(_) => 4,
             Self::Protocol(ProtocolReadError::InvalidUtf8 { .. }) => 3,
@@ -90,6 +101,7 @@ impl CliError {
         match self {
             Self::Usage => 2,
             Self::InputTooLarge | Self::InvalidUtf8(_) | Self::Ason(_) => 3,
+            Self::Human { exit_code, .. } => *exit_code,
             Self::Frame(_)
             | Self::Protocol(_)
             | Self::Handshake(_)
@@ -113,6 +125,13 @@ impl CliError {
     }
 
     pub async fn emit(&self) {
+        if let Self::Human { message, .. } = self {
+            let diagnostic = format!("ash: {message}\n");
+            let mut stderr = stderr();
+            let _ = stderr.write_all(diagnostic.as_bytes()).await;
+            let _ = stderr.flush().await;
+            return;
+        }
         let diagnostic = format!("s:1\ne{{c}}:\n{}\n", self.diagnostic_code());
         let mut stderr = stderr();
         let _ = stderr.write_all(diagnostic.as_bytes()).await;

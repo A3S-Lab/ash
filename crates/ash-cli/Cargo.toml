@@ -13,11 +13,16 @@ homepage.workspace = true
 name = "ash"
 path = "src/main.rs"
 
+[features]
+default = ["human-shell"]
+human-shell = ["dep:ash-shell"]
+
 [dependencies]
 ash-engine.workspace = true
 ash-ops.workspace = true
 ash-platform.workspace = true
 ash-protocol.workspace = true
+ash-shell = { workspace = true, optional = true }
 ash-store.workspace = true
 ash-update.workspace = true
 futures.workspace = true

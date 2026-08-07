@@ -7,12 +7,17 @@
 //! shell-string operation to the machine interface.
 
 mod diagnostic;
+mod execution;
 mod parser;
 mod resolver;
 mod state;
 mod syntax;
 
 pub use diagnostic::{Diagnostic, DiagnosticCode};
+pub use execution::{
+    ExecutionDiagnostic, ExecutionDiagnosticCode, ShellExecution, execute_source,
+    execute_source_with,
+};
 pub use parser::parse;
 pub use resolver::{
     CommandResolver, HostPlatform, NativeCommandLookup, PathCommandLookup, PortableCommand,

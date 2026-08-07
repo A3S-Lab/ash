@@ -1,12 +1,13 @@
 ---
 title: CLI 参考
-description: ash 的机器优先命令、输入输出约束、自更新与健康检查接口。
+description: ash 的机器优先命令、可选人类 Shell 入口、输入输出约束、自更新与健康检查接口。
 ---
 
 # CLI 参考
 
-ash CLI 是机器接口：成功输出和错误诊断都使用稳定的 ASON，不提供人类帮助页、颜色、
-进度条或交互式 REPL。
+ash 的主要 CLI 是机器接口：成功输出和错误诊断都使用稳定的 ASON，不提供人类帮助页、
+颜色或进度条。独立且受 feature 控制的 `ash shell` 入口明确面向人类，使用普通字节、
+诊断与退出状态，而不是 ASON。
 
 | 命令                                           | 输入                 | 输出                                   |
 | ---------------------------------------------- | -------------------- | -------------------------------------- |
@@ -15,6 +16,7 @@ ash CLI 是机器接口：成功输出和错误诊断都使用稳定的 ASON，�
 | `ash ason`                                     | stdin 裸 ASON        | 唯一规范 ASON                          |
 | `ash run`                                      | stdin 单个类型化请求 | 单个最终响应                           |
 | `ash rpc`                                      | stdin/stdout 长度帧  | 握手与有序响应帧                       |
+| `ash shell [--no-profile] [-c SOURCE]`         | 源码参数或有界 stdin | 人类命令输出与带源码位置的诊断         |
 | `ash self status [--prefix PATH]`              | 安装前缀             | 当前/前一版本与安装状态                |
 | `ash self check --candidate FILE`              | 候选二进制           | 健康、版本与目标                       |
 | `ash self update [--prefix PATH] [--from DIR]` | 签名元数据或离线目录 | 激活结果                               |
@@ -22,6 +24,21 @@ ash CLI 是机器接口：成功输出和错误诊断都使用稳定的 ASON，�
 | `ash self recover [--prefix PATH]`             | 安装日志             | 恢复结果                               |
 
 `ash self replace` 是更新流程使用的内部 Windows 辅助入口，不是普通 Harness API。
+
+## 人类 Shell 检查点
+
+当前 H1 检查点针对同一份持久原生状态，顺序执行 H0 的简单命令语法。已实现 `pwd`、
+`echo`（含 `-n`）和 `cd`；源码可以来自 `-c SOURCE`，也可以来自不超过 1 MiB 的
+stdin：
+
+```sh
+ash shell -c 'pwd; echo hello; cd crates; pwd'
+printf 'echo from-stdin\n' | ash shell --no-profile
+```
+
+交互输入、Profile、脚本文件参数、外部进程以及可移植 `ls`/`cat`/`grep` 执行尚未
+实现。常规二进制启用 `human-shell` feature；`cargo build -p a3s-ash
+--no-default-features` 保留最小机器专用构建。
 
 ## 错误契约
 
@@ -33,10 +50,14 @@ e{c}:
 4
 ```
 
-退出码按错误类别稳定映射。调用方应根据 ASON 诊断字段和退出码分支，不应匹配本地化
-文本；无参数或未知命令返回 Usage 类错误，而不是打印帮助。
+对机器命令而言，退出码按错误类别稳定映射。调用方应根据 ASON 诊断字段和退出码分支，
+不应匹配本地化文本；无参数或未知机器命令返回 Usage 类错误，而不是打印帮助。
+`ash shell` 则有意输出人类诊断和常规命令状态。
 
 ## 运行目录
 
 文件操作受启动时工作区约束。路径必须使用规范逻辑形式，拒绝词法逃逸、符号链接或
 Windows reparse point 绕过。`exec` 也不会自动切换到隐式系统 Shell。
+
+人类 Shell 状态改用原生 `PathBuf` 与 `OsString`。`cd` 继承普通用户文件系统权限，
+`pwd` 保留 Unix 原生路径字节；这不会削弱或替代 ASH/1 的工作区约束。

@@ -10,6 +10,7 @@ dependencies = [
  "a3s-ash-ops",
  "a3s-ash-platform",
  "a3s-ash-protocol",
+ "a3s-ash-shell",
  "a3s-ash-store",
  "a3s-ash-update",
  "blake3",

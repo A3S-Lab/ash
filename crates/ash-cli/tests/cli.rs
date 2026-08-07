@@ -444,6 +444,76 @@ fn usage_and_missing_handshake_are_machine_only() {
     assert_eq!(handshake.stderr, b"s:1\ne{c}:\n7\n");
 }
 
+#[cfg(feature = "human-shell")]
+#[test]
+fn shell_command_executes_stateful_sequence_without_machine_framing() {
+    let directory = TestDirectory::new();
+    fs::create_dir(directory.0.join("child")).expect("create child");
+    let output = run_in(
+        &directory,
+        &[
+            "shell",
+            "--no-profile",
+            "-c",
+            "cd .; pwd; echo \"hello world\"; cd child; pwd; echo -n done",
+        ],
+        b"",
+    );
+
+    let root = fs::canonicalize(&directory.0).expect("canonical root");
+    let child = fs::canonicalize(directory.0.join("child")).expect("canonical child");
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("{}\nhello world\n{}\ndone", root.display(), child.display()).as_bytes()
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[cfg(feature = "human-shell")]
+#[test]
+fn shell_command_accepts_a_bounded_stdin_script() {
+    let output = run(&["shell"], b"echo from-stdin\n");
+
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert_eq!(output.stdout, b"from-stdin\n");
+    assert!(output.stderr.is_empty());
+
+    let at_limit = run(&["shell"], &vec![b'#'; 1024 * 1024]);
+    assert!(at_limit.status.success(), "stderr={:?}", at_limit.stderr);
+    assert!(at_limit.stdout.is_empty());
+    assert!(at_limit.stderr.is_empty());
+
+    let over_limit = run(&["shell"], &vec![b'#'; 1024 * 1024 + 1]);
+    assert_eq!(over_limit.status.code(), Some(2));
+    assert!(over_limit.stdout.is_empty());
+    assert_eq!(
+        over_limit.stderr,
+        b"ash: shell source exceeds the 1 MiB input ceiling\n"
+    );
+}
+
+#[cfg(feature = "human-shell")]
+#[test]
+fn shell_usage_and_parse_failures_are_human_diagnostics() {
+    let usage = run(&["shell", "--unknown"], b"");
+    assert_eq!(usage.status.code(), Some(2));
+    assert!(usage.stdout.is_empty());
+    assert_eq!(
+        usage.stderr,
+        b"ash: usage: ash shell [--no-profile] [-c SOURCE]\n"
+    );
+
+    let parse = run(&["shell", "-c", "echo 'unterminated"], b"");
+    assert_eq!(parse.status.code(), Some(2));
+    assert!(parse.stdout.is_empty());
+    assert_eq!(
+        parse.stderr,
+        b"ash: single-quoted text is missing its closing quote at bytes 5..18\n"
+    );
+    assert!(!parse.stderr.starts_with(b"s:1\n"));
+}
+
 #[test]
 fn rpc_rejects_noncanonical_framed_ason() {
     let output = run(&["rpc"], &frame(b"v:\"safe\"\n"));
