@@ -106,6 +106,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "a3s-ash-shell"
+version = "0.1.0"
+
+[[package]]
 name = "a3s-ash-store"
 version = "0.1.0"
 dependencies = [

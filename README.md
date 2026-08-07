@@ -205,7 +205,7 @@ capability, permit, path, transaction, and signed-update model.
 - [Complete capabilities](https://a3s-lab.github.io/ash/guide/capabilities.html) — every operation, guarantee, and non-goal
 - [Coding Agent integration](https://a3s-lab.github.io/ash/guide/coding-agents.html) — Skill and harness workflow
 - [Architecture](./docs/architecture.md) — semantic IR, scheduler, governor, and platform boundary
-- [Portable human-shell proposal](./docs/portable-human-shell.md) and [separation decision](./docs/decisions/0002-separate-portable-human-shell-layer.md)
+- [Portable human-shell architecture](./docs/portable-human-shell.md) and [separation decision](./docs/decisions/0002-separate-portable-human-shell-layer.md)
 - [ASH/1 and ASON](./docs/protocol.md) — authoritative wire and data contract
 - [Distribution](./docs/distribution.md) and [release operations](./docs/releasing.md)
 - [Benchmark methodology](./docs/benchmarks.md)

@@ -1,0 +1,9 @@
+# command	expected resolution
+cd	builtin:cd
+ll	alias:ll:ls -la
+deploy	function:deploy
+cat	portable:cat
+cargo	native:/fixture/bin/cargo:implicit
+native:cargo	native:/fixture/bin/cargo:explicit
+linux:make	wsl:Ubuntu:make
+missing	error:not-found:missing
