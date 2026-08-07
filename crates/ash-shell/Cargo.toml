@@ -1,6 +1,6 @@
 [package]
 name = "a3s-ash-shell"
-description = "Portable human-shell syntax and state for ash"
+description = "Portable human-shell syntax, state, execution, and interaction for ash"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,4 +12,5 @@ homepage.workspace = true
 [dependencies]
 ash-ops.workspace = true
 ash-platform.workspace = true
+rustyline.workspace = true
 tokio.workspace = true

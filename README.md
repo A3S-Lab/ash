@@ -24,11 +24,13 @@ budgets, and returns canonical ASON with references to complete retained
 evidence. No hidden shell string, silent truncation, or completion-order output
 becomes part of the contract.
 
-The optional human frontend has entered H1 with a feature-gated,
-non-interactive `ash shell` route. It currently executes sequential `pwd`,
-`echo`, `cd`, `export`, `unset`, and portable `ls`, `cat`, and `grep` commands
-plus native host executables with direct argument vectors from `-c SOURCE`, a
-native script-file path, or bounded stdin while preserving the machine
+The optional human frontend has reached an interactive H1 checkpoint with a
+feature-gated `ash shell` route. A terminal invocation opens a line-edited REPL
+with a configurable prompt, private persistent history, opt-in startup Profile,
+and `exit [STATUS]`. The same persistent state executes sequential `pwd`,
+`echo`, `cd`, `export`, `unset`, portable `ls`, `cat`, and `grep`, plus native
+host executables with direct argument vectors. Inline source, native script
+files, and bounded stdin remain available without changing the machine
 contracts of `ash run` and `ash rpc`.
 
 ## What ash covers
@@ -43,7 +45,7 @@ contracts of `ash run` and `ash rpc`.
 | Retained evidence    | `/ # ? - \| >`                        | Byte and line slices, search, release, ordered table projection, and capability-gated materialization                                                                  |
 | Model context        | ASON, `×N`, `×N#K`, `⋯N`              | Columnar records, path dictionaries, explicit reductions, stable merge, and references back to the full source                                                         |
 | Trust and delivery   | capabilities, permits, signed updates | Least-privilege negotiation, session/action/policy/expiry-bound one-time permits, replay rejection, transactional activation, recovery, rollback, SBOM, and provenance |
-| Human shell          | `ash shell`                           | Source-spanned parsing, persistent cwd/environment, portable commands, and bounded direct-argv native execution in H1                                              |
+| Human shell          | `ash shell`                           | Line-edited REPL, opt-in Profile, private history, source-spanned execution, portable commands, and direct-argv native launch in H1                                 |
 
 The [complete capability map](https://a3s-lab.github.io/ash/guide/capabilities.html)
 documents guarantees, evidence, and deliberate non-goals for the full surface.
@@ -72,19 +74,37 @@ Use $use-ash to inspect this repository, make the requested change, and verify i
 Read the [Coding Agent integration guide](https://a3s-lab.github.io/ash/guide/coding-agents.html)
 or inspect the [Skill source](./.agents/skills/use-ash/SKILL.md).
 
-## First human command
+## First human commands
 
-The current non-interactive H1 subset accepts source directly, from a native
-script-file path, or through stdin:
+Run `ash shell` on a terminal for the default `ash> ` prompt, or select a
+non-interactive source explicitly:
 
 ```sh
+ash shell
 ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
+ash shell --profile ./profile.ash
 ```
 
-Every file or stdin source is limited to 1 MiB of valid UTF-8. Use
+Every script, stdin source, and Profile is limited to 1 MiB of valid UTF-8. Use
 `ash shell -- ./-script.ash` when a file operand begins with `-`.
+Profiles are opt-in through `--profile FILE` or non-empty `ASH_PROFILE`;
+`--no-profile` provides deterministic recovery. A Profile is parsed completely
+before any of it executes. A parse failure stops non-interactive startup, while
+an interactive shell reports the source span and still opens with no partial
+Profile effects. `exit [STATUS]` accepts 0 through 255, uses the previous status
+when omitted, and stops the remaining submitted source.
+
+`ASH_PROMPT` replaces the prompt and must be valid UTF-8. `ASH_HISTORY` selects
+a history file relative to the initial cwd; an empty value disables persistent
+history. Otherwise the default is `$XDG_STATE_HOME/ash/history`,
+`$HOME/.local/state/ash/history`, or `%LOCALAPPDATA%\ash\history`, depending on
+the host. Lines beginning with a space or tab are not recorded. History files
+are rejected when they are symbolic links or non-regular targets, use mode
+`0600` on Unix, and degrade to an in-memory session with a warning if persistence
+is unsafe or unavailable.
+
 Portable `ls` lists one path (default `.`), emits one stable native name per
 line, and supports `-a`/`--all`, `-d`/`--directory`, `-1`, combined short
 options, and `--`. Unsupported GNU options fail clearly.
@@ -115,13 +135,15 @@ empty, and native argument units are preserved through direct argv launch.
 Native commands resolve through the shell state's `PATH` or an explicit
 `native:` prefix, then launch the resolved executable directly with the parsed
 argument vector, current directory, and exported environment. No `sh -c`,
-`cmd /c`, or PowerShell command string is inserted. Child stdin is closed in
-this non-interactive checkpoint; stdout and stderr share the remaining 128 MiB
-synchronous capture allowance, and the native exit status is returned.
+`cmd /c`, or PowerShell command string is inserted. Child stdin remains closed
+and output remains synchronously captured, so native programs that themselves
+require a foreground terminal are still deferred to the H4 job-control work.
+Stdout and stderr share the remaining 128 MiB capture allowance, and the native
+exit status is returned.
 
-Interactive prompts, profiles, broader expansion, streaming stdio, and WSL
-execution are not implemented yet. A minimal machine-only binary can be built
-with `--no-default-features`.
+Streaming stdio and pipelines, foreground interactive programs and job control,
+broader expansion, mutations, and WSL execution are not implemented yet. A
+minimal machine-only binary can be built with `--no-default-features`.
 
 ## First typed request
 
@@ -180,7 +202,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **258 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **277 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, and signed updates.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB
   retained capture crossing the 4 MiB memory ceiling and fetching only its final

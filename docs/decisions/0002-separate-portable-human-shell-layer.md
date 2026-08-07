@@ -51,24 +51,27 @@ The human shell:
 The detailed accepted contract is defined in
 [`../portable-human-shell.md`](../portable-human-shell.md).
 
-The current source checkpoint has completed H0 and started H1. The independent
-`a3s-ash-shell` crate now owns source-spanned parsing, persistent state,
-deterministic command resolution, and a sequential executor for `pwd`, `echo`,
-`cd`, expanded `export`/`unset` environment updates, portable `ls`, bounded
-raw-byte `cat`, bounded text `grep`, named and last-status parameter expansion,
-and native host executables. Parameter nodes retain exact quote and source-span
+The current source checkpoint has completed H0 and implemented H1. The
+independent `a3s-ash-shell` crate now owns source-spanned parsing, persistent
+state, deterministic command resolution, a cross-platform line editor, private
+file history, and a sequential executor for `pwd`, `echo`, `cd`, expanded
+`export`/`unset` environment updates, `exit`, portable `ls`, bounded raw-byte
+`cat`, bounded text `grep`, named and last-status parameter expansion, and
+native host executables. Parameter nodes retain exact quote and source-span
 metadata; a separate native-string expansion stage performs the documented
-fixed field splitting before resolution. Shared
-provider-neutral semantic services live below the ASH/1 adapters in
-`a3s-ash-ops`; the portable commands reuse their bounded list/read/search
-semantics through an ordinary-authority native provider. Native commands reuse
-the `ash-platform` process-tree boundary and launch an already-resolved native
-executable with the exact argument vector, persistent cwd/environment, closed
-stdin, bounded captured stdout/stderr, and propagated exit status; no host
-shell is inserted. The feature-gated `ash shell` route accepts `-c SOURCE`, a
-bounded stdin script, or a bounded native script-file path without changing the
-machine diagnostics of `ash run` or `ash rpc`; interactive input, broader
-expansion, streaming stdio, and WSL execution are still staged work.
+fixed field splitting before resolution. Shared provider-neutral semantic
+services live below the ASH/1 adapters in `a3s-ash-ops`; the portable commands
+reuse their bounded list/read/search semantics through an ordinary-authority
+native provider. Native commands reuse the `ash-platform` process-tree boundary
+and launch an already-resolved native executable with the exact argument vector,
+persistent cwd/environment, closed stdin, bounded captured stdout/stderr, and
+propagated exit status; no host shell is inserted. The feature-gated `ash shell`
+route opens a terminal REPL or accepts `-c SOURCE`, bounded stdin, or a bounded
+native script path. Startup Profiles are explicit through `--profile FILE` or
+`ASH_PROFILE`, with `--no-profile` as the deterministic recovery path. These
+human features do not change the machine diagnostics of `ash run` or `ash rpc`.
+Broader expansion, streaming stdio and pipelines, foreground interactive
+programs and jobs, mutations, and WSL execution remain staged work.
 
 ## Rejected alternatives
 

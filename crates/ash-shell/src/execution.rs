@@ -77,6 +77,7 @@ pub struct ShellExecution {
     stderr: Vec<u8>,
     diagnostics: Vec<ExecutionDiagnostic>,
     status: ShellStatus,
+    exit_requested: Option<i64>,
 }
 
 impl ShellExecution {
@@ -98,6 +99,12 @@ impl ShellExecution {
     #[must_use]
     pub const fn status(&self) -> &ShellStatus {
         &self.status
+    }
+
+    /// Returns the requested process status when a valid `exit` stopped this source.
+    #[must_use]
+    pub const fn exit_requested(&self) -> Option<i64> {
+        self.exit_requested
     }
 
     #[must_use]
@@ -165,12 +172,14 @@ where
                 stderr: diagnostic.render().into_bytes(),
                 diagnostics: vec![diagnostic],
                 status,
+                exit_requested: None,
             };
         }
     };
 
     let mut output = ExecutionOutput::default();
-    let mut final_status = ShellStatus::success();
+    let mut final_status = state.last_status().clone();
+    let mut exit_requested = None;
     for command in script.commands() {
         let expanded = expand_words(command.words(), state);
         let name_span = expanded.first().map(|word| word.span());
@@ -202,6 +211,7 @@ where
                         &words[1..],
                         command.span(),
                         &mut output,
+                        &mut exit_requested,
                         runner,
                     )
                     .await
@@ -224,15 +234,16 @@ where
                 .extend_from_slice(diagnostic.render().as_bytes());
         }
         state.set_last_status(final_status.clone());
-    }
-    if script.commands().is_empty() {
-        state.set_last_status(final_status.clone());
+        if exit_requested.is_some() {
+            break;
+        }
     }
     ShellExecution {
         stdout: output.stdout,
         stderr: output.stderr,
         diagnostics: output.diagnostics,
         status: final_status,
+        exit_requested,
     }
 }
 
@@ -242,6 +253,7 @@ async fn execute_command<R>(
     arguments: &[OsString],
     span: SourceSpan,
     output: &mut ExecutionOutput,
+    exit_requested: &mut Option<i64>,
     runner: &R,
 ) -> ShellStatus
 where
@@ -256,6 +268,11 @@ where
         }
         ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Unset) => {
             execute_unset(state, arguments, span, &mut output.diagnostics)
+        }
+        ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Exit) => {
+            let (status, requested) = execute_exit(state, arguments, span, &mut output.diagnostics);
+            *exit_requested = requested;
+            status
         }
         ResolvedCommand::Portable(PortableCommand::Pwd) => execute_pwd(
             state,
@@ -1049,6 +1066,58 @@ fn execute_unset(
     ShellStatus::success()
 }
 
+fn execute_exit(
+    state: &ShellState,
+    arguments: &[OsString],
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> (ShellStatus, Option<i64>) {
+    let arguments = if arguments.first().is_some_and(|argument| argument == "--") {
+        &arguments[1..]
+    } else {
+        arguments
+    };
+    let code = match arguments {
+        [] => state.last_status().code(),
+        [code] => {
+            let Some(code) = code.to_str() else {
+                return (
+                    invalid_arguments("exit status must be valid UTF-8", span, diagnostics),
+                    None,
+                );
+            };
+            let Ok(code) = code.parse::<i64>() else {
+                return (
+                    invalid_arguments(
+                        "exit status must be an integer from 0 through 255",
+                        span,
+                        diagnostics,
+                    ),
+                    None,
+                );
+            };
+            if !(0..=i64::from(u8::MAX)).contains(&code) {
+                return (
+                    invalid_arguments(
+                        "exit status must be an integer from 0 through 255",
+                        span,
+                        diagnostics,
+                    ),
+                    None,
+                );
+            }
+            code
+        }
+        _ => {
+            return (
+                invalid_arguments("exit accepts at most one status", span, diagnostics),
+                None,
+            );
+        }
+    };
+    (shell_status(code, ShellStatusKind::Exited), Some(code))
+}
+
 fn parse_export_assignment(arguments: &[OsString]) -> Result<(String, OsString), String> {
     let assignment = parse_single_state_argument(arguments, "export", "NAME=VALUE assignment")?;
     let assignment = assignment
@@ -1422,6 +1491,82 @@ mod tests {
         assert!(execution.diagnostics().is_empty());
         assert_eq!(execution.status().code(), 0);
         assert_eq!(state.cwd(), child);
+    }
+
+    #[tokio::test]
+    async fn exit_stops_the_current_source_and_exposes_the_requested_status() {
+        let mut state = ShellState::new(".");
+
+        let execution = execute_source("echo before; exit 23; echo after", &mut state).await;
+
+        assert_eq!(execution.stdout(), b"before\n");
+        assert!(execution.stderr().is_empty());
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(execution.status().code(), 23);
+        assert_eq!(execution.exit_requested(), Some(23));
+        assert_eq!(state.last_status().code(), 23);
+    }
+
+    #[tokio::test]
+    async fn exit_without_status_uses_the_previous_command_status() {
+        let mut state = ShellState::new(".");
+        let lookup = |_command: &str,
+                      _cwd: &std::path::Path,
+                      _environment: &crate::PlatformEnvironment| None;
+
+        let execution = execute_source_with(
+            "missing; exit; echo after",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+        )
+        .await;
+
+        assert!(execution.stdout().is_empty());
+        assert_eq!(execution.diagnostics().len(), 1);
+        assert_eq!(execution.status().code(), 127);
+        assert_eq!(execution.exit_requested(), Some(127));
+        assert_eq!(state.last_status().code(), 127);
+    }
+
+    #[tokio::test]
+    async fn invalid_exit_status_reports_status_two_without_exiting() {
+        for source in [
+            "exit -1; echo recovered",
+            "exit 256; echo recovered",
+            "exit nope; echo recovered",
+            "exit 1 2; echo recovered",
+        ] {
+            let mut state = ShellState::new(".");
+            let execution = execute_source(source, &mut state).await;
+
+            assert_eq!(execution.stdout(), b"recovered\n", "source={source}");
+            assert_eq!(execution.diagnostics().len(), 1, "source={source}");
+            assert_eq!(
+                execution.diagnostics()[0].code(),
+                ExecutionDiagnosticCode::InvalidArguments,
+                "source={source}"
+            );
+            assert_eq!(execution.exit_requested(), None, "source={source}");
+            assert_eq!(execution.status().code(), 0, "source={source}");
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_source_preserves_the_previous_status() {
+        let mut state = ShellState::new(".");
+        state.set_last_status(crate::ShellStatus::new(
+            37,
+            ShellStatusKind::Exited,
+            None,
+            crate::ExecutionBackend::Native,
+        ));
+
+        let execution = execute_source("# no command", &mut state).await;
+
+        assert_eq!(execution.status().code(), 37);
+        assert_eq!(execution.exit_requested(), None);
+        assert_eq!(state.last_status().code(), 37);
     }
 
     #[tokio::test]
