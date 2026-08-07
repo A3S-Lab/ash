@@ -31,7 +31,10 @@ and `exit [STATUS]`. The same persistent state executes sequential `pwd`,
 `echo`, `cd`, `export`, `unset`, portable `ls`, `cat`, and `grep`, plus native
 host executables with direct argument vectors. Inline source, native script
 files, and bounded stdin remain available without changing the machine
-contracts of `ash run` and `ash rpc`.
+contracts of `ash run` and `ash rpc`. H2 has begun below the language surface
+with explicit `Null`, `Piped`, and `Inherit` process-stdio modes; the current
+shell still closes native child stdin and captures both output streams until
+the later streaming and pipeline slices select different endpoints.
 
 ## What ash covers
 
@@ -45,7 +48,7 @@ contracts of `ash run` and `ash rpc`.
 | Retained evidence    | `/ # ? - \| >`                        | Byte and line slices, search, release, ordered table projection, and capability-gated materialization                                                                  |
 | Model context        | ASON, `×N`, `×N#K`, `⋯N`              | Columnar records, path dictionaries, explicit reductions, stable merge, and references back to the full source                                                         |
 | Trust and delivery   | capabilities, permits, signed updates | Least-privilege negotiation, session/action/policy/expiry-bound one-time permits, replay rejection, transactional activation, recovery, rollback, SBOM, and provenance |
-| Human shell          | `ash shell`                           | Line-edited REPL, opt-in Profile, private history, source-spanned execution, portable commands, and direct-argv native launch in H1                                 |
+| Human shell          | `ash shell`                           | H1 REPL lifecycle and commands, plus the explicit cross-platform process-stdio foundation for H2                                                                   |
 
 The [complete capability map](https://a3s-lab.github.io/ash/guide/capabilities.html)
 documents guarantees, evidence, and deliberate non-goals for the full surface.
@@ -141,9 +144,9 @@ require a foreground terminal are still deferred to the H4 job-control work.
 Stdout and stderr share the remaining 128 MiB capture allowance, and the native
 exit status is returned.
 
-Streaming stdio and pipelines, foreground interactive programs and job control,
-broader expansion, mutations, and WSL execution are not implemented yet. A
-minimal machine-only binary can be built with `--no-default-features`.
+User-visible streaming stdio and pipelines, foreground interactive programs and
+job control, broader expansion, mutations, and WSL execution are not implemented
+yet. A minimal machine-only binary can be built with `--no-default-features`.
 
 ## First typed request
 
@@ -202,7 +205,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **277 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **278 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, and signed updates.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB
   retained capture crossing the 4 MiB memory ceiling and fetching only its final

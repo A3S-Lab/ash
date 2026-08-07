@@ -11,7 +11,8 @@ mod workspace;
 pub use identity::FileIdentity;
 pub use mutation::{MutationGuard, ReplaceOutcome};
 pub use process::{
-    EnvironmentChange, NativeProcessSpec, ProcessExit, ProcessHandle, ProcessSpec, spawn_native,
+    EnvironmentChange, NativeProcessSpec, ProcessExit, ProcessHandle, ProcessSpec, ProcessStdio,
+    spawn_native,
 };
 pub use transaction::{
     FileAction, FileActionKind, FileActionOutcome, FileActionState, FileTransactionFailure,
