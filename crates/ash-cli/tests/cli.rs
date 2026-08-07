@@ -777,6 +777,22 @@ fn shell_command_launches_native_argv_with_persistent_cwd_and_environment() {
     assert_eq!(mixed_pipeline.stdout, b"cli-portable\n");
     assert!(mixed_pipeline.stderr.is_empty());
 
+    let stateful_pipeline_source = format!(
+        "export PATH=bin; export PIPE_VALUE=parent; export PIPE_VALUE=child | echo \"$PIPE_VALUE\"; unset PIPE_VALUE | echo \"$PIPE_VALUE\"; set -o pipefail | exit 17; echo $?; export PIPE_VALUE=child | {executable} --copy; echo \"$PIPE_VALUE\""
+    );
+    let stateful_pipeline = run_in(
+        &directory,
+        &["shell", "--no-profile", "-c", &stateful_pipeline_source],
+        b"",
+    );
+    assert!(
+        stateful_pipeline.status.success(),
+        "stderr={:?}",
+        stateful_pipeline.stderr
+    );
+    assert_eq!(stateful_pipeline.stdout, b"parent\nparent\n17\nparent\n");
+    assert!(stateful_pipeline.stderr.is_empty());
+
     let pipefail_source = format!(
         "export PATH=bin; {executable} --exit 9 | {executable} --exit 7 | {executable} --copy; echo $?; set -o pipefail; {executable} --exit 9 | {executable} --exit 7 | {executable} --copy; echo $?; set +o pipefail; {executable} --exit 9 | {executable} --exit 7 | {executable} --copy; echo $?"
     );
