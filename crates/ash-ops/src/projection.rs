@@ -1,9 +1,17 @@
 use std::collections::BTreeMap;
 
 use ash_engine::Program;
+use ash_platform::PlatformError;
 use ash_protocol::response::{FinalResponse, PathMapping};
 
-use crate::OperationError;
+use crate::{OperationError, SemanticPath};
+
+pub fn protocol_path(path: &SemanticPath) -> Result<String, OperationError> {
+    path.as_path()
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| PlatformError::NonUtf8Path.into())
+}
 
 pub fn presentation_limit(program: &Program) -> usize {
     let remaining = program.budget().remaining();

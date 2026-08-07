@@ -760,7 +760,7 @@ async fn exec_output_beyond_retention_quota_fails_without_a_partial_reference() 
 }
 
 #[tokio::test]
-async fn read_list_and_search_execute_through_one_session() {
+async fn read_list_and_search_ash1_bytes_remain_stable_through_one_session() {
     let directory = TestDirectory::new();
     fs::create_dir(directory.0.join("src")).expect("mkdir");
     fs::write(
@@ -787,9 +787,21 @@ async fn read_list_and_search_execute_through_one_session() {
         .encode()
         .expect("encode")
         .encode();
-    assert!(response.contains("p[1]{i,v}:\n1,src/a.rs\n"));
-    assert!(response.contains("d[1]{p,o,n,h,t,r}:\n1,2,1,"));
-    assert!(response.contains("\"Alpha NEEDLE\\n\",~"));
+    assert_eq!(
+        response,
+        concat!(
+            "t:3\n",
+            "i:1\n",
+            "s:0\n",
+            "p[1]{i,v}:\n",
+            "1,src/a.rs\n",
+            "d[1]{p,o,n,h,t,r}:\n",
+            "1,2,1,91e13dce9c8487870151aa7938b318d35e509cdda24aa7458387b2f7f7e5705d,",
+            "\"Alpha NEEDLE\\n\",~\n",
+            "z:0\n",
+            "r:~\n",
+        )
+    );
     drop(program);
 
     let list = Request::new(
@@ -806,9 +818,21 @@ async fn read_list_and_search_execute_through_one_session() {
         .encode()
         .expect("encode")
         .encode();
-    assert!(!response.contains("src/a.rs"));
-    assert!(response.contains("p[1]{i,v}:\n2,src/b.rs\n"));
-    assert!(response.contains("d[2]{p,k,z}:"));
+    assert_eq!(
+        response,
+        concat!(
+            "t:3\n",
+            "i:2\n",
+            "s:0\n",
+            "p[1]{i,v}:\n",
+            "2,src/b.rs\n",
+            "d[2]{p,k,z}:\n",
+            "1,0,23\n",
+            "2,0,13\n",
+            "z:0\n",
+            "r:~\n",
+        )
+    );
     drop(program);
 
     let search = Request::new(
@@ -828,9 +852,19 @@ async fn read_list_and_search_execute_through_one_session() {
         .encode()
         .expect("encode")
         .encode();
-    assert!(response.contains("d[2]{p,l,c,t}:"));
-    assert!(response.contains("Alpha NEEDLE"));
-    assert!(response.contains("needle lower"));
+    assert_eq!(
+        response,
+        concat!(
+            "t:3\n",
+            "i:3\n",
+            "s:0\n",
+            "d[2]{p,l,c,t}:\n",
+            "1,2,7,\"Alpha NEEDLE\"\n",
+            "2,1,1,\"needle lower\"\n",
+            "z:0\n",
+            "r:~\n",
+        )
+    );
 }
 
 #[tokio::test]
