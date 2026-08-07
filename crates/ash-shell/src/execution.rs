@@ -11,7 +11,7 @@ use ash_ops::{
     SemanticServices,
 };
 use ash_platform::{
-    EnvironmentChange, NativeProcessSpec, PlatformError, ProcessExit, spawn_native,
+    EnvironmentChange, NativeProcessSpec, PlatformError, ProcessExit, ProcessStdio, spawn_native,
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -409,7 +409,9 @@ impl NativeCommandRunner for DirectNativeCommandRunner {
                 .map(|(name, value)| EnvironmentChange::Set(name, value))
                 .collect(),
             clear_environment: true,
-            pipe_stdin: false,
+            stdin: ProcessStdio::Null,
+            stdout: ProcessStdio::Piped,
+            stderr: ProcessStdio::Piped,
         })
         .map_err(NativeCommandError::Platform)?;
         let Some(stdout) = process.take_stdout() else {

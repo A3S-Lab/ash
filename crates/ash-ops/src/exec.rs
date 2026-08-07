@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ash_engine::{PermitKind, Program};
-use ash_platform::{EnvironmentChange, ProcessExit, ProcessSpec, Workspace};
+use ash_platform::{EnvironmentChange, ProcessExit, ProcessSpec, ProcessStdio, Workspace};
 use ash_protocol::request::{EXEC_CLEAR_ENVIRONMENT, ExecArgs, InputSource, Request};
 use ash_protocol::response::{
     ErrorCode, ErrorRecord, ErrorStage, FinalResponse, ProcessResult, RESULT_NORMALIZED_TEXT,
@@ -40,7 +40,13 @@ pub async fn execute(
         cwd: arguments.cwd().to_owned(),
         environment,
         clear_environment: arguments.flags() & EXEC_CLEAR_ENVIRONMENT != 0,
-        pipe_stdin: stdin.is_some(),
+        stdin: if stdin.is_some() {
+            ProcessStdio::Piped
+        } else {
+            ProcessStdio::Null
+        },
+        stdout: ProcessStdio::Piped,
+        stderr: ProcessStdio::Piped,
     })?;
     let stdout = process.take_stdout().ok_or(OperationError::WorkLimit)?;
     let stderr = process.take_stderr().ok_or(OperationError::WorkLimit)?;

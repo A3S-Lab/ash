@@ -17,6 +17,30 @@ pub enum EnvironmentChange {
     Remove(OsString),
 }
 
+/// Explicit standard-I/O mode for one child-process stream.
+///
+/// A piped endpoint exposes its corresponding handle through [`ProcessHandle`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ProcessStdio {
+    /// Reuse the parent's corresponding standard handle.
+    Inherit,
+    /// Attach the platform null device.
+    Null,
+    /// Create an operating-system pipe owned by [`ProcessHandle`].
+    Piped,
+}
+
+impl ProcessStdio {
+    fn into_stdio(self) -> Stdio {
+        match self {
+            Self::Inherit => Stdio::inherit(),
+            Self::Null => Stdio::null(),
+            Self::Piped => Stdio::piped(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessSpec {
     pub executable: String,
@@ -24,7 +48,9 @@ pub struct ProcessSpec {
     pub cwd: String,
     pub environment: Vec<EnvironmentChange>,
     pub clear_environment: bool,
-    pub pipe_stdin: bool,
+    pub stdin: ProcessStdio,
+    pub stdout: ProcessStdio,
+    pub stderr: ProcessStdio,
 }
 
 /// Native-string process description for host-authority frontends.
@@ -38,7 +64,9 @@ pub struct NativeProcessSpec {
     pub cwd: PathBuf,
     pub environment: Vec<EnvironmentChange>,
     pub clear_environment: bool,
-    pub pipe_stdin: bool,
+    pub stdin: ProcessStdio,
+    pub stdout: ProcessStdio,
+    pub stderr: ProcessStdio,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,7 +97,9 @@ impl Workspace {
             cwd: cwd.native,
             environment: spec.environment.clone(),
             clear_environment: spec.clear_environment,
-            pipe_stdin: spec.pipe_stdin,
+            stdin: spec.stdin,
+            stdout: spec.stdout,
+            stderr: spec.stderr,
         })
     }
 }
@@ -81,13 +111,9 @@ pub fn spawn_native(spec: &NativeProcessSpec) -> Result<ProcessHandle, PlatformE
     command
         .args(&spec.argv)
         .current_dir(&spec.cwd)
-        .stdin(if spec.pipe_stdin {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdin(spec.stdin.into_stdio())
+        .stdout(spec.stdout.into_stdio())
+        .stderr(spec.stderr.into_stdio());
     if spec.clear_environment {
         command.env_clear();
     }
@@ -205,9 +231,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use super::{EnvironmentChange, NativeProcessSpec, ProcessSpec, spawn_native};
+    use super::{EnvironmentChange, NativeProcessSpec, ProcessSpec, ProcessStdio, spawn_native};
     use crate::Workspace;
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -237,7 +263,7 @@ mod tests {
         fs::write(
             &source,
             r#"
-use std::{env, fs, process::Command, thread, time::Duration};
+use std::{env, fs, io, io::Write, process::Command, thread, time::Duration};
 
 fn main() {
     let mut arguments = env::args().skip(1);
@@ -250,6 +276,13 @@ fn main() {
             println!("argument={argument}");
             eprintln!("native-stderr");
         }
+        Some("copy") => {
+            let mut input = io::stdin().lock();
+            let mut output = io::stdout().lock();
+            io::copy(&mut input, &mut output).expect("copy stdin to stdout");
+            output.flush().expect("flush stdout");
+        }
+        Some("quiet") => {}
         Some("parent") => {
             let ready = arguments.next().expect("ready path");
             let escaped = arguments.next().expect("escaped path");
@@ -304,7 +337,9 @@ fn main() {
                 OsString::from("present"),
             )],
             clear_environment: true,
-            pipe_stdin: false,
+            stdin: ProcessStdio::Null,
+            stdout: ProcessStdio::Piped,
+            stderr: ProcessStdio::Piped,
         })
         .expect("spawn native helper");
         let mut stdout = process.take_stdout().expect("stdout");
@@ -332,6 +367,71 @@ fn main() {
     }
 
     #[tokio::test]
+    async fn explicit_stdio_endpoints_stream_and_expose_only_piped_handles() {
+        let directory = TestDirectory::new();
+        let executable = directory.0.join(compile_process_tree_helper(&directory));
+        let mut process = spawn_native(&NativeProcessSpec {
+            executable: executable.clone().into_os_string(),
+            argv: vec![OsString::from("copy")],
+            cwd: directory.0.clone(),
+            environment: vec![],
+            clear_environment: false,
+            stdin: ProcessStdio::Piped,
+            stdout: ProcessStdio::Piped,
+            stderr: ProcessStdio::Null,
+        })
+        .expect("spawn streaming helper");
+        let mut stdin = process.take_stdin().expect("piped stdin");
+        let mut stdout = process.take_stdout().expect("piped stdout");
+        assert!(process.take_stderr().is_none(), "null stderr has no handle");
+        let expected: Vec<u8> = (0..8 * 1024 * 1024)
+            .map(|index| u8::try_from(index % 251).expect("bounded byte"))
+            .collect();
+        let input = expected.clone();
+
+        let writer = async move {
+            stdin.write_all(&input).await.expect("write stdin");
+            stdin.shutdown().await.expect("close stdin");
+            drop(stdin);
+        };
+        let reader = async {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).await.expect("read stdout");
+            bytes
+        };
+        let ((), actual, exit) = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(writer, reader, process.wait())
+        })
+        .await
+        .expect("streaming helper completes without deadlock");
+        assert!(exit.expect("wait for streaming helper").success);
+        assert_eq!(actual.len(), expected.len());
+        assert!(actual == expected, "streaming payload changed");
+
+        let mut inherited = spawn_native(&NativeProcessSpec {
+            executable: executable.into_os_string(),
+            argv: vec![OsString::from("quiet")],
+            cwd: directory.0.clone(),
+            environment: vec![],
+            clear_environment: false,
+            stdin: ProcessStdio::Inherit,
+            stdout: ProcessStdio::Inherit,
+            stderr: ProcessStdio::Inherit,
+        })
+        .expect("spawn inherited-stdio helper");
+        assert!(inherited.take_stdin().is_none());
+        assert!(inherited.take_stdout().is_none());
+        assert!(inherited.take_stderr().is_none());
+        assert!(
+            inherited
+                .wait()
+                .await
+                .expect("wait for quiet helper")
+                .success
+        );
+    }
+
+    #[tokio::test]
     async fn process_is_spawned_directly_with_piped_machine_output() {
         let directory = TestDirectory::new();
         let workspace = Workspace::new(&directory.0).expect("workspace");
@@ -342,7 +442,9 @@ fn main() {
                 cwd: ".".to_owned(),
                 environment: vec![],
                 clear_environment: false,
-                pipe_stdin: false,
+                stdin: ProcessStdio::Null,
+                stdout: ProcessStdio::Piped,
+                stderr: ProcessStdio::Piped,
             })
             .expect("spawn rustc");
         let mut stdout = process.take_stdout().expect("stdout");
@@ -380,7 +482,9 @@ fn main() {
                 cwd: ".".to_owned(),
                 environment: vec![],
                 clear_environment: false,
-                pipe_stdin: false,
+                stdin: ProcessStdio::Null,
+                stdout: ProcessStdio::Piped,
+                stderr: ProcessStdio::Piped,
             })
             .expect("spawn process tree");
 
@@ -416,7 +520,9 @@ fn main() {
                 cwd: ".".to_owned(),
                 environment: vec![],
                 clear_environment: false,
-                pipe_stdin: false,
+                stdin: ProcessStdio::Null,
+                stdout: ProcessStdio::Piped,
+                stderr: ProcessStdio::Piped,
             })
             .expect("spawn process tree");
 

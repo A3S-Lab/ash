@@ -25,7 +25,9 @@ stdin, and native script-file sources. One persistent state executes sequential
 text `grep`, source-spanned named and last-status expansion, and direct-argv
 native host commands. Pipelines, foreground interactive programs and jobs,
 streaming stdio, broader expansion, mutations, and WSL launch remain
-unimplemented.
+unimplemented. H2 has started at the lower process boundary with explicit
+`Null`, `Piped`, and `Inherit` modes for each child stream; current H1 execution
+maps to those modes without changing its visible capture contract.
 
 ## 1. Executive decision
 
@@ -495,6 +497,17 @@ status. On Unix, signal termination records the signal and exposes `128 +
 signal` as the conventional status. Streaming and inherited-terminal modes
 remain part of H2/H4 rather than being simulated by this buffered path.
 
+The first H2 checkpoint replaces the platform layer's stdin boolean with an
+explicit mode for each of stdin, stdout, and stderr. `Null` attaches the native
+null device, `Piped` exposes a typed child handle, and `Inherit` passes through
+the parent's corresponding standard handle. Machine `exec` still chooses an
+optional piped stdin plus piped stdout/stderr, while H1 native shell execution
+chooses null stdin plus piped stdout/stderr. A cross-platform 8 MiB copy fixture
+drives stdin and stdout concurrently, requires exact bytes, closes stdin to
+deliver EOF, and has a bounded no-deadlock deadline. Pipe graphs, file endpoints,
+ordered descriptor duplication, and terminal inheritance remain later H2/H4
+slices.
+
 Redirections remain an ordered vector because these are observably different:
 
 ```sh
@@ -804,6 +817,13 @@ remain for later increments.
 - implement OS pipes and ordered redirections;
 - supervise multi-process foreground pipelines;
 - add `pipefail` and exact status behavior.
+
+Current checkpoint: the shared platform process boundary now requires explicit
+`Null`, `Piped`, or `Inherit` selection for every standard stream. Existing
+machine and H1 shell callers preserve their prior behavior through explicit
+mapping, and an 8 MiB streaming regression locks handle exposure, EOF closure,
+backpressure, and cross-platform completion. Pipeline syntax and plans, OS pipe
+graphs, file redirection, descriptor ordering, and `pipefail` remain open.
 
 ### H3: mutations and command language
 
