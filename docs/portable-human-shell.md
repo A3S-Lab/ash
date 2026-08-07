@@ -19,10 +19,11 @@ resolution fixtures, and provider-neutral raw read/list/search semantic
 services. Existing ASH/1 adapters reuse those services while retaining permit,
 deadline, budget, projection, retention, and ASON ownership. H1 has started with
 a feature-gated `ash shell` route for inline plus bounded stdin and native
-script-file sources, with sequential `pwd`, `echo`, `cd`, literal
-`export`/`unset`, and portable `ls` plus bounded raw-byte `cat` and text `grep`
-execution, plus direct-argv native host commands. Interactive input, expansion,
-pipelines, jobs, streaming stdio, and WSL launch remain unimplemented.
+script-file sources, with sequential `pwd`, `echo`, `cd`, `export`/`unset`,
+portable `ls` plus bounded raw-byte `cat` and text `grep`, source-spanned named
+parameter and last-status expansion, and direct-argv native host commands.
+Interactive input, pipelines, jobs, streaming stdio, broader expansion, and WSL
+launch remain unimplemented.
 
 ## 1. Executive decision
 
@@ -250,14 +251,21 @@ expansion so quoted and unquoted values cannot be confused.
 
 ```rust
 enum WordPart {
-    Literal(String),
-    Parameter(String),
+    Literal {
+        value: String,
+        quote: QuoteMode,
+        span: SourceSpan,
+    },
+    Parameter {
+        parameter: Parameter,
+        quote: QuoteMode,
+        span: SourceSpan,
+    },
     CommandSubstitution(CommandList),
 }
 
 struct Word {
     parts: Vec<WordPart>,
-    quote: QuoteMode,
     span: SourceSpan,
 }
 ```
@@ -281,6 +289,43 @@ source-spanned diagnostic, never a best-effort reinterpretation.
 The dialect specification must define expansion order and exit-status behavior
 before script execution is declared stable. `.sh` files are not interpreted as
 `ash` scripts; users invoke Bash explicitly when Bash semantics are required.
+
+### 7.1 Current H1 parameter expansion contract
+
+The current expansion stage recognizes exactly `$NAME`, `${NAME}`, and `$?`.
+`NAME` is an ASCII shell identifier and the unbraced form consumes the longest
+valid name. Braces only delimit a plain name: empty names, positional or other
+special parameters, `${NAME:-fallback}`-style operators, and command
+substitution fail with source-spanned diagnostics instead of being
+reinterpreted. A `$` not followed by a supported or reserved parameter starter
+remains literal.
+
+Expansion is quote-aware and runs once for each simple command immediately
+before command resolution:
+
+- single-quoted and backslash-escaped dollars remain literal;
+- double-quoted parameters expand without field splitting, including one
+  preserved empty argument for an empty or undefined value;
+- unquoted parameter values split only on the fixed ASCII space, tab, and LF
+  separators. Literal and quoted word segments are protected, but separators
+  inside an adjacent unquoted expansion still form field boundaries;
+- an empty or undefined unquoted expansion contributes no field, so a word made
+  only from that expansion disappears. If every word disappears, the command is
+  a successful no-op; a quoted empty command name remains an explicit empty-name
+  resolution error;
+- shell variables take precedence over the exported environment. Environment
+  fallback uses the host's name rules, undefined names expand to empty, and
+  `IFS` does not configure splitting in this checkpoint;
+- `$?` expands to the decimal status of the previously completed command. Since
+  state updates after every sequential command, a following command observes a
+  native exit, resolution failure, or successful no-op deterministically.
+
+Values and resulting fields remain native `OsString` data. Unix non-UTF-8 bytes
+and Windows unpaired native units survive lookup, splitting, concatenation, and
+direct argv launch. Only a command name must be UTF-8 because command
+classification is textual; an unrepresentable expanded name fails explicitly
+with status 127. Tilde, command, arithmetic, and glob expansion remain staged
+work and do not run implicitly.
 
 ## 8. Persistent shell state
 
@@ -384,14 +429,16 @@ expressions and argument errors return status 2; missing files, directories,
 non-UTF-8 input, and work-limit failures return status 1. Recursive search,
 multiple files, filename prefixes, stdin `-`, and streaming remain later work.
 
-The current stateful environment contract accepts exactly one literal
-`NAME=VALUE` assignment for `export` and exactly one `NAME` for `unset`. Both
-accept `--`. Names are non-empty ASCII identifiers beginning with a letter or
-underscore; `export` splits only the first `=`, preserves an empty value, and
+The current stateful environment contract accepts exactly one expanded
+`NAME=VALUE` argument for `export` and exactly one expanded `NAME` for `unset`.
+Both accept `--`. Names are non-empty ASCII identifiers beginning with a letter
+or underscore; `export` splits only the first `=`, preserves an empty value, and
 updates both shell-variable and exported environment state. `unset` removes
-both states and succeeds when the name is absent. Neither command emits output.
-Listing, export-without-assignment, multiple names, options, and parameter
-expansion remain unimplemented and fail explicitly where applicable.
+both states and succeeds when the name is absent. Ordinary quote and field rules
+apply before the builtin sees its arguments, so values containing separators
+must be quoted, for example `export COPY="$SOURCE"`. Neither command emits
+output. Listing, export-without-assignment, multiple names, and options remain
+unimplemented and fail explicitly where applicable.
 
 Every portable command has a versioned option contract. Common Linux spelling
 is preferred, but unsupported GNU flags fail clearly. The project must not
@@ -639,7 +686,8 @@ than executing a partial remainder silently.
 - golden AST fixtures with exact source spans;
 - property tests for tokenize/parse/format stability where formatting exists;
 - fuzzing for malformed quotes, nesting, substitutions, and redirections;
-- explicit expansion-order and quoting fixtures;
+- exact parameter AST spans plus explicit expansion-order, native-value, empty,
+  field-boundary, quoting, and previous-status fixtures;
 - rejection tests for unsupported Bash syntax.
 
 ### 19.2 Portable commands
@@ -705,19 +753,21 @@ builtin adapters.
 
 Current checkpoint: `ash shell -c SOURCE`, `ash shell < script.ash`, and
 `ash shell script.ash` parse the H0 syntax subset, execute sequential `pwd`,
-`echo`, `cd`, literal `export`/`unset`, portable `ls`, bounded raw-byte `cat`, and
-bounded text `grep` commands plus native host executables against one native
+`echo`, `cd`, expanded `export`/`unset`, portable `ls`, bounded raw-byte `cat`,
+and bounded text `grep` commands plus native host executables against one native
 `ShellState`, emit source-spanned human diagnostics, and return the last command
-status. Stdin and file sources share a 1 MiB valid-UTF-8 ceiling, while file and
-external-command operands retain native representation. `ls`, `cat`, and `grep`
-reuse the provider-neutral list/read/search services with an unconfined native
-provider and the option contracts in section 10. Native programs resolve from
-the persistent environment, launch through the owned `ash-platform` process
-boundary with exact argv/cwd/environment, and use the bounded dual-stream
-contract in section 11. The `human-shell` feature is enabled for the normal
-binary and can be disabled for a minimal machine-only build. Interactive input,
-profiles, parameter expansion, streaming stdio, and WSL launch remain for later
-increments.
+status. Named `$NAME`/`${NAME}` parameters and `$?` expand in a distinct,
+quote-aware stage with native-string preservation and the fixed field contract
+in section 7.1. Stdin and file sources share a 1 MiB valid-UTF-8 ceiling, while
+file and external-command operands retain native representation. `ls`, `cat`,
+and `grep` reuse the provider-neutral list/read/search services with an
+unconfined native provider and the option contracts in section 10. Native
+programs resolve from the persistent environment, launch through the owned
+`ash-platform` process boundary with exact argv/cwd/environment, and use the
+bounded dual-stream contract in section 11. The `human-shell` feature is enabled
+for the normal binary and can be disabled for a minimal machine-only build.
+Interactive input, profiles, broader expansion, streaming stdio, and WSL launch
+remain for later increments.
 
 ### H2: streaming execution
 

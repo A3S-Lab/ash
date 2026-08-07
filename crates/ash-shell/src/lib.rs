@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Portable human-shell syntax, state, and command resolution.
+//! Portable human-shell syntax, native-string expansion, state, and execution.
 //!
 //! This crate does not expose the ASH/1 machine protocol. It establishes the
 //! human frontend boundary without adding a free-form shell-string operation to
@@ -9,6 +9,7 @@
 
 mod diagnostic;
 mod execution;
+mod expand;
 mod parser;
 mod resolver;
 mod state;
@@ -28,4 +29,4 @@ pub use state::{
     ExecutionBackend, JobState, JobSummary, JobTable, PlatformEnvironment, ShellFunction,
     ShellOptions, ShellState, ShellStatus, ShellStatusKind, StateError,
 };
-pub use syntax::{QuoteMode, Script, SimpleCommand, SourceSpan, Word, WordPart};
+pub use syntax::{Parameter, QuoteMode, Script, SimpleCommand, SourceSpan, Word, WordPart};

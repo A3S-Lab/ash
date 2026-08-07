@@ -100,10 +100,17 @@ short options, and `--`. A search is limited to 64 MiB; no matches return status
 options fail explicitly.
 
 `export NAME=VALUE` and `unset NAME` update both shell-variable and exported
-environment state for later commands. Each accepts one literal assignment or
+environment state for later commands. Each accepts one expanded assignment or
 name plus `--`; names are ASCII shell identifiers, empty values are preserved,
-and unsetting a missing name succeeds. Listing, multiple names, and parameter
-expansion remain explicit non-features in this checkpoint.
+and unsetting a missing name succeeds. Quote values that may contain field
+separators, for example `export COPY="$SOURCE"`. Listing and multiple names
+remain explicit non-features in this checkpoint.
+
+`$NAME`, `${NAME}`, and `$?` expand immediately before each command resolves.
+Single quotes and escaped dollars remain literal; double quotes preserve one
+field, while unquoted values split on fixed ASCII space, tab, and LF separators.
+Variables precede host-aware exported-environment lookup, undefined values are
+empty, and native argument units are preserved through direct argv launch.
 
 Native commands resolve through the shell state's `PATH` or an explicit
 `native:` prefix, then launch the resolved executable directly with the parsed
@@ -112,7 +119,7 @@ argument vector, current directory, and exported environment. No `sh -c`,
 this non-interactive checkpoint; stdout and stderr share the remaining 128 MiB
 synchronous capture allowance, and the native exit status is returned.
 
-Interactive prompts, profiles, streaming stdio, parameter expansion, and WSL
+Interactive prompts, profiles, broader expansion, streaming stdio, and WSL
 execution are not implemented yet. A minimal machine-only binary can be built
 with `--no-default-features`.
 
@@ -173,7 +180,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **248 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **258 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, and signed updates.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB
   retained capture crossing the 4 MiB memory ceiling and fetching only its final

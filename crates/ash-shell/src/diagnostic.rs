@@ -10,6 +10,8 @@ pub enum DiagnosticCode {
     UnsupportedSyntax,
     UnterminatedSingleQuote,
     UnterminatedDoubleQuote,
+    UnterminatedParameterExpansion,
+    InvalidParameterExpansion,
     TrailingEscape,
 }
 

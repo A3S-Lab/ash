@@ -45,12 +45,42 @@ impl SourceSpan {
     }
 }
 
-/// Quoting applied to one literal word segment.
+/// Quoting applied to one expansion-ready word segment.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum QuoteMode {
     Unquoted,
     Single,
     Double,
+}
+
+/// One supported shell parameter reference retained before expansion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Parameter {
+    /// A named shell variable or exported environment entry.
+    Variable { name: String, braced: bool },
+    /// The conventional numeric status of the previously executed command.
+    LastStatus,
+}
+
+impl Parameter {
+    /// Returns the named parameter, or `None` for `$?`.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Variable { name, .. } => Some(name),
+            Self::LastStatus => None,
+        }
+    }
+
+    /// Reports whether a named parameter used `${NAME}` syntax.
+    #[must_use]
+    pub const fn is_braced(&self) -> bool {
+        match self {
+            Self::Variable { braced, .. } => *braced,
+            Self::LastStatus => false,
+        }
+    }
 }
 
 /// One expansion-ready segment of a shell word.
@@ -62,13 +92,29 @@ pub enum WordPart {
         quote: QuoteMode,
         span: SourceSpan,
     },
+    Parameter {
+        parameter: Parameter,
+        quote: QuoteMode,
+        span: SourceSpan,
+    },
 }
 
 impl WordPart {
+    /// Returns a literal value, variable name, or `?` for the status parameter.
     #[must_use]
     pub fn value(&self) -> &str {
         match self {
             Self::Literal { value, .. } => value,
+            Self::Parameter { parameter, .. } => parameter.name().unwrap_or("?"),
+        }
+    }
+
+    /// Returns the retained parameter metadata for a parameter segment.
+    #[must_use]
+    pub const fn parameter(&self) -> Option<&Parameter> {
+        match self {
+            Self::Literal { .. } => None,
+            Self::Parameter { parameter, .. } => Some(parameter),
         }
     }
 
@@ -76,6 +122,7 @@ impl WordPart {
     pub const fn quote(&self) -> QuoteMode {
         match self {
             Self::Literal { quote, .. } => *quote,
+            Self::Parameter { quote, .. } => *quote,
         }
     }
 
@@ -83,6 +130,7 @@ impl WordPart {
     pub const fn span(&self) -> SourceSpan {
         match self {
             Self::Literal { span, .. } => *span,
+            Self::Parameter { span, .. } => *span,
         }
     }
 }
@@ -112,16 +160,34 @@ impl Word {
     /// Returns the literal value before parameter, command, or glob expansion.
     #[must_use]
     pub fn literal(&self) -> String {
-        let length = self.parts.iter().map(|part| part.value().len()).sum();
-        let mut value = String::with_capacity(length);
+        let mut value = String::new();
         for part in &self.parts {
-            value.push_str(part.value());
+            match part {
+                WordPart::Literal { value: literal, .. } => value.push_str(literal),
+                WordPart::Parameter {
+                    parameter: Parameter::Variable { name, braced },
+                    ..
+                } => {
+                    value.push('$');
+                    if *braced {
+                        value.push('{');
+                    }
+                    value.push_str(name);
+                    if *braced {
+                        value.push('}');
+                    }
+                }
+                WordPart::Parameter {
+                    parameter: Parameter::LastStatus,
+                    ..
+                } => value.push_str("$?"),
+            }
         }
         value
     }
 }
 
-/// A foreground simple command in the H0 syntax subset.
+/// A foreground simple command in the currently implemented syntax subset.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SimpleCommand {
     words: Vec<Word>,

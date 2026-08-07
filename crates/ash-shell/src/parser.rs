@@ -1,13 +1,14 @@
 use crate::{
-    Diagnostic, DiagnosticCode, QuoteMode, Script, SimpleCommand, SourceSpan, Word, WordPart,
+    Diagnostic, DiagnosticCode, Parameter, QuoteMode, Script, SimpleCommand, SourceSpan, Word,
+    WordPart,
 };
 
 /// Parses the H0 shell syntax subset.
 ///
-/// H0 accepts foreground simple commands separated by a newline or `;`, shell
-/// comments, single and double quotes, and backslash escaping. Syntax reserved
-/// for later milestones is rejected with a source span instead of being
-/// reinterpreted as a literal argument.
+/// The current subset accepts foreground simple commands separated by a newline
+/// or `;`, shell comments, single and double quotes, backslash escaping, named
+/// parameters, and `$?`. Syntax reserved for later milestones is rejected with
+/// a source span instead of being reinterpreted as a literal argument.
 pub fn parse(source: &str) -> Result<Script, Diagnostic> {
     Parser::new(source).parse()
 }
@@ -96,13 +97,6 @@ impl<'a> Parser<'a> {
                     "pipelines, redirections, background jobs, and subshells are reserved for a later milestone",
                 ));
             }
-            if character == '$' {
-                return Err(self.diagnostic_here(
-                    DiagnosticCode::UnsupportedSyntax,
-                    "parameter and command substitution are reserved for a later milestone",
-                ));
-            }
-
             match character {
                 '\'' => {
                     push_unquoted(
@@ -120,7 +114,22 @@ impl<'a> Parser<'a> {
                         &mut unquoted_start,
                         self.position,
                     );
-                    parts.push(self.parse_double_quoted()?);
+                    parts.extend(self.parse_double_quoted()?);
+                }
+                '$' => {
+                    push_unquoted(
+                        &mut parts,
+                        &mut unquoted,
+                        &mut unquoted_start,
+                        self.position,
+                    );
+                    let dollar_start = self.position;
+                    if let Some(parameter) = self.parse_parameter(QuoteMode::Unquoted)? {
+                        parts.push(parameter);
+                    } else {
+                        unquoted_start = Some(dollar_start);
+                        unquoted.push('$');
+                    }
                 }
                 '\\' => {
                     unquoted_start.get_or_insert(self.position);
@@ -179,25 +188,40 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_double_quoted(&mut self) -> Result<WordPart, Diagnostic> {
+    fn parse_double_quoted(&mut self) -> Result<Vec<WordPart>, Diagnostic> {
         let quote_start = self.position;
         self.bump();
+        let mut parts = Vec::new();
         let mut value = String::new();
+        let mut literal_start = quote_start;
         loop {
             match self.peek() {
                 Some('"') => {
                     self.bump();
-                    return Ok(WordPart::Literal {
-                        value,
-                        quote: QuoteMode::Double,
-                        span: SourceSpan::new(quote_start, self.position),
-                    });
+                    if !value.is_empty() || parts.is_empty() {
+                        parts.push(WordPart::Literal {
+                            value,
+                            quote: QuoteMode::Double,
+                            span: SourceSpan::new(literal_start, self.position),
+                        });
+                    }
+                    return Ok(parts);
                 }
                 Some('$') => {
-                    return Err(self.diagnostic_here(
-                        DiagnosticCode::UnsupportedSyntax,
-                        "parameter and command substitution are reserved for a later milestone",
-                    ));
+                    let dollar_start = self.position;
+                    if let Some(parameter) = self.parse_parameter(QuoteMode::Double)? {
+                        if !value.is_empty() {
+                            parts.push(WordPart::Literal {
+                                value: std::mem::take(&mut value),
+                                quote: QuoteMode::Double,
+                                span: SourceSpan::new(literal_start, dollar_start),
+                            });
+                        }
+                        parts.push(parameter);
+                        literal_start = self.position;
+                    } else {
+                        value.push('$');
+                    }
                 }
                 Some('\\') => {
                     let escape_start = self.position;
@@ -231,6 +255,95 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    fn parse_parameter(&mut self, quote: QuoteMode) -> Result<Option<WordPart>, Diagnostic> {
+        let parameter_start = self.position;
+        debug_assert_eq!(self.bump(), Some('$'));
+        let parameter = match self.peek() {
+            Some('?') => {
+                self.bump();
+                Parameter::LastStatus
+            }
+            Some('{') => {
+                self.bump();
+                let name_start = self.position;
+                let Some(first) = self.peek() else {
+                    return Err(Diagnostic::new(
+                        DiagnosticCode::UnterminatedParameterExpansion,
+                        "braced parameter expansion is missing its closing brace",
+                        SourceSpan::new(parameter_start, self.source.len()),
+                    ));
+                };
+                if !is_identifier_start(first) {
+                    let end = self.position + first.len_utf8();
+                    return Err(Diagnostic::new(
+                        DiagnosticCode::InvalidParameterExpansion,
+                        "braced parameters require an ASCII identifier",
+                        SourceSpan::new(parameter_start, end),
+                    ));
+                }
+                self.bump();
+                while self.peek().is_some_and(is_identifier_continue) {
+                    self.bump();
+                }
+                let name_end = self.position;
+                match self.peek() {
+                    Some('}') => {
+                        self.bump();
+                    }
+                    None => {
+                        return Err(Diagnostic::new(
+                            DiagnosticCode::UnterminatedParameterExpansion,
+                            "braced parameter expansion is missing its closing brace",
+                            SourceSpan::new(parameter_start, self.source.len()),
+                        ));
+                    }
+                    Some(character) => {
+                        return Err(Diagnostic::new(
+                            DiagnosticCode::InvalidParameterExpansion,
+                            "braced parameters support only a plain ASCII identifier",
+                            SourceSpan::new(parameter_start, self.position + character.len_utf8()),
+                        ));
+                    }
+                }
+                Parameter::Variable {
+                    name: self.source[name_start..name_end].to_owned(),
+                    braced: true,
+                }
+            }
+            Some(character) if is_identifier_start(character) => {
+                let name_start = self.position;
+                self.bump();
+                while self.peek().is_some_and(is_identifier_continue) {
+                    self.bump();
+                }
+                Parameter::Variable {
+                    name: self.source[name_start..self.position].to_owned(),
+                    braced: false,
+                }
+            }
+            Some('(') => {
+                return Err(Diagnostic::new(
+                    DiagnosticCode::UnsupportedSyntax,
+                    "command substitution is reserved for a later milestone",
+                    SourceSpan::new(parameter_start, self.position + 1),
+                ));
+            }
+            Some(character) if is_unsupported_special_parameter(character) => {
+                return Err(Diagnostic::new(
+                    DiagnosticCode::UnsupportedSyntax,
+                    "only named parameters and `$?` are supported",
+                    SourceSpan::new(parameter_start, self.position + character.len_utf8()),
+                ));
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(WordPart::Parameter {
+            parameter,
+            quote,
+            span: SourceSpan::new(parameter_start, self.position),
+        }))
     }
 
     fn skip_command_layout(&mut self) {
@@ -306,10 +419,22 @@ const fn is_reserved_operator(character: char) -> bool {
     matches!(character, '|' | '&' | '<' | '>' | '(' | ')' | '`')
 }
 
+const fn is_identifier_start(character: char) -> bool {
+    character == '_' || character.is_ascii_alphabetic()
+}
+
+const fn is_identifier_continue(character: char) -> bool {
+    character == '_' || character.is_ascii_alphanumeric()
+}
+
+const fn is_unsupported_special_parameter(character: char) -> bool {
+    character.is_ascii_digit() || matches!(character, '#' | '@' | '*' | '-' | '!' | '$')
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse;
-    use crate::{DiagnosticCode, QuoteMode, SourceSpan};
+    use crate::{DiagnosticCode, Parameter, QuoteMode, SourceSpan};
 
     #[test]
     fn parses_comments_separators_and_mixed_quotes() {
@@ -336,6 +461,114 @@ mod tests {
         assert_eq!(words[2].literal(), "");
         assert_eq!(words[1].parts()[0].quote(), QuoteMode::Single);
         assert_eq!(words[2].parts()[0].quote(), QuoteMode::Double);
+    }
+
+    #[test]
+    fn parses_named_and_status_parameters_with_exact_quote_and_source_spans() {
+        let source = "echo $NAME \"${NAME}:$?\" '$NAME' \\$NAME $";
+        let script = parse(source).expect("parse parameters");
+        let words = script.commands()[0].words();
+
+        assert_eq!(words[1].literal(), "$NAME");
+        assert_eq!(words[1].parts()[0].span(), SourceSpan::new(5, 10));
+        assert_eq!(words[1].parts()[0].quote(), QuoteMode::Unquoted);
+        assert_eq!(
+            words[1].parts()[0].parameter(),
+            Some(&Parameter::Variable {
+                name: "NAME".to_owned(),
+                braced: false,
+            })
+        );
+
+        assert_eq!(words[2].literal(), "${NAME}:$?");
+        assert_eq!(words[2].parts().len(), 3);
+        assert_eq!(words[2].parts()[0].span(), SourceSpan::new(12, 19));
+        assert_eq!(words[2].parts()[0].quote(), QuoteMode::Double);
+        assert_eq!(
+            words[2].parts()[0].parameter(),
+            Some(&Parameter::Variable {
+                name: "NAME".to_owned(),
+                braced: true,
+            })
+        );
+        assert_eq!(words[2].parts()[1].value(), ":");
+        assert_eq!(words[2].parts()[1].span(), SourceSpan::new(19, 20));
+        assert_eq!(
+            words[2].parts()[2].parameter(),
+            Some(&Parameter::LastStatus)
+        );
+        assert_eq!(words[2].parts()[2].span(), SourceSpan::new(20, 22));
+
+        assert_eq!(words[3].literal(), "$NAME");
+        assert_eq!(words[3].parts()[0].quote(), QuoteMode::Single);
+        assert!(words[3].parts()[0].parameter().is_none());
+        assert_eq!(words[4].literal(), "$NAME");
+        assert!(words[4].parts()[0].parameter().is_none());
+        assert_eq!(words[5].literal(), "$");
+        assert!(words[5].parts()[0].parameter().is_none());
+    }
+
+    #[test]
+    fn keeps_non_parameter_dollars_literal_in_unquoted_and_double_quoted_words() {
+        let script = parse("echo $ $: \"$:\" \"\\$NAME\"").expect("literal dollars");
+        let values: Vec<String> = script.commands()[0]
+            .words()
+            .iter()
+            .map(crate::Word::literal)
+            .collect();
+        assert_eq!(values, ["echo", "$", "$:", "$:", "$NAME"]);
+        assert!(
+            script.commands()[0]
+                .words()
+                .iter()
+                .flat_map(|word| word.parts())
+                .all(|part| part.parameter().is_none())
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_and_unsupported_parameter_forms_at_exact_spans() {
+        for (source, code, span) in [
+            (
+                "${}",
+                DiagnosticCode::InvalidParameterExpansion,
+                SourceSpan::new(0, 3),
+            ),
+            (
+                "${9}",
+                DiagnosticCode::InvalidParameterExpansion,
+                SourceSpan::new(0, 3),
+            ),
+            (
+                "${NAME",
+                DiagnosticCode::UnterminatedParameterExpansion,
+                SourceSpan::new(0, 6),
+            ),
+            (
+                "${NAME:-fallback}",
+                DiagnosticCode::InvalidParameterExpansion,
+                SourceSpan::new(0, 7),
+            ),
+            (
+                "$1",
+                DiagnosticCode::UnsupportedSyntax,
+                SourceSpan::new(0, 2),
+            ),
+            (
+                "$(echo)",
+                DiagnosticCode::UnsupportedSyntax,
+                SourceSpan::new(0, 2),
+            ),
+            (
+                "$$",
+                DiagnosticCode::UnsupportedSyntax,
+                SourceSpan::new(0, 2),
+            ),
+        ] {
+            let error = parse(source).expect_err("unsupported parameter form");
+            assert_eq!(error.code(), code, "source={source}");
+            assert_eq!(error.span(), span, "source={source}");
+        }
     }
 
     #[test]

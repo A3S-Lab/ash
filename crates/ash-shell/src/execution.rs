@@ -15,6 +15,7 @@ use ash_platform::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+use crate::expand::expand_words;
 use crate::state::validate_identifier;
 use crate::{
     CommandResolver, DiagnosticCode, ExecutionBackend, HostPlatform, NativeCommandLookup,
@@ -115,9 +116,10 @@ struct ExecutionOutput {
 /// Parses and executes the currently implemented foreground shell subset.
 ///
 /// Commands run sequentially against one mutable `ShellState`. The current H1
-/// slice implements stateful environment updates, the portable command set,
-/// and bounded direct-argv native execution; unresolved backends produce
-/// explicit diagnostics without invoking a host shell.
+/// slice performs quote-aware native-string parameter expansion before
+/// resolution, implements stateful environment updates and the portable command
+/// set, and provides bounded direct-argv native execution. Unresolved backends
+/// produce explicit diagnostics without invoking a host shell.
 #[must_use]
 pub async fn execute_source(source: &str, state: &mut ShellState) -> ShellExecution {
     execute_source_with(source, state, &PathCommandLookup, HostPlatform::current()).await
@@ -170,39 +172,51 @@ where
     let mut output = ExecutionOutput::default();
     let mut final_status = ShellStatus::success();
     for command in script.commands() {
-        let words: Vec<OsString> = command
-            .words()
-            .iter()
-            .map(|word| OsString::from(word.literal()))
+        let expanded = expand_words(command.words(), state);
+        let name_span = expanded.first().map(|word| word.span());
+        let words: Vec<OsString> = expanded
+            .into_iter()
+            .map(crate::expand::ExpandedWord::into_value)
             .collect();
-        let Some(name) = words.first().and_then(|word| word.to_str()) else {
-            continue;
-        };
-        let name_span = command.words()[0].span();
-        let resolved = {
-            let resolver = CommandResolver::for_platform(
-                state,
-                |command: &str, cwd: &std::path::Path, environment: &crate::PlatformEnvironment| {
-                    lookup.resolve(command, cwd, environment)
-                },
-                host,
-            );
-            resolver.resolve(name)
-        };
         let diagnostic_start = output.diagnostics.len();
-        final_status = match resolved {
-            Ok(resolved) => {
-                execute_command(
+        final_status = if words.is_empty() {
+            ShellStatus::success()
+        } else if let Some(name) = words[0].to_str() {
+            let resolved = {
+                let resolver = CommandResolver::for_platform(
                     state,
-                    resolved,
-                    &words[1..],
-                    command.span(),
-                    &mut output,
-                    runner,
-                )
-                .await
+                    |command: &str,
+                     cwd: &std::path::Path,
+                     environment: &crate::PlatformEnvironment| {
+                        lookup.resolve(command, cwd, environment)
+                    },
+                    host,
+                );
+                resolver.resolve(name)
+            };
+            match resolved {
+                Ok(resolved) => {
+                    execute_command(
+                        state,
+                        resolved,
+                        &words[1..],
+                        command.span(),
+                        &mut output,
+                        runner,
+                    )
+                    .await
+                }
+                Err(error) => resolution_failure(
+                    error,
+                    name_span.expect("a non-empty expansion retains a source span"),
+                    &mut output.diagnostics,
+                ),
             }
-            Err(error) => resolution_failure(error, name_span, &mut output.diagnostics),
+        } else {
+            invalid_command_name(
+                name_span.expect("a non-empty expansion retains a source span"),
+                &mut output.diagnostics,
+            )
         };
         for diagnostic in &output.diagnostics[diagnostic_start..] {
             output
@@ -1167,6 +1181,18 @@ fn resolution_failure(
     shell_status(code, ShellStatusKind::ResolutionError)
 }
 
+fn invalid_command_name(
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    diagnostics.push(ExecutionDiagnostic {
+        code: ExecutionDiagnosticCode::Resolution,
+        message: "expanded command name must be valid UTF-8".to_owned(),
+        span,
+    });
+    shell_status(127, ShellStatusKind::ResolutionError)
+}
+
 fn invalid_arguments(
     message: &str,
     span: SourceSpan,
@@ -1496,6 +1522,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parameter_expansion_preserves_native_argv_fields_and_observes_previous_status() {
+        let mut state = ShellState::new("/fixture/work");
+        state
+            .set_variable("VALUE", " alpha  beta ")
+            .expect("variable");
+        let lookup =
+            |command: &str, _cwd: &std::path::Path, _environment: &crate::PlatformEnvironment| {
+                (command == "tool").then(|| PathBuf::from("/fixture/bin/tool"))
+            };
+        let runner = RecordingRunner::new(NativeCommandOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit: ProcessExit {
+                success: false,
+                code: Some(23),
+                signal: None,
+            },
+        });
+
+        let execution = execute_source_with_runner(
+            "tool pre${VALUE}post \"$VALUE\" '$VALUE' \\$VALUE $MISSING \"$MISSING\"; echo $?",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &runner,
+        )
+        .await;
+
+        assert_eq!(execution.stdout(), b"23\n");
+        assert!(execution.stderr().is_empty());
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(execution.status().code(), 0);
+        assert_eq!(state.last_status().code(), 0);
+        let invocation = runner
+            .invocation
+            .lock()
+            .expect("invocation lock")
+            .clone()
+            .expect("invocation");
+        assert_eq!(
+            invocation.arguments,
+            [
+                OsString::from("pre"),
+                OsString::from("alpha"),
+                OsString::from("beta"),
+                OsString::from("post"),
+                OsString::from(" alpha  beta "),
+                OsString::from("$VALUE"),
+                OsString::from("$VALUE"),
+                OsString::new(),
+            ]
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn non_utf8_expanded_command_names_fail_explicitly() {
+        #[cfg(unix)]
+        let command = {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(vec![b't', 0xff])
+        };
+        #[cfg(windows)]
+        let command = {
+            use std::os::windows::ffi::OsStringExt as _;
+            OsString::from_wide(&[u16::from(b't'), 0xd800])
+        };
+        let mut state = ShellState::new(".");
+        state
+            .set_variable("COMMAND", command)
+            .expect("native command variable");
+
+        let execution = execute_source("$COMMAND", &mut state).await;
+
+        assert!(execution.stdout().is_empty());
+        assert_eq!(execution.diagnostics().len(), 1);
+        assert_eq!(
+            execution.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Resolution
+        );
+        assert_eq!(
+            execution.diagnostics()[0].message(),
+            "expanded command name must be valid UTF-8"
+        );
+        assert_eq!(execution.diagnostics()[0].span(), SourceSpan::new(0, 8));
+        assert_eq!(execution.status().code(), 127);
+        assert_eq!(execution.status().kind(), ShellStatusKind::ResolutionError);
+    }
+
+    #[tokio::test]
     async fn native_infrastructure_and_capture_failures_are_typed() {
         let lookup =
             |_command: &str, _cwd: &std::path::Path, _environment: &crate::PlatformEnvironment| {
@@ -1582,6 +1698,27 @@ mod tests {
         assert_eq!(state.environment().get("TOKEN"), None);
         assert_eq!(state.variable("HOME"), None);
         assert_eq!(state.environment().get("HOME"), None);
+    }
+
+    #[tokio::test]
+    async fn exported_values_expand_in_later_stateful_and_portable_commands() {
+        let mut state = ShellState::new(".");
+
+        let execution = execute_source(
+            "export BASE='alpha beta'; export COPY=\"$BASE\"; echo \"${COPY}\"; $MISSING; echo $?",
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(execution.stdout(), b"alpha beta\n0\n");
+        assert!(execution.stderr().is_empty());
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(state.variable("COPY"), Some(OsStr::new("alpha beta")));
+        assert_eq!(
+            state.environment().get("COPY"),
+            Some(OsStr::new("alpha beta"))
+        );
+        assert_eq!(execution.status().code(), 0);
     }
 
     #[tokio::test]
