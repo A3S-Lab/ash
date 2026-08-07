@@ -25,8 +25,9 @@ stdin, and native script-file sources. One persistent state executes sequential
 bounded raw-byte `cat` and text `grep`, source-spanned named and last-status
 expansion, and direct-argv native host commands. H2 adds explicit per-stream
 modes, validated direct OS pipe graphs, same-line pipelines of two to 32 native,
-implemented portable, or implemented stateful-builtin stages, configurable
-`pipefail`, and source-ordered native, portable, or stateful redirections. All stages are
+explicit WSL, implemented portable, or implemented stateful-builtin stages,
+configurable `pipefail`, and source-ordered native, WSL, portable, or stateful
+redirections. All stages are
 expanded and resolved before execution; native pairs use direct pipes, while
 in-process boundaries retain explicit async parent pipe/file handles and run as
 concurrent bounded tasks. Unredirected final stdout and stage-ordered native
@@ -36,9 +37,11 @@ graph into one `NativeProcessJob`; it preserves specification-ordered exits and
 terminates plus reaps every native process tree on a setup, capture, or wait
 failure while the shell polls in-process stages and captures under the same
 completion boundary.
-Foreground interactive programs and jobs,
-terminal streaming, WSL pipeline and redirection
-adapters, broader expansion, mutations, and WSL launch remain unimplemented.
+The explicit Windows adapter discovers `wsl.exe`, constructs exact
+`--distribution`/`--cd`/`--exec` argv, and reuses that graph for WSL streaming
+and host-file redirection. Foreground interactive programs and jobs, terminal
+streaming, broader expansion, mutations, and the remaining WSL policy, general
+path/environment mapping, and interruption contracts remain unimplemented.
 
 ## 1. Executive decision
 
@@ -722,6 +725,21 @@ Cross-platform regressions lock ordered multi-member exits and cleanup of
 multiple independently owned descendant trees, while existing 8 MiB tests retain
 the end-to-end EOF and backpressure contract.
 
+The twelfth checkpoint adds the explicit Windows WSL stream adapter. Resolution
+of `linux:COMMAND` first locates `wsl.exe`; a missing launcher produces the
+typed backend-unavailable diagnostic and ordinary native lookup never falls
+through to WSL. `WslLaunchPlan` emits an optional `--distribution`, the current
+Windows cwd through `--cd`, then `--exec`, the Linux command, and each user
+argument as a separate native string. No host or Linux shell command string is
+constructed. The resulting wrapper joins the existing native process graph, so
+simple commands and mixed pipelines reuse OS pipes, bounded capture, globally
+ordered host-file redirections, endpoint replacement, `pipefail`, and unified
+job supervision without a relay buffer. Shell status records the WSL backend
+and selected distribution. Cross-platform unit tests lock exact lowering,
+preflight, redirection, mixed endpoints, and backend selection. A Windows-only
+test streams an 8 MiB host fixture between two real WSL processes when
+`ASH_TEST_WSL_DISTRIBUTION` names a prepared distribution.
+
 ## 12. Streaming pipelines
 
 Add a dedicated platform-neutral I/O model:
@@ -760,7 +778,8 @@ native and in-process boundaries. It converts the native construction graph to
 a `NativeProcessJob` that waits in specification order and terminates plus reaps
 all member trees on a setup, capture, or wait failure. The shell finishes
 in-process stages and capture drains before entering its non-cancelled wait.
-Capacity reservation, WSL streaming, and WSL redirection adapters remain open.
+WSL wrapper stages now use the same graph and redirection resources. Capacity
+reservation remains open.
 
 Data flows directly through OS pipes. It does not pass through ASON or the
 result store, and it is not materialized in memory before the next command
@@ -833,6 +852,15 @@ Rules:
   for the selected distribution's automount configuration;
 - environment forwarding uses an allowlist and explicit overrides;
 - exit status and interruption are normalized without hiding backend details.
+
+The current adapter implements launcher discovery, exact direct-argv launch,
+cwd entry through `wsl.exe --cd`, stream endpoints, ordered host-file
+redirections, and backend/distribution status. Passing the absolute Windows cwd
+to `--cd` delegates its mount-aware conversion to the selected distribution.
+It does not guess which ordinary command arguments are paths. Installed-feature
+and distribution probing beyond launcher discovery, a general `WslPathMapper`,
+environment allowlisting and overrides, policy/configuration surfaces,
+Linux-side descendant ownership, and interruption normalization remain H5 work.
 
 For a long-running, fully Linux-oriented session, the preferred topology is to
 run the Linux build of `ash shell` inside WSL. Per-command `linux:` dispatch is
@@ -977,6 +1005,14 @@ and leaves the line editor and in-memory session usable.
 - clear failure when WSL or the selected distribution is unavailable;
 - proof that an unresolved native command never falls back implicitly.
 
+The current Windows integration test activates only when
+`ASH_TEST_WSL_DISTRIBUTION` names an already initialized distribution with
+`cat` and `wc`. It streams an 8 MiB file from a Unicode-and-space-containing
+Windows directory through two WSL wrappers and host-side redirections. Launcher
+absence and no-fallback behavior remain unconditional cross-platform unit tests;
+installed-feature and unavailable-distribution diagnostics still need the full
+H5 probe contract.
+
 ### 19.5 Regression gates
 
 - all current ASH/1 request and response fixtures remain byte-identical;
@@ -1028,20 +1064,21 @@ native provider and the option contracts in section 10. Native programs resolve
 from the persistent environment, launch through the owned `ash-platform`
 process boundary with exact argv/cwd/environment, and use the bounded capture
 contract in section 11. A same-line pipeline connects two to 32 fully
-preflighted native, implemented portable, or implemented stateful-builtin
-stages. Native pairs use direct OS pipes; in-process boundaries use retained
+preflighted native, explicit WSL, implemented portable, or implemented
+stateful-builtin stages. Native and WSL-wrapper pairs use direct OS pipes;
+in-process boundaries use retained
 asynchronous ends without removing backpressure. Status defaults to the final
 stage; `set -o pipefail` selects the rightmost unsuccessful stage and
-`set +o pipefail` restores the default. Native, portable, and implemented stateful
-stages accept the ordered redirection subset in section 11; files resolve
+`set +o pipefail` restores the default. Native, WSL, portable, and implemented
+stateful stages accept the ordered redirection subset in section 11; files resolve
 against persistent cwd and attach directly to child or parent-task handles. A simple native
 command and an unredirected first pipeline stage still receive null stdin, so
 foreground terminal programs and Ctrl+C job-tree delivery remain H4 rather
 than being claimed by this REPL checkpoint. The `human-shell` feature is enabled
 for the normal binary and can be disabled for a minimal machine-only build.
-Broader expansion, terminal streaming, mutations, WSL pipeline and redirection
-adapters, job control, and WSL launch
-remain for later increments.
+Broader expansion, terminal streaming, mutations, job control, and the remaining
+WSL detection, policy, path, environment, and interruption contracts remain for
+later increments.
 
 ### H2: streaming execution
 
@@ -1059,7 +1096,8 @@ remain for later increments.
 - stateful simple-command and pipeline redirection adapters are implemented;
 - unified multi-process supervision with ordered wait and all-member native
   process-tree cleanup is implemented;
-- WSL streaming plus WSL redirection adapters remain open.
+- explicit WSL wrapper streaming plus ordered host-file redirection adapters are
+  implemented.
 
 Current checkpoint: the shared platform process boundary requires explicit
 selection for every standard stream. Machine callers preserve their behavior
@@ -1070,7 +1108,7 @@ parent-facing captures. Explicit `ParentProcessPipeEnd` and
 `ParentProcessFile` ownership exposes only validated async readers, writers, and
 files from `NativeProcessGraph`; `ProcessGraphFile` interleaves child and parent
 opens globally. The shell lowers
-same-line, two-to-32-stage native/portable/stateful pipelines after complete
+same-line, two-to-32-stage native/WSL/portable/stateful pipelines after complete
 preflight, applies the persistent `set -o pipefail`/`set +o pipefail` policy to
 the ordered exit vector, and lowers the seven supported native, portable, or
 stateful redirection forms left to right. Explicit parent-closed reader/writer
@@ -1093,7 +1131,9 @@ bytes, EOF, backpressure, deterministic stderr order, and cross-platform
 completion; additional regressions lock portable-only execution, superseded-file
 effects, descriptor sharing, global file order, relative input, append behavior,
 endpoint validation, stateful mutation/open ordering, and preflight rejection.
-WSL streaming and WSL redirection adapters remain open.
+WSL regressions additionally lock missing-launcher preflight, optional
+distribution selection, exact `--cd`/`--exec` argv, mixed stream endpoints,
+ordered host-file redirection, and backend-aware `pipefail` status.
 
 ### H3: mutations and command language
 
@@ -1110,9 +1150,13 @@ WSL streaming and WSL redirection adapters remain open.
 
 ### H5: explicit Linux backend on Windows
 
-- add WSL detection, backend policy, path mapping, and direct argv launch;
-- implement `linux:` resolution and diagnostics;
-- add opt-in WSL integration tests;
+- launcher discovery and direct argv launch are implemented;
+- `linux:` resolution, missing-launcher diagnostics, streaming, redirection, and
+  backend status are implemented;
+- an `ASH_TEST_WSL_DISTRIBUTION`-gated Windows integration test is implemented;
+- installed-distribution detection, backend policy/configuration, general path
+  mapping, environment forwarding, Linux-side ownership, and interruption
+  normalization remain open;
 - document running the Linux `ash shell` build inside WSL for full sessions.
 
 ## 21. Completion criteria

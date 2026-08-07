@@ -7,6 +7,7 @@ mod mutation;
 mod process;
 mod transaction;
 mod workspace;
+mod wsl;
 
 pub use identity::FileIdentity;
 pub use mutation::{MutationGuard, ReplaceOutcome};
@@ -24,6 +25,7 @@ pub use transaction::{
     MAX_FILE_TRANSACTION_TOTAL_BYTES, TransactionControl,
 };
 pub use workspace::{EntryKind, NativeEntry, ResolvedPath, WalkOptions, Workspace};
+pub use wsl::WslLaunchPlan;
 
 use std::io;
 

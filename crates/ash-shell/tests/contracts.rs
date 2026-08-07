@@ -231,7 +231,11 @@ impl NativeCommandLookup for FixtureLookup {
         _cwd: &Path,
         _environment: &PlatformEnvironment,
     ) -> Option<PathBuf> {
-        (command == "cargo").then(|| PathBuf::from("/fixture/bin/cargo"))
+        match command {
+            "cargo" => Some(PathBuf::from("/fixture/bin/cargo")),
+            "wsl.exe" => Some(PathBuf::from("/fixture/bin/wsl.exe")),
+            _ => None,
+        }
     }
 }
 
@@ -258,6 +262,7 @@ fn render_resolution(result: Result<ResolvedCommand, ResolutionError>) -> String
         Ok(ResolvedCommand::Wsl {
             command,
             distribution,
+            ..
         }) => format!(
             "wsl:{}:{command}",
             distribution.as_deref().unwrap_or("default")

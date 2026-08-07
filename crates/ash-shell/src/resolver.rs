@@ -204,6 +204,7 @@ pub enum ResolvedCommand {
         explicit: bool,
     },
     Wsl {
+        launcher: PathBuf,
         command: String,
         distribution: Option<String>,
     },
@@ -296,7 +297,12 @@ where
             if self.host != HostPlatform::Windows {
                 return Err(ResolutionError::BackendUnavailable { backend: "linux" });
             }
+            let launcher = self
+                .lookup
+                .resolve("wsl.exe", self.state.cwd(), self.state.environment())
+                .ok_or(ResolutionError::BackendUnavailable { backend: "linux" })?;
             return Ok(ResolvedCommand::Wsl {
+                launcher,
                 command: linux.to_owned(),
                 distribution: self.state.options().wsl_distribution().map(str::to_owned),
             });
@@ -380,7 +386,11 @@ mod tests {
     }
 
     fn lookup(command: &str, _cwd: &Path, _environment: &PlatformEnvironment) -> Option<PathBuf> {
-        (command == "cargo").then(|| PathBuf::from("/fixture/bin/cargo"))
+        match command {
+            "cargo" => Some(PathBuf::from("/fixture/bin/cargo")),
+            "wsl.exe" => Some(PathBuf::from("/fixture/bin/wsl.exe")),
+            _ => None,
+        }
     }
 
     #[test]
@@ -436,6 +446,7 @@ mod tests {
         assert_eq!(
             windows.resolve("linux:make"),
             Ok(ResolvedCommand::Wsl {
+                launcher: PathBuf::from("/fixture/bin/wsl.exe"),
                 command: "make".to_owned(),
                 distribution: Some("Ubuntu".to_owned()),
             })
@@ -450,6 +461,18 @@ mod tests {
         let linux = CommandResolver::for_platform(&state, lookup, HostPlatform::Linux);
         assert_eq!(
             linux.resolve("linux:make"),
+            Err(ResolutionError::BackendUnavailable { backend: "linux" })
+        );
+
+        let without_wsl = CommandResolver::for_platform(
+            &state,
+            |command: &str, _cwd: &Path, _environment: &PlatformEnvironment| {
+                (command == "cargo").then(|| PathBuf::from("/fixture/bin/cargo"))
+            },
+            HostPlatform::Windows,
+        );
+        assert_eq!(
+            without_wsl.resolve("linux:make"),
             Err(ResolutionError::BackendUnavailable { backend: "linux" })
         );
     }

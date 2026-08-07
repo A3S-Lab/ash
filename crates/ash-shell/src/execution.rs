@@ -14,7 +14,8 @@ use ash_platform::{
     ClosedProcessPipeEnd, EnvironmentChange, NativeProcessFile, NativeProcessFileMode,
     NativeProcessGraph, NativeProcessSpec, ParentProcessFile, ParentProcessFileId,
     ParentProcessPipeEnd, PlatformError, ProcessCaptureId, ProcessExit, ProcessFileId,
-    ProcessGraphFile, ProcessPipeId, ProcessStdio, spawn_native, spawn_native_graph_with_parent_io,
+    ProcessGraphFile, ProcessPipeId, ProcessStdio, WslLaunchPlan, spawn_native,
+    spawn_native_graph_with_parent_io,
 };
 use futures::future::{join_all, try_join_all};
 use regex::{Regex, RegexBuilder};
@@ -138,14 +139,15 @@ struct ExecutionOutput {
 /// Commands and pipelines run sequentially against one mutable `ShellState`.
 /// The current human-shell slice performs quote-aware native-string parameter expansion
 /// before resolution, implements stateful environment updates and the portable
-/// command set, provides bounded direct-argv native execution, and connects
-/// two-to-32-stage native, portable, and stateful-builtin foreground pipelines
-/// with direct operating-system pipes or explicitly retained asynchronous ends.
+/// command set, provides bounded direct-argv native and explicit WSL execution,
+/// and connects two-to-32-stage native, WSL, portable, and stateful-builtin
+/// foreground pipelines with direct operating-system pipes or explicitly
+/// retained asynchronous ends.
 /// Stateful stages execute against isolated state clones. Pipeline status
 /// defaults to the final stage and can select the rightmost failure through
 /// persistent `pipefail`; final stdout and every stage's stderr share the
-/// synchronous capture ceiling. Native and portable commands plus implemented
-/// stateful builtins accept
+/// synchronous capture ceiling. Native and WSL commands, portable commands,
+/// and implemented stateful builtins accept
 /// source-ordered `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`
 /// redirections resolved against the persistent shell working directory;
 /// child and parent-task files open in one global order, stateful simple-command
@@ -326,7 +328,9 @@ where
     if !redirections.is_empty()
         && !matches!(
             &resolved,
-            ResolvedCommand::Native { .. } | ResolvedCommand::Portable(_)
+            ResolvedCommand::Native { .. }
+                | ResolvedCommand::Wsl { .. }
+                | ResolvedCommand::Portable(_)
         )
         && !matches!(
             &resolved,
@@ -436,13 +440,24 @@ where
             )
             .await
         }
-        ResolvedCommand::Wsl { command, .. } => unsupported(
-            format!("WSL execution for `{command}` is not implemented yet"),
-            span,
-            &mut output.diagnostics,
-            ShellStatusKind::SpawnError,
-            126,
-        ),
+        ResolvedCommand::Wsl {
+            launcher,
+            command,
+            distribution,
+        } => {
+            execute_wsl(
+                state,
+                launcher,
+                &command,
+                distribution,
+                arguments,
+                redirections,
+                span,
+                output,
+                runner,
+            )
+            .await
+        }
     }
 }
 
@@ -452,6 +467,7 @@ struct NativeInvocation {
     arguments: Vec<OsString>,
     cwd: PathBuf,
     environment: Vec<(OsString, OsString)>,
+    backend: ExecutionBackend,
     capture_limit: u64,
     files: Vec<NativeProcessFile>,
     stdin: ProcessStdio,
@@ -1754,6 +1770,49 @@ where
                     }
                 }
             }
+            Ok(ResolvedCommand::Wsl {
+                launcher,
+                command: linux_command,
+                distribution,
+            }) => {
+                let stdin = if index == 0 {
+                    ProcessStdio::Null
+                } else {
+                    ProcessStdio::Pipe(ProcessPipeId::new(
+                        u32::try_from(index - 1).expect("pipeline stage ceiling fits u32"),
+                    ))
+                };
+                let stdout = if index + 1 == commands.len() {
+                    ProcessStdio::Capture(STDOUT_CAPTURE)
+                } else {
+                    ProcessStdio::Pipe(ProcessPipeId::new(
+                        u32::try_from(index).expect("pipeline stage ceiling fits u32"),
+                    ))
+                };
+                match wsl_invocation(
+                    state,
+                    launcher,
+                    &linux_command,
+                    distribution,
+                    &words[1..],
+                    command.redirections(),
+                    capture_limit,
+                    NativeStdio {
+                        stdin,
+                        stdout,
+                        stderr: ProcessStdio::Capture(STDERR_CAPTURE),
+                    },
+                ) {
+                    Ok(invocation) => stages.push(PipelineStageInvocation::Native(invocation)),
+                    Err(error) => {
+                        return redirection_failure(
+                            error.message,
+                            error.span,
+                            &mut output.diagnostics,
+                        );
+                    }
+                }
+            }
             Ok(ResolvedCommand::StatefulBuiltin(builtin))
                 if stateful_builtin_is_implemented(builtin) =>
             {
@@ -1850,11 +1909,7 @@ where
                     }
                 }
             }
-            Ok(
-                ResolvedCommand::Alias { name, .. }
-                | ResolvedCommand::Function { name }
-                | ResolvedCommand::Wsl { command: name, .. },
-            ) => {
+            Ok(ResolvedCommand::Alias { name, .. } | ResolvedCommand::Function { name }) => {
                 return unsupported_pipeline_stage(&name, command.span(), &mut output.diagnostics);
             }
             Err(error) => {
@@ -1912,6 +1967,16 @@ where
         }
     }
 
+    let stage_backends = stages
+        .iter()
+        .map(|stage| match stage {
+            PipelineStageInvocation::Native(stage) => stage.backend.clone(),
+            PipelineStageInvocation::Portable(_) | PipelineStageInvocation::Stateful(_) => {
+                ExecutionBackend::Native
+            }
+        })
+        .collect::<Vec<_>>();
+
     match runner
         .run_pipeline(PipelineInvocation {
             stages,
@@ -1923,7 +1988,8 @@ where
         .await
     {
         Ok(pipeline) if pipeline.exits.len() == commands.len() => {
-            let Some(exit) = select_pipeline_exit(&pipeline.exits, state.options().pipefail())
+            let Some((stage_index, exit)) =
+                select_pipeline_exit(&pipeline.exits, state.options().pipefail())
             else {
                 return process_failure(
                     "pipeline supervision returned no exit status".to_owned(),
@@ -1936,7 +2002,7 @@ where
             output.stdout.extend_from_slice(&pipeline.stdout);
             output.stderr.extend_from_slice(&pipeline.stderr);
             output.diagnostics.extend(pipeline.diagnostics);
-            native_exit_status(exit)
+            process_exit_status(exit, stage_backends[stage_index].clone())
         }
         Ok(_) => process_failure(
             "pipeline supervision returned incomplete exit status".to_owned(),
@@ -2181,6 +2247,81 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn execute_wsl<R>(
+    state: &ShellState,
+    launcher: PathBuf,
+    command: &str,
+    distribution: Option<String>,
+    arguments: &[OsString],
+    redirections: &[Redirection],
+    span: SourceSpan,
+    output: &mut ExecutionOutput,
+    runner: &R,
+) -> ShellStatus
+where
+    R: NativeCommandRunner + ?Sized,
+{
+    let backend = ExecutionBackend::Wsl {
+        distribution: distribution.clone(),
+    };
+    let invocation = match wsl_invocation(
+        state,
+        launcher,
+        command,
+        distribution,
+        arguments,
+        redirections,
+        remaining_capture(output),
+        NativeStdio {
+            stdin: ProcessStdio::Null,
+            stdout: ProcessStdio::Capture(STDOUT_CAPTURE),
+            stderr: ProcessStdio::Capture(STDERR_CAPTURE),
+        },
+    ) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            return redirection_failure_with_backend(
+                error.message,
+                error.span,
+                &mut output.diagnostics,
+                backend,
+            );
+        }
+    };
+    match runner.run(invocation).await {
+        Ok(wsl) => {
+            output.stdout.extend_from_slice(&wsl.stdout);
+            output.stderr.extend_from_slice(&wsl.stderr);
+            process_exit_status(wsl.exit, backend)
+        }
+        Err(NativeCommandError::CaptureLimit { .. }) => process_failure_with_backend(
+            format!(
+                "WSL command output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
+            ),
+            span,
+            &mut output.diagnostics,
+            ShellStatusKind::Exited,
+            1,
+            backend,
+        ),
+        Err(NativeCommandError::Redirection(error)) => redirection_failure_with_backend(
+            format!("cannot apply redirection for `linux:{command}`: {error}"),
+            span,
+            &mut output.diagnostics,
+            backend,
+        ),
+        Err(error) => process_failure_with_backend(
+            format!("cannot execute `linux:{command}`: {error}"),
+            span,
+            &mut output.diagnostics,
+            ShellStatusKind::SpawnError,
+            126,
+            backend,
+        ),
+    }
+}
+
 fn native_invocation(
     state: &ShellState,
     executable: PathBuf,
@@ -2188,6 +2329,57 @@ fn native_invocation(
     redirections: &[Redirection],
     capture_limit: u64,
     stdio: NativeStdio,
+) -> Result<NativeInvocation, RedirectionPlanError> {
+    process_invocation(
+        state,
+        executable,
+        arguments,
+        redirections,
+        capture_limit,
+        stdio,
+        ExecutionBackend::Native,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wsl_invocation(
+    state: &ShellState,
+    launcher: PathBuf,
+    command: &str,
+    distribution: Option<String>,
+    arguments: &[OsString],
+    redirections: &[Redirection],
+    capture_limit: u64,
+    stdio: NativeStdio,
+) -> Result<NativeInvocation, RedirectionPlanError> {
+    let plan = WslLaunchPlan::new(
+        launcher,
+        distribution.as_deref(),
+        state.cwd(),
+        command,
+        arguments,
+    );
+    let (launcher, arguments) = plan.into_parts();
+    process_invocation(
+        state,
+        launcher,
+        &arguments,
+        redirections,
+        capture_limit,
+        stdio,
+        ExecutionBackend::Wsl { distribution },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_invocation(
+    state: &ShellState,
+    executable: PathBuf,
+    arguments: &[OsString],
+    redirections: &[Redirection],
+    capture_limit: u64,
+    stdio: NativeStdio,
+    backend: ExecutionBackend,
 ) -> Result<NativeInvocation, RedirectionPlanError> {
     let NativeStdio {
         mut stdin,
@@ -2263,6 +2455,7 @@ fn native_invocation(
             .iter()
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect(),
+        backend,
         capture_limit,
         files,
         stdin,
@@ -2299,6 +2492,10 @@ fn unsupported_pipeline_stage(
 }
 
 fn native_exit_status(exit: ProcessExit) -> ShellStatus {
+    process_exit_status(exit, ExecutionBackend::Native)
+}
+
+fn process_exit_status(exit: ProcessExit, backend: ExecutionBackend) -> ShellStatus {
     let (code, kind) = if let Some(signal) = exit.signal {
         (128_i64.saturating_add(signal), ShellStatusKind::Interrupted)
     } else {
@@ -2307,19 +2504,28 @@ fn native_exit_status(exit: ProcessExit) -> ShellStatus {
             ShellStatusKind::Exited,
         )
     };
-    ShellStatus::new(code, kind, exit.signal, ExecutionBackend::Native)
+    ShellStatus::new(code, kind, exit.signal, backend)
 }
 
-fn select_pipeline_exit(exits: &[ProcessExit], pipefail: bool) -> Option<ProcessExit> {
+fn select_pipeline_exit(exits: &[ProcessExit], pipefail: bool) -> Option<(usize, ProcessExit)> {
     if pipefail {
         exits
             .iter()
+            .enumerate()
             .rev()
-            .copied()
-            .find(|exit| !exit.success)
-            .or_else(|| exits.last().copied())
+            .find(|(_, exit)| !exit.success)
+            .map(|(index, exit)| (index, *exit))
+            .or_else(|| {
+                exits
+                    .len()
+                    .checked_sub(1)
+                    .map(|index| (index, exits[index]))
+            })
     } else {
-        exits.last().copied()
+        exits
+            .len()
+            .checked_sub(1)
+            .map(|index| (index, exits[index]))
     }
 }
 
@@ -3205,12 +3411,21 @@ fn redirection_failure(
     span: SourceSpan,
     diagnostics: &mut Vec<ExecutionDiagnostic>,
 ) -> ShellStatus {
+    redirection_failure_with_backend(message, span, diagnostics, ExecutionBackend::Native)
+}
+
+fn redirection_failure_with_backend(
+    message: String,
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+    backend: ExecutionBackend,
+) -> ShellStatus {
     diagnostics.push(ExecutionDiagnostic {
         code: ExecutionDiagnosticCode::Redirection,
         message,
         span,
     });
-    shell_status(1, ShellStatusKind::RedirectionError)
+    ShellStatus::new(1, ShellStatusKind::RedirectionError, None, backend)
 }
 
 fn process_failure(
@@ -3220,12 +3435,30 @@ fn process_failure(
     kind: ShellStatusKind,
     code: i64,
 ) -> ShellStatus {
+    process_failure_with_backend(
+        message,
+        span,
+        diagnostics,
+        kind,
+        code,
+        ExecutionBackend::Native,
+    )
+}
+
+fn process_failure_with_backend(
+    message: String,
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+    kind: ShellStatusKind,
+    code: i64,
+    backend: ExecutionBackend,
+) -> ShellStatus {
     diagnostics.push(ExecutionDiagnostic {
         code: ExecutionDiagnosticCode::Process,
         message,
         span,
     });
-    shell_status(code, kind)
+    ShellStatus::new(code, kind, None, backend)
 }
 
 fn unsupported(
@@ -3331,7 +3564,7 @@ mod tests {
         STDOUT_CAPTURE, execute_source, execute_source_with, execute_source_with_runner,
         run_pipeline,
     };
-    use crate::{HostPlatform, ShellState, ShellStatusKind, SourceSpan};
+    use crate::{ExecutionBackend, HostPlatform, ShellState, ShellStatusKind, SourceSpan};
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -3777,6 +4010,7 @@ fn main() {
         assert!(execution.diagnostics().is_empty());
         assert_eq!(execution.status().code(), 23);
         assert_eq!(execution.status().kind(), ShellStatusKind::Exited);
+        assert_eq!(execution.status().backend(), &ExecutionBackend::Native);
         assert_eq!(state.last_status().code(), 23);
         let invocation = runner
             .invocation
@@ -3786,6 +4020,7 @@ fn main() {
             .expect("invocation");
         assert_eq!(invocation.executable, PathBuf::from("/fixture/bin/tool"));
         assert_eq!(invocation.cwd, PathBuf::from("/fixture/work"));
+        assert_eq!(invocation.backend, ExecutionBackend::Native);
         assert_eq!(
             invocation.arguments,
             [OsString::from("alpha beta"), OsString::from("plain")]
@@ -3820,6 +4055,221 @@ fn main() {
         assert_eq!(signaled.code(), 143);
         assert_eq!(signaled.kind(), ShellStatusKind::Interrupted);
         assert_eq!(signaled.signal(), Some(15));
+    }
+
+    #[tokio::test]
+    async fn wsl_simple_command_lowers_exact_argv_redirections_and_backend() {
+        let mut state = ShellState::new("/fixture/work tree");
+        state
+            .options_mut()
+            .set_wsl_distribution(Some("Ubuntu 24.04".to_owned()));
+        state.environment_mut().insert("PATH", "/fixture/bin");
+        let lookup =
+            |command: &str, _cwd: &std::path::Path, _environment: &crate::PlatformEnvironment| {
+                (command == "wsl.exe").then(|| PathBuf::from("/fixture/bin/wsl.exe"))
+            };
+        let runner = RecordingRunner::new(NativeCommandOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit: ProcessExit {
+                success: false,
+                code: Some(23),
+                signal: None,
+            },
+        });
+
+        let execution = execute_source_with_runner(
+            "linux:printf '%s\\n' 'two words' '$HOME; exit 9' >result.txt 2>&1",
+            &mut state,
+            &lookup,
+            HostPlatform::Windows,
+            &runner,
+        )
+        .await;
+
+        assert!(execution.stdout().is_empty());
+        assert!(execution.stderr().is_empty());
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(execution.status().code(), 23);
+        assert_eq!(
+            execution.status().backend(),
+            &ExecutionBackend::Wsl {
+                distribution: Some("Ubuntu 24.04".to_owned())
+            }
+        );
+        let invocation = runner
+            .invocation
+            .lock()
+            .expect("invocation lock")
+            .clone()
+            .expect("invocation");
+        assert_eq!(invocation.executable, PathBuf::from("/fixture/bin/wsl.exe"));
+        assert_eq!(invocation.cwd, PathBuf::from("/fixture/work tree"));
+        assert_eq!(
+            invocation.arguments,
+            [
+                "--distribution",
+                "Ubuntu 24.04",
+                "--cd",
+                "/fixture/work tree",
+                "--exec",
+                "printf",
+                "%s\\n",
+                "two words",
+                "$HOME; exit 9",
+            ]
+            .map(OsString::from)
+        );
+        assert_eq!(
+            invocation.backend,
+            ExecutionBackend::Wsl {
+                distribution: Some("Ubuntu 24.04".to_owned())
+            }
+        );
+        assert_eq!(invocation.files.len(), 1);
+        assert_eq!(
+            invocation.files[0].path,
+            PathBuf::from("/fixture/work tree/result.txt")
+        );
+        assert_eq!(invocation.files[0].mode, NativeProcessFileMode::Write);
+        assert_eq!(
+            invocation.stdout,
+            ProcessStdio::File(invocation.files[0].id)
+        );
+        assert_eq!(invocation.stderr, invocation.stdout);
+    }
+
+    #[tokio::test]
+    async fn wsl_pipeline_stage_uses_stream_endpoint_and_pipefail_backend() {
+        let mut state = ShellState::new("/fixture/work");
+        state
+            .options_mut()
+            .set_wsl_distribution(Some("Ubuntu".to_owned()));
+        state.options_mut().set_pipefail(true);
+        let lookup =
+            |command: &str, _cwd: &std::path::Path, _environment: &crate::PlatformEnvironment| {
+                (command == "wsl.exe").then(|| PathBuf::from("/fixture/bin/wsl.exe"))
+            };
+        let runner = RecordingPipelineRunner::new(PipelineOutput {
+            stdout: b"matched\n".to_vec(),
+            stderr: Vec::new(),
+            exits: vec![
+                ProcessExit {
+                    success: false,
+                    code: Some(7),
+                    signal: None,
+                },
+                ProcessExit {
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                },
+            ],
+            diagnostics: Vec::new(),
+        });
+
+        let execution = execute_source_with_runner(
+            "linux:producer 'two words' | grep needle -",
+            &mut state,
+            &lookup,
+            HostPlatform::Windows,
+            &runner,
+        )
+        .await;
+
+        assert_eq!(execution.stdout(), b"matched\n");
+        assert!(execution.stderr().is_empty());
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(execution.status().code(), 7);
+        assert_eq!(
+            execution.status().backend(),
+            &ExecutionBackend::Wsl {
+                distribution: Some("Ubuntu".to_owned())
+            }
+        );
+        let invocation = runner
+            .invocation
+            .lock()
+            .expect("invocation lock")
+            .take()
+            .expect("pipeline invocation");
+        let PipelineStageInvocation::Native(wsl) = &invocation.stages[0] else {
+            panic!("first stage must lower to the WSL wrapper process");
+        };
+        assert_eq!(wsl.executable, PathBuf::from("/fixture/bin/wsl.exe"));
+        assert_eq!(
+            wsl.arguments,
+            [
+                "--distribution",
+                "Ubuntu",
+                "--cd",
+                "/fixture/work",
+                "--exec",
+                "producer",
+                "two words",
+            ]
+            .map(OsString::from)
+        );
+        assert_eq!(wsl.stdin, ProcessStdio::Null);
+        assert_eq!(wsl.stdout, ProcessStdio::Pipe(ProcessPipeId::new(0)));
+        assert_eq!(
+            wsl.backend,
+            ExecutionBackend::Wsl {
+                distribution: Some("Ubuntu".to_owned())
+            }
+        );
+        assert!(matches!(
+            &invocation.stages[1],
+            PipelineStageInvocation::Portable(portable)
+                if portable.stdin == ParentTaskStdio::Pipe(ProcessPipeId::new(0))
+        ));
+        assert!(
+            invocation
+                .parent_pipe_ends
+                .contains(&ParentProcessPipeEnd::Reader(ProcessPipeId::new(0)))
+        );
+        assert!(
+            !invocation
+                .parent_pipe_ends
+                .contains(&ParentProcessPipeEnd::Writer(ProcessPipeId::new(0)))
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_wsl_launcher_fails_resolution_before_runner_or_redirection() {
+        let directory = TestDirectory::new();
+        let mut state = ShellState::new(&directory.0);
+        let lookup = |_command: &str,
+                      _cwd: &std::path::Path,
+                      _environment: &crate::PlatformEnvironment| None;
+        let runner = RecordingRunner::new(NativeCommandOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit: ProcessExit {
+                success: true,
+                code: Some(0),
+                signal: None,
+            },
+        });
+
+        let execution = execute_source_with_runner(
+            "linux:true >must-not-exist",
+            &mut state,
+            &lookup,
+            HostPlatform::Windows,
+            &runner,
+        )
+        .await;
+
+        assert_eq!(execution.status().code(), 126);
+        assert_eq!(execution.status().kind(), ShellStatusKind::ResolutionError);
+        assert_eq!(execution.diagnostics().len(), 1);
+        assert_eq!(
+            execution.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Resolution
+        );
+        assert!(!directory.0.join("must-not-exist").exists());
+        assert!(runner.invocation.lock().expect("invocation lock").is_none());
     }
 
     #[tokio::test]
@@ -5393,6 +5843,7 @@ fn main() {
             arguments,
             cwd: directory.0.clone(),
             environment: Vec::new(),
+            backend: ExecutionBackend::Native,
             capture_limit: 64,
             files: Vec::new(),
             stdin,

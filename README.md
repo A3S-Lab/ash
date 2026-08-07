@@ -94,6 +94,7 @@ non-interactive source explicitly:
 ```sh
 ash shell
 ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
+ash shell -c "linux:uname -a" # Windows with WSL
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ash shell --profile ./profile.ash
@@ -164,8 +165,19 @@ programs that themselves require a foreground terminal are still deferred to
 the H4 job-control work. Stdout and stderr share the remaining 128 MiB capture
 allowance, and the native exit status is returned.
 
-Native and portable commands plus implemented stateful builtins accept `<`, `>`,
-`>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
+On Windows, `linux:COMMAND` explicitly selects WSL. Resolution first locates
+`wsl.exe`; a missing launcher is a typed backend-unavailable failure, and an
+unresolved ordinary command never falls through to WSL. The wrapper receives an
+optional selected distribution, the current Windows cwd through `--cd`, and the
+Linux command plus every argument separately after `--exec`. No host or Linux
+shell string is synthesized. The current CLI uses the user's default WSL
+distribution, while embedders may select one through `ShellOptions`; the chosen
+value is retained in command status. Installed-distribution probing, general
+argument path mapping, explicit environment forwarding, interruption
+normalization, and backend policy remain H5 work.
+
+Native, WSL, and portable commands plus implemented stateful builtins accept
+`<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
 Redirections are applied from left to right, so `command >out 2>&1` merges both
 streams into `out`, while `command 2>&1 >out` leaves stderr on the original
 stdout capture. File targets expand to exactly one native field, resolve from
@@ -178,13 +190,15 @@ before file opens; successful opens precede parent-state mutation, so a later
 builtin filesystem failure retains normal shell file side effects. Stateful
 builtins emit no raw command output, and their source-spanned diagnostics remain
 shell stderr rather than being captured by command stderr redirections. WSL
-redirections remain rejected before side effects.
+files are opened by the Windows host in the same source order and attach
+directly to the wrapper's standard handles.
 
 A same-line `|` forms a foreground pipeline of two to 32 stages. Each stage may
-be a native host command, portable `pwd`, `echo`, `ls`, `cat`, or `grep`, or the
-implemented stateful `cd`, `export`, `unset`, `set`, or `exit`; aliases,
-functions, unimplemented stateful commands, and WSL stages still fail during
-complete preflight. Native-to-native edges remain direct OS pipes. An in-process
+be a native host command, explicit WSL command on Windows, portable `pwd`,
+`echo`, `ls`, `cat`, or `grep`, or the implemented stateful `cd`, `export`,
+`unset`, `set`, or `exit`; aliases, functions, and unimplemented stateful
+commands still fail during complete preflight. Native and WSL wrapper edges
+remain direct OS pipes. An in-process
 boundary retains only the explicitly declared parent reader or writer and runs
 the stage concurrently with native execution and capture. Native streams and
 portable `cat`/`grep` streams are not materialized as a whole before the next
@@ -197,7 +211,7 @@ they cannot mutate the parent and downstream readers receive EOF. Pipeline
 `exit` contributes only its stage status and never stops the parent source. A
 final in-process stage is captured concurrently under the same 128 MiB aggregate
 allowance; native stderr is captured in stage order.
-All native members remain owned by one graph-level job supervisor while
+All native members, including WSL wrappers, remain owned by one graph-level job supervisor while
 portable/stateful futures and capture drains are polled together. Once those
 settle successfully, the supervisor completes every native wait without
 canceling an in-progress reap. A setup, capture, or wait failure terminates and
@@ -208,7 +222,7 @@ Pipeline status defaults to the final stage. With `set -o pipefail`, it becomes
 the rightmost unsuccessful stage, including conventional `128 + signal`
 mapping; an all-success pipeline still uses its final stage. A missing portable
 file, no-match `grep`, failed stateful builtin, or broken in-process writer
-participates in that same exit vector. Any native, portable, or implemented
+participates in that same exit vector. Any native, WSL, portable, or implemented
 stateful stage may redirect stdin, stdout, or stderr or duplicate descriptors in
 source order. If a producer no
 longer writes an internal pipe,
@@ -216,13 +230,13 @@ the downstream reader receives EOF. If a consumer replaces its pipe stdin, the
 upstream writer receives the platform's broken-pipe behavior. A descriptor
 duplicated from the pipe remains connected even if the original descriptor is
 later redirected. Stateful files join the same global open order; replacing
-their empty stdout closes an outgoing pipe normally. WSL stage redirections
-remain unsupported and fail before runner or file side effects.
+their empty stdout closes an outgoing pipe normally. A WSL stage reuses the
+same pipe and file graph without an intermediate relay or full-stream buffer.
 
-User-visible terminal streaming, WSL pipeline adapters and redirection adapters,
-foreground interactive programs and job control, broader expansion, mutations,
-and WSL execution are not implemented yet. A minimal machine-only binary can be
-built with `--no-default-features`.
+User-visible terminal streaming, foreground interactive programs and job
+control, broader expansion, mutations, and the remaining H5 WSL policy, path,
+environment, and interruption contracts are not implemented yet. A minimal
+machine-only binary can be built with `--no-default-features`.
 
 ## First typed request
 
@@ -281,7 +295,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **296 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **302 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, signed updates, and
   the human shell.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB
