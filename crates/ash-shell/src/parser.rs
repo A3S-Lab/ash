@@ -1,15 +1,16 @@
 use crate::{
-    Diagnostic, DiagnosticCode, Parameter, Pipeline, QuoteMode, Script, SimpleCommand, SourceSpan,
-    Word, WordPart,
+    Diagnostic, DiagnosticCode, Parameter, Pipeline, QuoteMode, Redirection, RedirectionDescriptor,
+    RedirectionFileMode, RedirectionTarget, Script, SimpleCommand, SourceSpan, Word, WordPart,
 };
 
 /// Parses the H0 shell syntax subset.
 ///
-/// The current subset accepts foreground native-pipeline syntax with `|`, simple
-/// commands separated by a newline or `;`, shell comments, single and double
-/// quotes, backslash escaping, named parameters, and `$?`. Syntax reserved for
-/// later milestones is rejected with a source span instead of being
-/// reinterpreted as a literal argument.
+/// The current subset accepts foreground native-pipeline syntax with `|`,
+/// source-ordered file and descriptor redirections, simple commands separated by
+/// a newline or `;`, shell comments, single and double quotes, backslash
+/// escaping, named parameters, and `$?`. Syntax reserved for later milestones is
+/// rejected with a source span instead of being reinterpreted as a literal
+/// argument.
 pub fn parse(source: &str) -> Result<Script, Diagnostic> {
     Parser::new(source).parse()
 }
@@ -54,16 +55,27 @@ impl<'a> Parser<'a> {
 
                 let command_start = self.position;
                 let mut words = Vec::new();
+                let mut redirections = Vec::new();
+                let mut command_end = None;
                 loop {
                     let separated = self.skip_horizontal();
                     match self.peek() {
                         None | Some('\n' | ';' | '|') => break,
                         Some('#') if separated => break,
-                        Some(_) => words.push(self.parse_word()?),
+                        Some(_) if self.starts_redirection() => {
+                            let redirection = self.parse_redirection()?;
+                            command_end = Some(redirection.span().end());
+                            redirections.push(redirection);
+                        }
+                        Some(_) => {
+                            let word = self.parse_word()?;
+                            command_end = Some(word.span().end());
+                            words.push(word);
+                        }
                     }
                 }
 
-                let Some(command_end) = words.last().map(|last| last.span().end()) else {
+                let Some(command_end) = command_end.filter(|_| !words.is_empty()) else {
                     return Err(self.diagnostic_here(
                         DiagnosticCode::UnexpectedSeparator,
                         "a pipeline stage must contain a command",
@@ -71,6 +83,7 @@ impl<'a> Parser<'a> {
                 };
                 commands.push(SimpleCommand::new(
                     words,
+                    redirections,
                     SourceSpan::new(command_start, command_end),
                 ));
 
@@ -139,6 +152,186 @@ impl<'a> Parser<'a> {
         Ok(Script::new(self.source.to_owned(), commands, pipelines))
     }
 
+    fn starts_redirection(&self) -> bool {
+        let mut characters = self.source[self.position..].chars().peekable();
+        match characters.peek().copied() {
+            Some('<' | '>') => true,
+            Some(character) if character.is_ascii_digit() => {
+                while characters
+                    .peek()
+                    .is_some_and(|character| character.is_ascii_digit())
+                {
+                    characters.next();
+                }
+                matches!(characters.next(), Some('<' | '>'))
+            }
+            _ => false,
+        }
+    }
+
+    fn parse_redirection(&mut self) -> Result<Redirection, Diagnostic> {
+        let redirection_start = self.position;
+        let descriptor = self.parse_redirection_descriptor_prefix()?;
+        let operator = self
+            .bump()
+            .expect("a detected redirection retains its operator");
+
+        match operator {
+            '<' => {
+                if self.peek() == Some('<') {
+                    self.bump();
+                    return Err(Diagnostic::new(
+                        DiagnosticCode::UnsupportedSyntax,
+                        "here documents are reserved for a later milestone",
+                        SourceSpan::new(redirection_start, self.position),
+                    ));
+                }
+                let descriptor = match descriptor {
+                    None | Some(0) => RedirectionDescriptor::Stdin,
+                    Some(_) => {
+                        return Err(Diagnostic::new(
+                            DiagnosticCode::InvalidRedirection,
+                            "input redirection supports only descriptor 0",
+                            SourceSpan::new(redirection_start, self.position),
+                        ));
+                    }
+                };
+                let operator_span = SourceSpan::new(redirection_start, self.position);
+                self.parse_file_redirection(
+                    redirection_start,
+                    operator_span,
+                    descriptor,
+                    RedirectionFileMode::Read,
+                )
+            }
+            '>' => {
+                let append = self.peek() == Some('>');
+                if append {
+                    self.bump();
+                }
+                let descriptor = match descriptor {
+                    None | Some(1) => RedirectionDescriptor::Stdout,
+                    Some(2) => RedirectionDescriptor::Stderr,
+                    Some(_) => {
+                        return Err(Diagnostic::new(
+                            DiagnosticCode::InvalidRedirection,
+                            "output redirection supports only descriptors 1 and 2",
+                            SourceSpan::new(redirection_start, self.position),
+                        ));
+                    }
+                };
+                if !append && self.peek() == Some('&') {
+                    self.bump();
+                    return self.parse_descriptor_redirection(redirection_start, descriptor);
+                }
+                if append && self.peek() == Some('&') {
+                    self.bump();
+                    return Err(Diagnostic::new(
+                        DiagnosticCode::InvalidRedirection,
+                        "append redirection cannot duplicate a descriptor",
+                        SourceSpan::new(redirection_start, self.position),
+                    ));
+                }
+                let operator_span = SourceSpan::new(redirection_start, self.position);
+                self.parse_file_redirection(
+                    redirection_start,
+                    operator_span,
+                    descriptor,
+                    if append {
+                        RedirectionFileMode::Append
+                    } else {
+                        RedirectionFileMode::Write
+                    },
+                )
+            }
+            _ => unreachable!("a redirection operator is either input or output"),
+        }
+    }
+
+    fn parse_redirection_descriptor_prefix(&mut self) -> Result<Option<u8>, Diagnostic> {
+        let start = self.position;
+        while self
+            .peek()
+            .is_some_and(|character| character.is_ascii_digit())
+        {
+            self.bump();
+        }
+        if self.position == start {
+            return Ok(None);
+        }
+        self.source[start..self.position]
+            .parse::<u8>()
+            .map(Some)
+            .map_err(|_| {
+                Diagnostic::new(
+                    DiagnosticCode::InvalidRedirection,
+                    "redirection descriptor is outside the supported range",
+                    SourceSpan::new(start, self.position),
+                )
+            })
+    }
+
+    fn parse_file_redirection(
+        &mut self,
+        redirection_start: usize,
+        operator_span: SourceSpan,
+        descriptor: RedirectionDescriptor,
+        mode: RedirectionFileMode,
+    ) -> Result<Redirection, Diagnostic> {
+        let separated = self.skip_horizontal();
+        if matches!(self.peek(), None | Some('\n' | ';' | '|' | '<' | '>'))
+            || (separated && self.peek() == Some('#'))
+        {
+            return Err(Diagnostic::new(
+                DiagnosticCode::UnexpectedSeparator,
+                "a file redirection operator must be followed by a target",
+                operator_span,
+            ));
+        }
+        let path = self.parse_word()?;
+        let span = SourceSpan::new(redirection_start, path.span().end());
+        Ok(Redirection::new(
+            descriptor,
+            RedirectionTarget::File { path, mode },
+            operator_span,
+            span,
+        ))
+    }
+
+    fn parse_descriptor_redirection(
+        &mut self,
+        redirection_start: usize,
+        descriptor: RedirectionDescriptor,
+    ) -> Result<Redirection, Diagnostic> {
+        let target = match self.bump() {
+            Some('1') => RedirectionDescriptor::Stdout,
+            Some('2') => RedirectionDescriptor::Stderr,
+            Some(_) | None => {
+                return Err(Diagnostic::new(
+                    DiagnosticCode::InvalidRedirection,
+                    "descriptor duplication supports only descriptors 1 and 2",
+                    SourceSpan::new(redirection_start, self.position),
+                ));
+            }
+        };
+        if self.peek().is_some_and(|character| {
+            !matches!(character, ' ' | '\t' | '\r' | '\n' | ';' | '|' | '<' | '>')
+        }) {
+            return Err(Diagnostic::new(
+                DiagnosticCode::InvalidRedirection,
+                "a duplicated descriptor must end at an operator or word boundary",
+                SourceSpan::new(redirection_start, self.position),
+            ));
+        }
+        let span = SourceSpan::new(redirection_start, self.position);
+        Ok(Redirection::new(
+            descriptor,
+            RedirectionTarget::Descriptor(target),
+            span,
+            span,
+        ))
+    }
+
     fn parse_word(&mut self) -> Result<Word, Diagnostic> {
         let word_start = self.position;
         let mut parts = Vec::new();
@@ -149,13 +342,13 @@ impl<'a> Parser<'a> {
             if matches!(character, ' ' | '\t' | '\r' | '\n' | ';') {
                 break;
             }
-            if character == '|' {
+            if matches!(character, '|' | '<' | '>') {
                 break;
             }
             if is_reserved_operator(character) {
                 return Err(self.diagnostic_here(
                     DiagnosticCode::UnsupportedSyntax,
-                    "redirections, background jobs, and subshells are reserved for a later milestone",
+                    "background jobs and subshells are reserved for a later milestone",
                 ));
             }
             match character {
@@ -477,7 +670,7 @@ fn push_unquoted(
 }
 
 const fn is_reserved_operator(character: char) -> bool {
-    matches!(character, '&' | '<' | '>' | '(' | ')' | '`')
+    matches!(character, '&' | '(' | ')' | '`')
 }
 
 const fn is_identifier_start(character: char) -> bool {
@@ -495,7 +688,10 @@ const fn is_unsupported_special_parameter(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::parse;
-    use crate::{DiagnosticCode, Parameter, QuoteMode, SourceSpan};
+    use crate::{
+        DiagnosticCode, Parameter, QuoteMode, RedirectionDescriptor, RedirectionFileMode,
+        RedirectionTarget, SourceSpan,
+    };
 
     #[test]
     fn parses_comments_separators_and_mixed_quotes() {
@@ -646,6 +842,121 @@ mod tests {
             [SourceSpan::new(19, 20)]
         );
         assert_eq!(script.pipelines()[0].span(), SourceSpan::new(0, 29));
+    }
+
+    #[test]
+    fn parses_source_ordered_file_and_descriptor_redirections() {
+        let source = "tool<input >out 2>>errors 2>&1 1>&2";
+        let script = parse(source).expect("parse redirections");
+        let command = &script.commands()[0];
+        assert_eq!(command.words().len(), 1);
+        assert_eq!(command.words()[0].literal(), "tool");
+        assert_eq!(command.redirections().len(), 5);
+
+        let expected = [
+            (
+                RedirectionDescriptor::Stdin,
+                RedirectionFileMode::Read,
+                "input",
+                "<",
+            ),
+            (
+                RedirectionDescriptor::Stdout,
+                RedirectionFileMode::Write,
+                "out",
+                ">",
+            ),
+            (
+                RedirectionDescriptor::Stderr,
+                RedirectionFileMode::Append,
+                "errors",
+                "2>>",
+            ),
+        ];
+        for (redirection, (descriptor, mode, path, operator)) in
+            command.redirections()[..3].iter().zip(expected)
+        {
+            assert_eq!(redirection.descriptor(), descriptor);
+            let RedirectionTarget::File {
+                path: actual_path,
+                mode: actual_mode,
+            } = redirection.target()
+            else {
+                panic!("expected file redirection");
+            };
+            assert_eq!(*actual_mode, mode);
+            assert_eq!(actual_path.literal(), path);
+            assert_eq!(
+                redirection.operator_span().source_text(source),
+                Some(operator)
+            );
+        }
+        assert_eq!(
+            command.redirections()[3].target(),
+            &RedirectionTarget::Descriptor(RedirectionDescriptor::Stdout)
+        );
+        assert_eq!(
+            command.redirections()[3]
+                .operator_span()
+                .source_text(source),
+            Some("2>&1")
+        );
+        assert_eq!(
+            command.redirections()[4].target(),
+            &RedirectionTarget::Descriptor(RedirectionDescriptor::Stderr)
+        );
+        assert_eq!(
+            command.redirections()[4]
+                .operator_span()
+                .source_text(source),
+            Some("1>&2")
+        );
+        assert_eq!(command.span().source_text(source), Some(source));
+    }
+
+    #[test]
+    fn rejects_invalid_or_unfinished_redirections_at_the_operator() {
+        for (source, code, text) in [
+            (
+                "tool >",
+                DiagnosticCode::UnexpectedSeparator,
+                "a file redirection operator must be followed by a target",
+            ),
+            (
+                "tool > >out",
+                DiagnosticCode::UnexpectedSeparator,
+                "a file redirection operator must be followed by a target",
+            ),
+            (
+                "tool 3>out",
+                DiagnosticCode::InvalidRedirection,
+                "output redirection supports only descriptors 1 and 2",
+            ),
+            (
+                "tool 2>&3",
+                DiagnosticCode::InvalidRedirection,
+                "descriptor duplication supports only descriptors 1 and 2",
+            ),
+            (
+                "tool 2>&1#suffix",
+                DiagnosticCode::InvalidRedirection,
+                "a duplicated descriptor must end at an operator or word boundary",
+            ),
+            (
+                "tool >>&1",
+                DiagnosticCode::InvalidRedirection,
+                "append redirection cannot duplicate a descriptor",
+            ),
+            (
+                "tool <<EOF",
+                DiagnosticCode::UnsupportedSyntax,
+                "here documents are reserved for a later milestone",
+            ),
+        ] {
+            let error = parse(source).expect_err("invalid redirection");
+            assert_eq!(error.code(), code, "source={source}");
+            assert_eq!(error.message(), text, "source={source}");
+        }
     }
 
     #[test]

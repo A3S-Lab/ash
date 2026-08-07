@@ -11,8 +11,9 @@ use ash_ops::{
     SemanticServices,
 };
 use ash_platform::{
-    EnvironmentChange, NativeProcessSpec, PlatformError, ProcessExit, ProcessHandle, ProcessPipeId,
-    ProcessStdio, spawn_native, spawn_native_graph,
+    EnvironmentChange, NativeProcessFile, NativeProcessFileMode, NativeProcessSpec, PlatformError,
+    ProcessCaptureId, ProcessExit, ProcessFileId, ProcessHandle, ProcessPipeId, ProcessStdio,
+    spawn_native, spawn_native_graph,
 };
 use futures::future::try_join_all;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -21,12 +22,16 @@ use crate::expand::expand_words;
 use crate::state::validate_identifier;
 use crate::{
     CommandResolver, DiagnosticCode, ExecutionBackend, HostPlatform, NativeCommandLookup,
-    PathCommandLookup, PortableCommand, ResolutionError, ResolvedCommand, ShellState, ShellStatus,
-    ShellStatusKind, SimpleCommand, SourceSpan, StatefulBuiltin, parse,
+    PathCommandLookup, PortableCommand, Redirection, RedirectionDescriptor, RedirectionFileMode,
+    RedirectionTarget, ResolutionError, ResolvedCommand, ShellState, ShellStatus, ShellStatusKind,
+    SimpleCommand, SourceSpan, StatefulBuiltin, parse,
 };
 
 /// Maximum native stages accepted by one foreground pipeline checkpoint.
 pub const MAX_NATIVE_PIPELINE_STAGES: usize = 32;
+
+const STDOUT_CAPTURE: ProcessCaptureId = ProcessCaptureId::new(1);
+const STDERR_CAPTURE: ProcessCaptureId = ProcessCaptureId::new(2);
 
 /// Stable category for a human-shell execution diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +42,7 @@ pub enum ExecutionDiagnosticCode {
     Resolution,
     Process,
     Filesystem,
+    Redirection,
     Unsupported,
 }
 
@@ -134,8 +140,11 @@ struct ExecutionOutput {
 /// two-to-32-stage native-only foreground pipelines with direct operating-system
 /// pipes. Pipeline status defaults to the final stage and can select the
 /// rightmost failure through persistent `pipefail`; final stdout and every
-/// stage's stderr share the synchronous capture ceiling. Unresolved backends
-/// produce explicit diagnostics without invoking a host shell.
+/// stage's stderr share the synchronous capture ceiling. Native commands accept
+/// source-ordered `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`
+/// redirections resolved against the persistent shell working directory;
+/// replacing an internal pipeline endpoint remains unsupported. Unresolved
+/// backends produce explicit diagnostics without invoking a host shell.
 #[must_use]
 pub async fn execute_source(source: &str, state: &mut ShellState) -> ShellExecution {
     execute_source_with(source, state, &PathCommandLookup, HostPlatform::current()).await
@@ -278,7 +287,7 @@ where
                 state,
                 resolved,
                 &words[1..],
-                command.span(),
+                command,
                 output,
                 exit_requested,
                 runner,
@@ -297,7 +306,7 @@ async fn execute_command<R>(
     state: &mut ShellState,
     resolved: ResolvedCommand,
     arguments: &[OsString],
-    span: SourceSpan,
+    command: &SimpleCommand,
     output: &mut ExecutionOutput,
     exit_requested: &mut Option<i64>,
     runner: &R,
@@ -305,6 +314,17 @@ async fn execute_command<R>(
 where
     R: NativeCommandRunner + ?Sized,
 {
+    let span = command.span();
+    let redirections = command.redirections();
+    if !redirections.is_empty() && !matches!(&resolved, ResolvedCommand::Native { .. }) {
+        return unsupported(
+            "redirections currently require a native host command".to_owned(),
+            span,
+            &mut output.diagnostics,
+            ShellStatusKind::Exited,
+            2,
+        );
+    }
     match resolved {
         ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Cd) => {
             execute_cd(state, arguments, span, &mut output.diagnostics)
@@ -376,7 +396,16 @@ where
             126,
         ),
         ResolvedCommand::Native { executable, .. } => {
-            execute_native(state, executable, arguments, span, output, runner).await
+            execute_native(
+                state,
+                executable,
+                arguments,
+                redirections,
+                span,
+                output,
+                runner,
+            )
+            .await
         }
         ResolvedCommand::Wsl { command, .. } => unsupported(
             format!("WSL execution for `{command}` is not implemented yet"),
@@ -395,6 +424,17 @@ struct NativeInvocation {
     cwd: PathBuf,
     environment: Vec<(OsString, OsString)>,
     capture_limit: u64,
+    files: Vec<NativeProcessFile>,
+    stdin: ProcessStdio,
+    stdout: ProcessStdio,
+    stderr: ProcessStdio,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeStdio {
+    stdin: ProcessStdio,
+    stdout: ProcessStdio,
+    stderr: ProcessStdio,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -420,6 +460,7 @@ struct NativePipelineOutput {
 #[derive(Debug)]
 enum NativeCommandError {
     Platform(PlatformError),
+    Redirection(PlatformError),
     Capture(io::Error),
     MissingStream(&'static str),
     CaptureLimit { max: u64 },
@@ -429,6 +470,7 @@ impl std::fmt::Display for NativeCommandError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Platform(error) => error.fmt(formatter),
+            Self::Redirection(error) => error.fmt(formatter),
             Self::Capture(error) => write!(formatter, "cannot capture process output: {error}"),
             Self::MissingStream(stream) => {
                 write!(
@@ -466,6 +508,8 @@ impl NativeCommandRunner for DirectNativeCommandRunner {
         invocation: NativeInvocation,
     ) -> Result<NativeCommandOutput, NativeCommandError> {
         let capture_limit = invocation.capture_limit;
+        let captures_stdout = invocation_uses_capture(&invocation, STDOUT_CAPTURE);
+        let captures_stderr = invocation_uses_capture(&invocation, STDERR_CAPTURE);
         let mut process = spawn_native(&NativeProcessSpec {
             executable: invocation.executable.into_os_string(),
             argv: invocation.arguments,
@@ -476,25 +520,28 @@ impl NativeCommandRunner for DirectNativeCommandRunner {
                 .map(|(name, value)| EnvironmentChange::Set(name, value))
                 .collect(),
             clear_environment: true,
-            stdin: ProcessStdio::Null,
-            stdout: ProcessStdio::Piped,
-            stderr: ProcessStdio::Piped,
+            files: invocation.files,
+            stdin: invocation.stdin,
+            stdout: invocation.stdout,
+            stderr: invocation.stderr,
         })
-        .map_err(NativeCommandError::Platform)?;
-        let Some(stdout) = process.take_stdout() else {
+        .map_err(classify_native_spawn_error)?;
+        let stdout = process.take_capture(STDOUT_CAPTURE);
+        if captures_stdout && stdout.is_none() {
             let _ = process.terminate().await;
             let _ = process.wait().await;
             return Err(NativeCommandError::MissingStream("stdout"));
-        };
-        let Some(stderr) = process.take_stderr() else {
+        }
+        let stderr = process.take_capture(STDERR_CAPTURE);
+        if captures_stderr && stderr.is_none() {
             let _ = process.terminate().await;
             let _ = process.wait().await;
             return Err(NativeCommandError::MissingStream("stderr"));
-        };
+        }
         let captured = Arc::new(AtomicU64::new(0));
         let result = tokio::try_join!(
-            capture_process_stream(stdout, Arc::clone(&captured), capture_limit),
-            capture_process_stream(stderr, captured, capture_limit),
+            capture_optional_process_stream(stdout, Arc::clone(&captured), capture_limit),
+            capture_optional_process_stream(stderr, captured, capture_limit),
             async { process.wait().await.map_err(NativeCommandError::Platform) },
         );
         if result.is_err() {
@@ -523,21 +570,7 @@ async fn run_native_pipeline(
     let capture_limit = invocation.capture_limit;
     let stage_count = invocation.stages.len();
     let mut specs = Vec::with_capacity(stage_count);
-    for (index, stage) in invocation.stages.into_iter().enumerate() {
-        let stdin = if index == 0 {
-            ProcessStdio::Null
-        } else {
-            ProcessStdio::Pipe(ProcessPipeId::new(u32::try_from(index - 1).map_err(
-                |_| NativeCommandError::Platform(PlatformError::InvalidProcessGraph),
-            )?))
-        };
-        let stdout = if index + 1 == stage_count {
-            ProcessStdio::Piped
-        } else {
-            ProcessStdio::Pipe(ProcessPipeId::new(u32::try_from(index).map_err(|_| {
-                NativeCommandError::Platform(PlatformError::InvalidProcessGraph)
-            })?))
-        };
+    for stage in invocation.stages {
         specs.push(NativeProcessSpec {
             executable: stage.executable.into_os_string(),
             argv: stage.arguments,
@@ -548,33 +581,40 @@ async fn run_native_pipeline(
                 .map(|(name, value)| EnvironmentChange::Set(name, value))
                 .collect(),
             clear_environment: true,
-            stdin,
-            stdout,
-            stderr: ProcessStdio::Piped,
+            files: stage.files,
+            stdin: stage.stdin,
+            stdout: stage.stdout,
+            stderr: stage.stderr,
         });
     }
 
-    let mut processes = spawn_native_graph(&specs).map_err(NativeCommandError::Platform)?;
-    let Some(stdout) = processes.last_mut().and_then(ProcessHandle::take_stdout) else {
-        terminate_and_reap(&mut processes).await;
-        return Err(NativeCommandError::MissingStream("final stdout"));
-    };
+    let mut processes = spawn_native_graph(&specs).map_err(classify_native_spawn_error)?;
+    let mut stdout_streams = Vec::with_capacity(processes.len());
     let mut stderr_streams = Vec::with_capacity(processes.len());
-    for process in &mut processes {
-        let Some(stderr) = process.take_stderr() else {
+    for (process, spec) in processes.iter_mut().zip(&specs) {
+        let captures_stdout = spec_uses_capture(spec, STDOUT_CAPTURE);
+        let stdout = process.take_capture(STDOUT_CAPTURE);
+        if captures_stdout && stdout.is_none() {
+            terminate_and_reap(&mut processes).await;
+            return Err(NativeCommandError::MissingStream("stage stdout"));
+        }
+        stdout_streams.push(stdout);
+        let captures_stderr = spec_uses_capture(spec, STDERR_CAPTURE);
+        let stderr = process.take_capture(STDERR_CAPTURE);
+        if captures_stderr && stderr.is_none() {
             terminate_and_reap(&mut processes).await;
             return Err(NativeCommandError::MissingStream("stage stderr"));
-        };
+        }
         stderr_streams.push(stderr);
     }
 
     let captured = Arc::new(AtomicU64::new(0));
-    let stdout_capture = capture_process_stream(stdout, Arc::clone(&captured), capture_limit);
-    let stderr_capture = try_join_all(
-        stderr_streams
-            .into_iter()
-            .map(|stderr| capture_process_stream(stderr, Arc::clone(&captured), capture_limit)),
-    );
+    let stdout_capture = try_join_all(stdout_streams.into_iter().map(|stdout| {
+        capture_optional_process_stream(stdout, Arc::clone(&captured), capture_limit)
+    }));
+    let stderr_capture = try_join_all(stderr_streams.into_iter().map(|stderr| {
+        capture_optional_process_stream(stderr, Arc::clone(&captured), capture_limit)
+    }));
     let wait_all = async {
         try_join_all(processes.iter_mut().map(|process| async move {
             process.wait().await.map_err(NativeCommandError::Platform)
@@ -583,7 +623,7 @@ async fn run_native_pipeline(
     };
     match tokio::try_join!(stdout_capture, stderr_capture, wait_all) {
         Ok((stdout, stderr, exits)) => Ok(NativePipelineOutput {
-            stdout,
+            stdout: stdout.into_iter().flatten().collect(),
             stderr: stderr.into_iter().flatten().collect(),
             exits,
         }),
@@ -600,6 +640,39 @@ async fn terminate_and_reap(processes: &mut [ProcessHandle]) {
     }
     for process in processes {
         let _ = process.wait().await;
+    }
+}
+
+fn classify_native_spawn_error(error: PlatformError) -> NativeCommandError {
+    if matches!(
+        &error,
+        PlatformError::InvalidProcessRedirection | PlatformError::ProcessRedirection { .. }
+    ) {
+        NativeCommandError::Redirection(error)
+    } else {
+        NativeCommandError::Platform(error)
+    }
+}
+
+fn invocation_uses_capture(invocation: &NativeInvocation, id: ProcessCaptureId) -> bool {
+    [invocation.stdout, invocation.stderr].contains(&ProcessStdio::Capture(id))
+}
+
+fn spec_uses_capture(spec: &NativeProcessSpec, id: ProcessCaptureId) -> bool {
+    [spec.stdout, spec.stderr].contains(&ProcessStdio::Capture(id))
+}
+
+async fn capture_optional_process_stream<R>(
+    reader: Option<R>,
+    captured: Arc<AtomicU64>,
+    max: u64,
+) -> Result<Vec<u8>, NativeCommandError>
+where
+    R: AsyncRead + Unpin,
+{
+    match reader {
+        Some(reader) => capture_process_stream(reader, captured, max).await,
+        None => Ok(Vec::new()),
     }
 }
 
@@ -655,7 +728,7 @@ where
 
     let capture_limit = remaining_capture(output);
     let mut stages = Vec::with_capacity(commands.len());
-    for command in commands {
+    for (index, command) in commands.iter().enumerate() {
         let expanded = expand_words(command.words(), state);
         let name_span = expanded.first().map(|word| word.span());
         let words: Vec<OsString> = expanded
@@ -686,12 +759,43 @@ where
             resolver.resolve(name)
         };
         match resolved {
-            Ok(ResolvedCommand::Native { executable, .. }) => stages.push(native_invocation(
-                state,
-                executable,
-                &words[1..],
-                capture_limit,
-            )),
+            Ok(ResolvedCommand::Native { executable, .. }) => {
+                let stdin = if index == 0 {
+                    ProcessStdio::Null
+                } else {
+                    ProcessStdio::Pipe(ProcessPipeId::new(
+                        u32::try_from(index - 1).expect("pipeline stage ceiling fits u32"),
+                    ))
+                };
+                let stdout = if index + 1 == commands.len() {
+                    ProcessStdio::Capture(STDOUT_CAPTURE)
+                } else {
+                    ProcessStdio::Pipe(ProcessPipeId::new(
+                        u32::try_from(index).expect("pipeline stage ceiling fits u32"),
+                    ))
+                };
+                match native_invocation(
+                    state,
+                    executable,
+                    &words[1..],
+                    command.redirections(),
+                    capture_limit,
+                    NativeStdio {
+                        stdin,
+                        stdout,
+                        stderr: ProcessStdio::Capture(STDERR_CAPTURE),
+                    },
+                ) {
+                    Ok(invocation) => stages.push(invocation),
+                    Err(error) => {
+                        return redirection_failure(
+                            error.message,
+                            error.span,
+                            &mut output.diagnostics,
+                        );
+                    }
+                }
+            }
             Ok(ResolvedCommand::StatefulBuiltin(builtin)) => {
                 return unsupported_pipeline_stage(
                     builtin.name(),
@@ -721,6 +825,34 @@ where
                 );
             }
         }
+    }
+
+    for index in 0..stages.len() - 1 {
+        let pipe = ProcessStdio::Pipe(ProcessPipeId::new(
+            u32::try_from(index).expect("pipeline stage ceiling fits u32"),
+        ));
+        let (span, replaced) = if stages[index].stdout != pipe {
+            (
+                last_redirection_span(&commands[index], RedirectionDescriptor::Stdout),
+                "stdout",
+            )
+        } else if stages[index + 1].stdin != pipe {
+            (
+                last_redirection_span(&commands[index + 1], RedirectionDescriptor::Stdin),
+                "stdin",
+            )
+        } else {
+            continue;
+        };
+        return unsupported(
+            format!(
+                "redirection of an internal pipeline {replaced} endpoint is not implemented yet"
+            ),
+            span,
+            &mut output.diagnostics,
+            ShellStatusKind::Exited,
+            2,
+        );
     }
 
     match runner
@@ -760,6 +892,11 @@ where
             ShellStatusKind::Exited,
             1,
         ),
+        Err(NativeCommandError::Redirection(error)) => redirection_failure(
+            format!("cannot apply native pipeline redirection: {error}"),
+            span,
+            &mut output.diagnostics,
+        ),
         Err(error) => process_failure(
             format!("cannot execute native pipeline: {error}"),
             span,
@@ -774,6 +911,7 @@ async fn execute_native<R>(
     state: &ShellState,
     executable: PathBuf,
     arguments: &[OsString],
+    redirections: &[Redirection],
     span: SourceSpan,
     output: &mut ExecutionOutput,
     runner: &R,
@@ -781,12 +919,23 @@ async fn execute_native<R>(
 where
     R: NativeCommandRunner + ?Sized,
 {
-    let invocation = native_invocation(
+    let invocation = match native_invocation(
         state,
         executable.clone(),
         arguments,
+        redirections,
         remaining_capture(output),
-    );
+        NativeStdio {
+            stdin: ProcessStdio::Null,
+            stdout: ProcessStdio::Capture(STDOUT_CAPTURE),
+            stderr: ProcessStdio::Capture(STDERR_CAPTURE),
+        },
+    ) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            return redirection_failure(error.message, error.span, &mut output.diagnostics);
+        }
+    };
     match runner.run(invocation).await {
         Ok(native) => {
             output.stdout.extend_from_slice(&native.stdout);
@@ -801,6 +950,14 @@ where
             &mut output.diagnostics,
             ShellStatusKind::Exited,
             1,
+        ),
+        Err(NativeCommandError::Redirection(error)) => redirection_failure(
+            format!(
+                "cannot apply redirection for `{}`: {error}",
+                display_os_string(executable.as_os_str())
+            ),
+            span,
+            &mut output.diagnostics,
         ),
         Err(error) => process_failure(
             format!(
@@ -819,9 +976,76 @@ fn native_invocation(
     state: &ShellState,
     executable: PathBuf,
     arguments: &[OsString],
+    redirections: &[Redirection],
     capture_limit: u64,
-) -> NativeInvocation {
-    NativeInvocation {
+    stdio: NativeStdio,
+) -> Result<NativeInvocation, RedirectionPlanError> {
+    let NativeStdio {
+        mut stdin,
+        mut stdout,
+        mut stderr,
+    } = stdio;
+    let mut files = Vec::with_capacity(redirections.len());
+    for redirection in redirections {
+        let endpoint = match redirection.target() {
+            RedirectionTarget::File { path, mode } => {
+                if !matches!(
+                    (redirection.descriptor(), mode),
+                    (RedirectionDescriptor::Stdin, RedirectionFileMode::Read)
+                        | (
+                            RedirectionDescriptor::Stdout | RedirectionDescriptor::Stderr,
+                            RedirectionFileMode::Write | RedirectionFileMode::Append
+                        )
+                ) {
+                    return Err(RedirectionPlanError {
+                        message: "redirection file mode does not match its descriptor".to_owned(),
+                        span: redirection.operator_span(),
+                    });
+                }
+                let mut expanded = expand_words(std::slice::from_ref(path), state).into_iter();
+                let Some(target) = expanded.next() else {
+                    return Err(RedirectionPlanError {
+                        message: "redirection target expands to no path".to_owned(),
+                        span: path.span(),
+                    });
+                };
+                if expanded.next().is_some() {
+                    return Err(RedirectionPlanError {
+                        message: "redirection target expands to multiple paths".to_owned(),
+                        span: path.span(),
+                    });
+                }
+                let id = ProcessFileId::new(u32::try_from(files.len()).map_err(|_| {
+                    RedirectionPlanError {
+                        message: "redirection plan contains too many file targets".to_owned(),
+                        span: redirection.span(),
+                    }
+                })?);
+                files.push(NativeProcessFile {
+                    id,
+                    path: state.cwd().join(PathBuf::from(target.into_value())),
+                    mode: match mode {
+                        RedirectionFileMode::Read => NativeProcessFileMode::Read,
+                        RedirectionFileMode::Write => NativeProcessFileMode::Write,
+                        RedirectionFileMode::Append => NativeProcessFileMode::Append,
+                    },
+                });
+                ProcessStdio::File(id)
+            }
+            RedirectionTarget::Descriptor(source) => match source {
+                RedirectionDescriptor::Stdin => stdin,
+                RedirectionDescriptor::Stdout => stdout,
+                RedirectionDescriptor::Stderr => stderr,
+            },
+        };
+        match redirection.descriptor() {
+            RedirectionDescriptor::Stdin => stdin = endpoint,
+            RedirectionDescriptor::Stdout => stdout = endpoint,
+            RedirectionDescriptor::Stderr => stderr = endpoint,
+        }
+    }
+
+    Ok(NativeInvocation {
         executable,
         arguments: arguments.to_vec(),
         cwd: state.cwd().to_owned(),
@@ -831,7 +1055,26 @@ fn native_invocation(
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect(),
         capture_limit,
-    }
+        files,
+        stdin,
+        stdout,
+        stderr,
+    })
+}
+
+#[derive(Debug)]
+struct RedirectionPlanError {
+    message: String,
+    span: SourceSpan,
+}
+
+fn last_redirection_span(command: &SimpleCommand, descriptor: RedirectionDescriptor) -> SourceSpan {
+    command
+        .redirections()
+        .iter()
+        .rev()
+        .find(|redirection| redirection.descriptor() == descriptor)
+        .map_or(command.span(), Redirection::span)
 }
 
 fn remaining_capture(output: &ExecutionOutput) -> u64 {
@@ -1654,6 +1897,19 @@ fn filesystem_failure(
     shell_status(1, ShellStatusKind::Exited)
 }
 
+fn redirection_failure(
+    message: String,
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    diagnostics.push(ExecutionDiagnostic {
+        code: ExecutionDiagnosticCode::Redirection,
+        message,
+        span,
+    });
+    shell_status(1, ShellStatusKind::RedirectionError)
+}
+
 fn process_failure(
     message: String,
     span: SourceSpan,
@@ -1760,7 +2016,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use ash_platform::ProcessExit;
+    use ash_platform::{ProcessExit, ProcessStdio};
 
     use super::{
         ExecutionDiagnosticCode, NativeCommandError, NativeCommandOutput, NativeCommandRunner,
@@ -1828,6 +2084,18 @@ fn main() {
             io::copy(&mut input, &mut output).expect("copy pipeline stream");
             output.flush().expect("flush copied stream");
             eprintln!("{label}-stderr");
+        }
+        Some("ordered") => {
+            let mut stdout = io::stdout().lock();
+            let mut stderr = io::stderr().lock();
+            stdout.write_all(b"stdout-a\n").expect("write stdout a");
+            stdout.flush().expect("flush stdout a");
+            stderr.write_all(b"stderr-a\n").expect("write stderr a");
+            stderr.flush().expect("flush stderr a");
+            stdout.write_all(b"stdout-b\n").expect("write stdout b");
+            stdout.flush().expect("flush stdout b");
+            stderr.write_all(b"stderr-b\n").expect("write stderr b");
+            stderr.flush().expect("flush stderr b");
         }
         _ => process::exit(2),
     }
@@ -2140,6 +2408,16 @@ fn main() {
             ]
         );
         assert_eq!(invocation.capture_limit, super::MAX_READ_FILE_BYTES);
+        assert!(invocation.files.is_empty());
+        assert_eq!(invocation.stdin, ProcessStdio::Null);
+        assert_eq!(
+            invocation.stdout,
+            ProcessStdio::Capture(super::STDOUT_CAPTURE)
+        );
+        assert_eq!(
+            invocation.stderr,
+            ProcessStdio::Capture(super::STDERR_CAPTURE)
+        );
 
         let signaled = super::native_exit_status(ProcessExit {
             success: false,
@@ -2149,6 +2427,155 @@ fn main() {
         assert_eq!(signaled.code(), 143);
         assert_eq!(signaled.kind(), ShellStatusKind::Interrupted);
         assert_eq!(signaled.signal(), Some(15));
+    }
+
+    #[tokio::test]
+    async fn native_redirections_apply_in_source_order_without_buffering_files() {
+        let directory = TestDirectory::new();
+        let executable = compile_pipeline_helper(&directory);
+        let mut state = ShellState::from_process().expect("process shell state");
+        state.set_cwd(&directory.0);
+        state
+            .environment_mut()
+            .insert("PATH", directory.0.join("bin").into_os_string());
+
+        fs::write(directory.0.join("first.log"), b"stale").expect("seed first target");
+        let merged_source = format!("{executable} ordered >first.log >merged.log 2>&1");
+        let merged = execute_source(&merged_source, &mut state).await;
+        assert_eq!(merged.status().code(), 0);
+        assert!(merged.stdout().is_empty());
+        assert!(merged.stderr().is_empty());
+        assert_eq!(fs::read(directory.0.join("first.log")).expect("first"), b"");
+        assert_eq!(
+            fs::read(directory.0.join("merged.log")).expect("merged"),
+            b"stdout-a\nstderr-a\nstdout-b\nstderr-b\n"
+        );
+
+        let ordered_source = format!("{executable} ordered 2>&1 >stdout.log");
+        let ordered = execute_source(&ordered_source, &mut state).await;
+        assert_eq!(ordered.status().code(), 0);
+        assert_eq!(ordered.stdout(), b"stderr-a\nstderr-b\n");
+        assert!(ordered.stderr().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("stdout.log")).expect("stdout target"),
+            b"stdout-a\nstdout-b\n"
+        );
+
+        let stderr_source = format!("{executable} ordered 1>&2");
+        let stderr_merged = execute_source(&stderr_source, &mut state).await;
+        assert_eq!(stderr_merged.status().code(), 0);
+        assert!(stderr_merged.stdout().is_empty());
+        assert_eq!(
+            stderr_merged.stderr(),
+            b"stdout-a\nstderr-a\nstdout-b\nstderr-b\n"
+        );
+
+        let append_source = format!(
+            "{executable} ordered >append.out 2>append.err; {executable} ordered >>append.out 2>>append.err"
+        );
+        let appended = execute_source(&append_source, &mut state).await;
+        assert_eq!(appended.status().code(), 0);
+        assert!(appended.stdout().is_empty());
+        assert!(appended.stderr().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("append.out")).expect("appended stdout"),
+            b"stdout-a\nstdout-b\nstdout-a\nstdout-b\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("append.err")).expect("appended stderr"),
+            b"stderr-a\nstderr-b\nstderr-a\nstderr-b\n"
+        );
+
+        fs::write(directory.0.join("input.bin"), b"pipeline-input").expect("pipeline input");
+        let pipeline_source = format!(
+            "{executable} copy first <input.bin 2>first.err | {executable} copy final >pipeline.bin 2>final.err"
+        );
+        let pipeline = execute_source(&pipeline_source, &mut state).await;
+        assert_eq!(pipeline.status().code(), 0);
+        assert!(pipeline.stdout().is_empty());
+        assert!(pipeline.stderr().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("pipeline.bin")).expect("pipeline output"),
+            b"pipeline-input"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("first.err")).expect("first stderr"),
+            b"first-stderr\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("final.err")).expect("final stderr"),
+            b"final-stderr\n"
+        );
+
+        let merged_pipeline_source = format!(
+            "{executable} ordered 2>&1 | {executable} copy merged >merged-pipeline.log 2>merged-final.err"
+        );
+        let merged_pipeline = execute_source(&merged_pipeline_source, &mut state).await;
+        assert_eq!(merged_pipeline.status().code(), 0);
+        assert!(merged_pipeline.stdout().is_empty());
+        assert!(merged_pipeline.stderr().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("merged-pipeline.log")).expect("merged pipeline"),
+            b"stdout-a\nstderr-a\nstdout-b\nstderr-b\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("merged-final.err")).expect("merged final stderr"),
+            b"merged-stderr\n"
+        );
+
+        let blocked_source =
+            format!("{executable} produce 1 >blocked.bin | {executable} copy final");
+        let blocked = execute_source(&blocked_source, &mut state).await;
+        assert_eq!(blocked.status().code(), 2);
+        assert_eq!(blocked.diagnostics().len(), 1);
+        assert_eq!(
+            blocked.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Unsupported
+        );
+        assert_eq!(
+            blocked.diagnostics()[0].span().source_text(&blocked_source),
+            Some(">blocked.bin")
+        );
+        assert!(!directory.0.join("blocked.bin").exists());
+
+        let initial_cwd = state.cwd().to_owned();
+        let builtin = execute_source("cd nowhere >builtin.log", &mut state).await;
+        assert_eq!(builtin.status().code(), 2);
+        assert_eq!(builtin.diagnostics().len(), 1);
+        assert_eq!(
+            builtin.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Unsupported
+        );
+        assert_eq!(state.cwd(), initial_cwd);
+        assert!(!directory.0.join("builtin.log").exists());
+
+        state
+            .set_variable("REDIRECT", "one two")
+            .expect("redirection variable");
+        let ambiguous_source = format!("{executable} ordered >$REDIRECT");
+        let ambiguous = execute_source(&ambiguous_source, &mut state).await;
+        assert_eq!(ambiguous.status().code(), 1);
+        assert_eq!(ambiguous.status().kind(), ShellStatusKind::RedirectionError);
+        assert_eq!(ambiguous.diagnostics().len(), 1);
+        assert_eq!(
+            ambiguous.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Redirection
+        );
+        assert_eq!(
+            ambiguous.diagnostics()[0].message(),
+            "redirection target expands to multiple paths"
+        );
+
+        let missing_source = format!("{executable} copy missing <missing.bin");
+        let missing = execute_source(&missing_source, &mut state).await;
+        assert_eq!(missing.status().code(), 1);
+        assert_eq!(missing.status().kind(), ShellStatusKind::RedirectionError);
+        assert_eq!(missing.diagnostics().len(), 1);
+        assert_eq!(
+            missing.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Redirection
+        );
+        assert!(missing.diagnostics()[0].message().contains("missing.bin"));
     }
 
     #[tokio::test]

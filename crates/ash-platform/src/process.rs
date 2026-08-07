@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
 use std::io::{PipeReader, PipeWriter};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -9,6 +10,10 @@ use process_wrap::tokio::JobObject;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessGroup;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
+#[cfg(windows)]
+use std::os::windows::io::OwnedHandle;
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 
 use crate::{PlatformError, Workspace};
@@ -30,11 +35,57 @@ impl ProcessPipeId {
     }
 }
 
+/// Stable specification-local identifier for one opened native process file.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ProcessFileId(u32);
+
+impl ProcessFileId {
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+/// Stable specification-local identifier for one parent-facing output capture.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ProcessCaptureId(u32);
+
+impl ProcessCaptureId {
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+/// File-open mode for one native process redirection resource.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeProcessFileMode {
+    Read,
+    Write,
+    Append,
+}
+
+/// One source-ordered file resource opened before a native child starts.
+///
+/// Plan-local identifiers must be unique. Multiple final descriptors may name
+/// the same identifier so their cloned handles share one open-file description.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeProcessFile {
+    pub id: ProcessFileId,
+    pub path: PathBuf,
+    pub mode: NativeProcessFileMode,
+}
+
 /// Explicit standard-I/O mode for one child-process stream.
 ///
 /// A [`ProcessStdio::Piped`] endpoint exposes its corresponding handle through
 /// [`ProcessHandle`]. A [`ProcessStdio::Pipe`] endpoint is internal to a graph
 /// launched by [`spawn_native_graph`] or [`Workspace::spawn_graph`].
+/// [`ProcessStdio::File`] references the source-ordered file plan on
+/// [`NativeProcessSpec`], while [`ProcessStdio::Capture`] exposes one named pipe
+/// through [`ProcessHandle::take_capture`]. Reusing a file or capture identifier
+/// makes descriptors in that specification share the same underlying resource;
+/// equal identifiers in different graph specifications remain independent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ProcessStdio {
@@ -49,6 +100,10 @@ pub enum ProcessStdio {
     /// An stdin endpoint reads from the pipe. A stdout or stderr endpoint writes
     /// to it. Internal graph endpoints do not expose handles on [`ProcessHandle`].
     Pipe(ProcessPipeId),
+    /// Connect this stream to one source-ordered native file resource.
+    File(ProcessFileId),
+    /// Connect one or more output descriptors to one parent-facing capture pipe.
+    Capture(ProcessCaptureId),
 }
 
 impl ProcessStdio {
@@ -58,6 +113,7 @@ impl ProcessStdio {
             Self::Null => Ok(Stdio::null()),
             Self::Piped => Ok(Stdio::piped()),
             Self::Pipe(_) => Err(PlatformError::InvalidProcessGraph),
+            Self::File(_) | Self::Capture(_) => Err(PlatformError::InvalidProcessRedirection),
         }
     }
 }
@@ -85,6 +141,11 @@ pub struct NativeProcessSpec {
     pub cwd: PathBuf,
     pub environment: Vec<EnvironmentChange>,
     pub clear_environment: bool,
+    /// Source-ordered file-open plan for this process.
+    ///
+    /// Every entry is opened in order, including entries superseded by a later
+    /// descriptor assignment and therefore absent from the final stdio fields.
+    pub files: Vec<NativeProcessFile>,
     pub stdin: ProcessStdio,
     pub stdout: ProcessStdio,
     pub stderr: ProcessStdio,
@@ -99,6 +160,7 @@ pub struct ProcessExit {
 
 pub struct ProcessHandle {
     child: Box<dyn ChildWrapper>,
+    captures: BTreeMap<ProcessCaptureId, tokio::fs::File>,
 }
 
 impl Workspace {
@@ -135,6 +197,7 @@ impl Workspace {
             cwd: cwd.native,
             environment: spec.environment.clone(),
             clear_environment: spec.clear_environment,
+            files: Vec::new(),
             stdin: spec.stdin,
             stdout: spec.stdout,
             stderr: spec.stderr,
@@ -144,23 +207,37 @@ impl Workspace {
 
 /// Launches one host executable directly from an already-resolved native
 /// specification. No command shell or workspace path interpretation is added.
+/// The complete redirection plan is validated before its file entries are opened
+/// in source order and before the child starts.
 pub fn spawn_native(spec: &NativeProcessSpec) -> Result<ProcessHandle, PlatformError> {
-    let stdin = spec.stdin.standalone_stdio()?;
-    let stdout = spec.stdout.standalone_stdio()?;
-    let stderr = spec.stderr.standalone_stdio()?;
-    spawn_native_with_stdio(spec, stdin, stdout, stderr)
+    let graph_pipes = BTreeMap::new();
+    let mut prepared = PreparedProcessStdio::new(spec)?;
+    let stdin = prepared.input_stdio(spec.stdin, &graph_pipes)?;
+    let stdout = prepared.output_stdio(spec.stdout, &graph_pipes)?;
+    let stderr = prepared.output_stdio(spec.stderr, &graph_pipes)?;
+    let captures = prepared.take_captures();
+    spawn_native_with_stdio(spec, stdin, stdout, stderr, captures)
 }
 
 /// Launches a complete native process graph connected by operating-system pipes.
 ///
-/// The graph is validated and every pipe is created before the first child is
-/// started. Consumers are spawned before their producers, then all parent pipe
-/// copies are closed before this function returns. Returned handles retain the
-/// same order as `specs`.
+/// The pipe graph and every redirection plan are validated before file-open side
+/// effects begin. File entries are then opened in `specs` order and their own
+/// source order, and every pipe is created before the first child starts.
+/// Consumers are spawned before their producers, then all parent pipe copies are
+/// closed before this function returns. Returned handles retain the same order as
+/// `specs`.
 pub fn spawn_native_graph(
     specs: &[NativeProcessSpec],
 ) -> Result<Vec<ProcessHandle>, PlatformError> {
     let graph = validate_process_graph(specs)?;
+    for spec in specs {
+        validate_process_redirections(spec)?;
+    }
+    let mut prepared = specs
+        .iter()
+        .map(PreparedProcessStdio::open)
+        .collect::<Result<Vec<_>, _>>()?;
     let mut pipes = BTreeMap::new();
     for id in graph.pipe_ids {
         pipes.insert(id, std::io::pipe()?);
@@ -170,12 +247,16 @@ pub fn spawn_native_graph(
         std::iter::repeat_with(|| None).take(specs.len()).collect();
     for index in graph.spawn_order.into_iter().rev() {
         let spec = &specs[index];
-        let stdin = graph_input_stdio(spec.stdin, &pipes)?;
-        let stdout = graph_output_stdio(spec.stdout, &pipes)?;
-        let stderr = graph_output_stdio(spec.stderr, &pipes)?;
-        processes[index] = Some(spawn_native_with_stdio(spec, stdin, stdout, stderr)?);
+        let stdin = prepared[index].input_stdio(spec.stdin, &pipes)?;
+        let stdout = prepared[index].output_stdio(spec.stdout, &pipes)?;
+        let stderr = prepared[index].output_stdio(spec.stderr, &pipes)?;
+        let captures = prepared[index].take_captures();
+        processes[index] = Some(spawn_native_with_stdio(
+            spec, stdin, stdout, stderr, captures,
+        )?);
     }
     drop(pipes);
+    drop(prepared);
 
     processes
         .into_iter()
@@ -188,6 +269,7 @@ fn spawn_native_with_stdio(
     stdin: Stdio,
     stdout: Stdio,
     stderr: Stdio,
+    captures: BTreeMap<ProcessCaptureId, tokio::fs::File>,
 ) -> Result<ProcessHandle, PlatformError> {
     let mut command = Command::new(&spec.executable);
     command
@@ -217,7 +299,175 @@ fn spawn_native_with_stdio(
     command.wrap(JobObject);
     Ok(ProcessHandle {
         child: command.spawn()?,
+        captures,
     })
+}
+
+struct PreparedProcessStdio {
+    files: BTreeMap<ProcessFileId, File>,
+    capture_readers: BTreeMap<ProcessCaptureId, PipeReader>,
+    capture_writers: BTreeMap<ProcessCaptureId, PipeWriter>,
+}
+
+impl PreparedProcessStdio {
+    fn new(spec: &NativeProcessSpec) -> Result<Self, PlatformError> {
+        validate_process_redirections(spec)?;
+        if [spec.stdin, spec.stdout, spec.stderr]
+            .into_iter()
+            .any(|endpoint| matches!(endpoint, ProcessStdio::Pipe(_)))
+        {
+            return Err(PlatformError::InvalidProcessGraph);
+        }
+        Self::open(spec)
+    }
+
+    fn open(spec: &NativeProcessSpec) -> Result<Self, PlatformError> {
+        let mut files = BTreeMap::new();
+        for endpoint in &spec.files {
+            let mut options = OpenOptions::new();
+            match endpoint.mode {
+                NativeProcessFileMode::Read => {
+                    options.read(true);
+                }
+                NativeProcessFileMode::Write => {
+                    options.write(true).create(true).truncate(true);
+                }
+                NativeProcessFileMode::Append => {
+                    options.write(true).create(true).append(true);
+                }
+            }
+            let file = options.open(&endpoint.path).map_err(|source| {
+                PlatformError::ProcessRedirection {
+                    path: endpoint.path.clone(),
+                    source,
+                }
+            })?;
+            files.insert(endpoint.id, file);
+        }
+
+        let mut capture_readers = BTreeMap::new();
+        let mut capture_writers = BTreeMap::new();
+        for endpoint in [spec.stdout, spec.stderr] {
+            if let ProcessStdio::Capture(id) = endpoint
+                && !capture_readers.contains_key(&id)
+            {
+                let (reader, writer) = std::io::pipe()?;
+                capture_readers.insert(id, reader);
+                capture_writers.insert(id, writer);
+            }
+        }
+        Ok(Self {
+            files,
+            capture_readers,
+            capture_writers,
+        })
+    }
+
+    fn input_stdio(
+        &self,
+        endpoint: ProcessStdio,
+        pipes: &BTreeMap<ProcessPipeId, (PipeReader, PipeWriter)>,
+    ) -> Result<Stdio, PlatformError> {
+        match endpoint {
+            ProcessStdio::Pipe(id) => pipes
+                .get(&id)
+                .ok_or(PlatformError::InvalidProcessGraph)?
+                .0
+                .try_clone()
+                .map(Stdio::from)
+                .map_err(PlatformError::from),
+            ProcessStdio::File(id) => self.file_stdio(id),
+            ProcessStdio::Capture(_) => Err(PlatformError::InvalidProcessRedirection),
+            endpoint => endpoint.standalone_stdio(),
+        }
+    }
+
+    fn output_stdio(
+        &self,
+        endpoint: ProcessStdio,
+        pipes: &BTreeMap<ProcessPipeId, (PipeReader, PipeWriter)>,
+    ) -> Result<Stdio, PlatformError> {
+        match endpoint {
+            ProcessStdio::Pipe(id) => pipes
+                .get(&id)
+                .ok_or(PlatformError::InvalidProcessGraph)?
+                .1
+                .try_clone()
+                .map(Stdio::from)
+                .map_err(PlatformError::from),
+            ProcessStdio::File(id) => self.file_stdio(id),
+            ProcessStdio::Capture(id) => self
+                .capture_writers
+                .get(&id)
+                .ok_or(PlatformError::InvalidProcessRedirection)?
+                .try_clone()
+                .map(Stdio::from)
+                .map_err(PlatformError::from),
+            endpoint => endpoint.standalone_stdio(),
+        }
+    }
+
+    fn file_stdio(&self, id: ProcessFileId) -> Result<Stdio, PlatformError> {
+        self.files
+            .get(&id)
+            .ok_or(PlatformError::InvalidProcessRedirection)?
+            .try_clone()
+            .map(Stdio::from)
+            .map_err(PlatformError::from)
+    }
+
+    fn take_captures(&mut self) -> BTreeMap<ProcessCaptureId, tokio::fs::File> {
+        std::mem::take(&mut self.capture_readers)
+            .into_iter()
+            .map(|(id, reader)| (id, async_pipe_reader(reader)))
+            .collect()
+    }
+}
+
+fn validate_process_redirections(spec: &NativeProcessSpec) -> Result<(), PlatformError> {
+    let mut modes = BTreeMap::new();
+    for endpoint in &spec.files {
+        if modes.insert(endpoint.id, endpoint.mode).is_some() {
+            return Err(PlatformError::InvalidProcessRedirection);
+        }
+    }
+    match spec.stdin {
+        ProcessStdio::File(id) if modes.get(&id).copied() == Some(NativeProcessFileMode::Read) => {}
+        ProcessStdio::File(_) | ProcessStdio::Capture(_) => {
+            return Err(PlatformError::InvalidProcessRedirection);
+        }
+        _ => {}
+    }
+    for endpoint in [spec.stdout, spec.stderr] {
+        match endpoint {
+            ProcessStdio::File(id)
+                if matches!(
+                    modes.get(&id),
+                    Some(NativeProcessFileMode::Write | NativeProcessFileMode::Append)
+                ) => {}
+            ProcessStdio::File(_) => return Err(PlatformError::InvalidProcessRedirection),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn async_pipe_reader(reader: PipeReader) -> tokio::fs::File {
+    let descriptor = OwnedFd::from(reader);
+    tokio::fs::File::from_std(File::from(descriptor))
+}
+
+#[cfg(windows)]
+fn async_pipe_reader(reader: PipeReader) -> tokio::fs::File {
+    let handle = OwnedHandle::from(reader);
+    tokio::fs::File::from_std(File::from(handle))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn async_pipe_reader(reader: PipeReader) -> tokio::fs::File {
+    drop(reader);
+    panic!("process capture pipes require a supported native host")
 }
 
 struct ProcessGraph {
@@ -293,38 +543,6 @@ fn validate_process_graph(specs: &[NativeProcessSpec]) -> Result<ProcessGraph, P
     })
 }
 
-fn graph_input_stdio(
-    endpoint: ProcessStdio,
-    pipes: &BTreeMap<ProcessPipeId, (PipeReader, PipeWriter)>,
-) -> Result<Stdio, PlatformError> {
-    match endpoint {
-        ProcessStdio::Pipe(id) => pipes
-            .get(&id)
-            .ok_or(PlatformError::InvalidProcessGraph)?
-            .0
-            .try_clone()
-            .map(Stdio::from)
-            .map_err(PlatformError::from),
-        endpoint => endpoint.standalone_stdio(),
-    }
-}
-
-fn graph_output_stdio(
-    endpoint: ProcessStdio,
-    pipes: &BTreeMap<ProcessPipeId, (PipeReader, PipeWriter)>,
-) -> Result<Stdio, PlatformError> {
-    match endpoint {
-        ProcessStdio::Pipe(id) => pipes
-            .get(&id)
-            .ok_or(PlatformError::InvalidProcessGraph)?
-            .1
-            .try_clone()
-            .map(Stdio::from)
-            .map_err(PlatformError::from),
-        endpoint => endpoint.standalone_stdio(),
-    }
-}
-
 fn validate_process_spec(spec: &ProcessSpec) -> Result<(), PlatformError> {
     if spec.executable.contains('\0') || spec.argv.iter().any(|argument| argument.contains('\0')) {
         return Err(PlatformError::InvalidLogicalPath);
@@ -359,6 +577,11 @@ impl ProcessHandle {
 
     pub fn take_stderr(&mut self) -> Option<ChildStderr> {
         self.child.stderr().take()
+    }
+
+    /// Takes one parent-facing capture pipe by its plan-local identifier.
+    pub fn take_capture(&mut self, id: ProcessCaptureId) -> Option<tokio::fs::File> {
+        self.captures.remove(&id)
     }
 
     #[must_use]
@@ -493,6 +716,18 @@ fn main() {
             }
             output.flush().expect("flush generated stdout");
         }
+        Some("ordered") => {
+            let mut stdout = io::stdout().lock();
+            let mut stderr = io::stderr().lock();
+            stdout.write_all(b"stdout-a\n").expect("write stdout a");
+            stdout.flush().expect("flush stdout a");
+            stderr.write_all(b"stderr-a\n").expect("write stderr a");
+            stderr.flush().expect("flush stderr a");
+            stdout.write_all(b"stdout-b\n").expect("write stdout b");
+            stdout.flush().expect("flush stdout b");
+            stderr.write_all(b"stderr-b\n").expect("write stderr b");
+            stderr.flush().expect("flush stderr b");
+        }
         Some("quiet") => {}
         Some("parent") => {
             let ready = arguments.next().expect("ready path");
@@ -548,6 +783,7 @@ fn main() {
                 OsString::from("present"),
             )],
             clear_environment: true,
+            files: Vec::new(),
             stdin: ProcessStdio::Null,
             stdout: ProcessStdio::Piped,
             stderr: ProcessStdio::Piped,
@@ -587,6 +823,7 @@ fn main() {
             cwd: directory.0.clone(),
             environment: vec![],
             clear_environment: false,
+            files: Vec::new(),
             stdin: ProcessStdio::Piped,
             stdout: ProcessStdio::Piped,
             stderr: ProcessStdio::Null,
@@ -625,6 +862,7 @@ fn main() {
             cwd: directory.0.clone(),
             environment: vec![],
             clear_environment: false,
+            files: Vec::new(),
             stdin: ProcessStdio::Inherit,
             stdout: ProcessStdio::Inherit,
             stderr: ProcessStdio::Inherit,
@@ -642,6 +880,115 @@ fn main() {
         );
     }
 
+    #[tokio::test]
+    async fn native_file_and_capture_endpoints_are_ordered_and_shared() {
+        let directory = TestDirectory::new();
+        let executable = directory.0.join(compile_process_tree_helper(&directory));
+        let first = directory.0.join("first.log");
+        let shared = directory.0.join("shared.log");
+        fs::write(&first, b"stale").expect("seed first target");
+        let first_id = super::ProcessFileId::new(1);
+        let shared_id = super::ProcessFileId::new(2);
+        let mut redirected = spawn_native(&NativeProcessSpec {
+            executable: executable.clone().into_os_string(),
+            argv: vec![OsString::from("ordered")],
+            cwd: directory.0.clone(),
+            environment: vec![],
+            clear_environment: false,
+            files: vec![
+                super::NativeProcessFile {
+                    id: first_id,
+                    path: first.clone(),
+                    mode: super::NativeProcessFileMode::Write,
+                },
+                super::NativeProcessFile {
+                    id: shared_id,
+                    path: shared.clone(),
+                    mode: super::NativeProcessFileMode::Write,
+                },
+            ],
+            stdin: ProcessStdio::Null,
+            stdout: ProcessStdio::File(shared_id),
+            stderr: ProcessStdio::File(shared_id),
+        })
+        .expect("spawn file-redirected helper");
+        assert!(
+            redirected
+                .wait()
+                .await
+                .expect("wait for redirected helper")
+                .success
+        );
+        assert_eq!(fs::read(first).expect("read first target"), b"");
+        assert_eq!(
+            fs::read(shared).expect("read shared target"),
+            b"stdout-a\nstderr-a\nstdout-b\nstderr-b\n"
+        );
+
+        let capture_id = super::ProcessCaptureId::new(9);
+        let mut captured = spawn_native(&NativeProcessSpec {
+            executable: executable.clone().into_os_string(),
+            argv: vec![OsString::from("ordered")],
+            cwd: directory.0.clone(),
+            environment: vec![],
+            clear_environment: false,
+            files: Vec::new(),
+            stdin: ProcessStdio::Null,
+            stdout: ProcessStdio::Capture(capture_id),
+            stderr: ProcessStdio::Capture(capture_id),
+        })
+        .expect("spawn shared-capture helper");
+        let mut capture = captured.take_capture(capture_id).expect("shared capture");
+        let (bytes, exit) = tokio::join!(
+            async {
+                let mut bytes = Vec::new();
+                capture
+                    .read_to_end(&mut bytes)
+                    .await
+                    .expect("read shared capture");
+                bytes
+            },
+            captured.wait(),
+        );
+        assert!(exit.expect("wait for captured helper").success);
+        assert_eq!(bytes, b"stdout-a\nstderr-a\nstdout-b\nstderr-b\n");
+
+        let input = directory.0.join("input.bin");
+        fs::write(&input, b"redirected-input").expect("write input fixture");
+        let input_id = super::ProcessFileId::new(3);
+        let output_id = super::ProcessCaptureId::new(10);
+        let mut copied = spawn_native(&NativeProcessSpec {
+            executable: executable.into_os_string(),
+            argv: vec![OsString::from("copy")],
+            cwd: directory.0.clone(),
+            environment: vec![],
+            clear_environment: false,
+            files: vec![super::NativeProcessFile {
+                id: input_id,
+                path: input,
+                mode: super::NativeProcessFileMode::Read,
+            }],
+            stdin: ProcessStdio::File(input_id),
+            stdout: ProcessStdio::Capture(output_id),
+            stderr: ProcessStdio::Null,
+        })
+        .expect("spawn input-redirected helper");
+        let mut output = copied.take_capture(output_id).expect("copy output capture");
+        let (bytes, exit) = tokio::join!(
+            async {
+                let mut bytes = Vec::new();
+                output
+                    .read_to_end(&mut bytes)
+                    .await
+                    .expect("read copied input");
+                bytes
+            },
+            copied.wait(),
+        );
+        assert!(exit.expect("wait for copied input").success);
+        assert_eq!(bytes, b"redirected-input");
+    }
+
     #[test]
     fn connected_stdio_requires_a_complete_acyclic_process_graph() {
         let first_pipe = ProcessPipeId::new(1);
@@ -652,6 +999,7 @@ fn main() {
             cwd: PathBuf::from("."),
             environment: vec![],
             clear_environment: false,
+            files: Vec::new(),
             stdin,
             stdout,
             stderr: ProcessStdio::Null,
@@ -661,6 +1009,42 @@ fn main() {
             spawn_native(&spec(ProcessStdio::Pipe(first_pipe), ProcessStdio::Null)),
             Err(PlatformError::InvalidProcessGraph)
         ));
+        assert!(matches!(
+            spawn_native(&spec(
+                ProcessStdio::Capture(super::ProcessCaptureId::new(1)),
+                ProcessStdio::Null
+            )),
+            Err(PlatformError::InvalidProcessRedirection)
+        ));
+        assert!(matches!(
+            spawn_native(&spec(
+                ProcessStdio::Null,
+                ProcessStdio::File(super::ProcessFileId::new(1))
+            )),
+            Err(PlatformError::InvalidProcessRedirection)
+        ));
+
+        let standalone_directory = TestDirectory::new();
+        let unopened_standalone = standalone_directory.0.join("unopened-standalone.log");
+        let standalone_file_id = super::ProcessFileId::new(10);
+        let mut invalid_standalone = spec(
+            ProcessStdio::Pipe(first_pipe),
+            ProcessStdio::File(standalone_file_id),
+        );
+        invalid_standalone.files.push(super::NativeProcessFile {
+            id: standalone_file_id,
+            path: unopened_standalone.clone(),
+            mode: super::NativeProcessFileMode::Write,
+        });
+        assert!(matches!(
+            spawn_native(&invalid_standalone),
+            Err(PlatformError::InvalidProcessGraph)
+        ));
+        assert!(
+            !unopened_standalone.exists(),
+            "standalone graph endpoints must fail before file-open side effects"
+        );
+
         assert!(matches!(
             spawn_native_graph(&[spec(ProcessStdio::Null, ProcessStdio::Pipe(first_pipe))]),
             Err(PlatformError::InvalidProcessGraph)
@@ -702,6 +1086,30 @@ fn main() {
             Err(PlatformError::InvalidProcessGraph)
         ));
 
+        let directory = TestDirectory::new();
+        let unopened = directory.0.join("unopened.log");
+        let file_id = super::ProcessFileId::new(11);
+        let mut file_spec = spec(ProcessStdio::Null, ProcessStdio::File(file_id));
+        file_spec.files.push(super::NativeProcessFile {
+            id: file_id,
+            path: unopened.clone(),
+            mode: super::NativeProcessFileMode::Write,
+        });
+        assert!(matches!(
+            spawn_native_graph(&[
+                file_spec,
+                spec(
+                    ProcessStdio::Capture(super::ProcessCaptureId::new(12)),
+                    ProcessStdio::Null,
+                ),
+            ]),
+            Err(PlatformError::InvalidProcessRedirection)
+        ));
+        assert!(
+            !unopened.exists(),
+            "the complete graph plan must validate before file-open side effects"
+        );
+
         let mut shared_writer = spec(ProcessStdio::Null, ProcessStdio::Pipe(first_pipe));
         shared_writer.stderr = ProcessStdio::Pipe(first_pipe);
         let graph = validate_process_graph(&[
@@ -729,6 +1137,7 @@ fn main() {
                 cwd: directory.0.clone(),
                 environment: vec![],
                 clear_environment: false,
+                files: Vec::new(),
                 stdin: ProcessStdio::Null,
                 stdout: ProcessStdio::Pipe(pipe),
                 stderr: ProcessStdio::Null,
@@ -739,6 +1148,7 @@ fn main() {
                 cwd: directory.0.clone(),
                 environment: vec![],
                 clear_environment: false,
+                files: Vec::new(),
                 stdin: ProcessStdio::Pipe(pipe),
                 stdout: ProcessStdio::Piped,
                 stderr: ProcessStdio::Null,

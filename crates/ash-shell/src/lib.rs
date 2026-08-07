@@ -35,5 +35,6 @@ pub use state::{
     ShellOptions, ShellState, ShellStatus, ShellStatusKind, StateError,
 };
 pub use syntax::{
-    Parameter, Pipeline, QuoteMode, Script, SimpleCommand, SourceSpan, Word, WordPart,
+    Parameter, Pipeline, QuoteMode, Redirection, RedirectionDescriptor, RedirectionFileMode,
+    RedirectionTarget, Script, SimpleCommand, SourceSpan, Word, WordPart,
 };

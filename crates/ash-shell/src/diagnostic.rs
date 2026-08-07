@@ -7,6 +7,7 @@ use crate::SourceSpan;
 #[non_exhaustive]
 pub enum DiagnosticCode {
     UnexpectedSeparator,
+    InvalidRedirection,
     UnsupportedSyntax,
     UnterminatedSingleQuote,
     UnterminatedDoubleQuote,

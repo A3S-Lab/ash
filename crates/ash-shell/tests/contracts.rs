@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use a3s_ash_shell::{
     CommandResolver, Diagnostic, HostPlatform, NativeCommandLookup, Parameter, PlatformEnvironment,
-    PortableCommand, QuoteMode, ResolutionError, ResolvedCommand, Script, ShellFunction,
-    ShellState, StatefulBuiltin, parse,
+    PortableCommand, QuoteMode, RedirectionDescriptor, RedirectionFileMode, RedirectionTarget,
+    ResolutionError, ResolvedCommand, Script, ShellFunction, ShellState, StatefulBuiltin, parse,
 };
 
 #[test]
@@ -25,9 +25,9 @@ fn parameter_ast_fixture_is_stable() {
 
 #[test]
 fn parser_diagnostic_fixture_is_stable() {
-    let source = include_str!("fixtures/parser/unsupported-redirection.ash");
-    let expected = include_str!("fixtures/parser/unsupported-redirection.diagnostic");
-    let diagnostic = parse(source).expect_err("redirection is not implemented");
+    let source = include_str!("fixtures/parser/unsupported-syntax.ash");
+    let expected = include_str!("fixtures/parser/unsupported-syntax.diagnostic");
+    let diagnostic = parse(source).expect_err("reserved syntax remains unsupported");
     assert_eq!(render_diagnostic(&diagnostic), expected);
 }
 
@@ -126,12 +126,68 @@ fn render_script(script: &Script) -> String {
                     }
                 }
             }
+            for redirection in command.redirections() {
+                match redirection.target() {
+                    RedirectionTarget::File { path, mode } => {
+                        writeln!(
+                            output,
+                            "    redirection {} {} {}..{} operator {}..{}",
+                            descriptor_name(redirection.descriptor()),
+                            file_mode_name(*mode),
+                            redirection.span().start(),
+                            redirection.span().end(),
+                            redirection.operator_span().start(),
+                            redirection.operator_span().end()
+                        )
+                        .expect("string write");
+                        writeln!(
+                            output,
+                            "      target {}..{} \"{}\"",
+                            path.span().start(),
+                            path.span().end(),
+                            path.literal().escape_debug()
+                        )
+                        .expect("string write");
+                    }
+                    RedirectionTarget::Descriptor(target) => {
+                        writeln!(
+                            output,
+                            "    redirection {} duplicate-{} {}..{} operator {}..{}",
+                            descriptor_name(redirection.descriptor()),
+                            descriptor_name(*target),
+                            redirection.span().start(),
+                            redirection.span().end(),
+                            redirection.operator_span().start(),
+                            redirection.operator_span().end()
+                        )
+                        .expect("string write");
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => writeln!(output, "    redirection unknown").expect("string write"),
+                }
+            }
             if let Some(pipe) = pipeline.pipe_spans().get(stage) {
                 writeln!(output, "  pipe {}..{}", pipe.start(), pipe.end()).expect("string write");
             }
         }
     }
     output
+}
+
+const fn descriptor_name(descriptor: RedirectionDescriptor) -> &'static str {
+    match descriptor {
+        RedirectionDescriptor::Stdin => "stdin",
+        RedirectionDescriptor::Stdout => "stdout",
+        RedirectionDescriptor::Stderr => "stderr",
+    }
+}
+
+const fn file_mode_name(mode: RedirectionFileMode) -> &'static str {
+    match mode {
+        RedirectionFileMode::Read => "read",
+        RedirectionFileMode::Write => "write",
+        RedirectionFileMode::Append => "append",
+    }
 }
 
 fn parameter_name(parameter: &Parameter) -> (&'static str, &str) {

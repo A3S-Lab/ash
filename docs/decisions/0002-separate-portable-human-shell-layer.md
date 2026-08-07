@@ -71,19 +71,24 @@ native script path. Startup Profiles are explicit through `--profile FILE` or
 `ASH_PROFILE`, with `--no-profile` as the deterministic recovery path. These
 human features do not change the machine diagnostics of `ash run` or `ash rpc`.
 H2 now includes explicit per-stream modes and validated native OS pipe graphs in
-the shared platform boundary plus the first shell pipeline lowering. A
-same-line `|` connects two to 32 native host stages after expansion and complete
-resolution preflight. The first stage receives null stdin, intermediate stdout
-travels directly through OS pipes, and final stdout plus every stage's stderr
-share the bounded capture allowance. Stderr is appended in stage order; status
-defaults to the final stage, while persistent `set -o pipefail` selects the
-rightmost unsuccessful stage and `set +o pipefail` restores the default.
-Parent-facing, child-to-child, and three-process 8 MiB regressions lock
-backpressure, exact bytes, EOF, and handle closure;
-incomplete or cyclic graphs fail before spawn. Unified supervision, visible
-terminal streaming, redirections, portable/WSL pipeline stages,
-broader expansion, foreground interactive programs and jobs, mutations, and
-WSL execution remain staged work.
+the shared platform boundary plus native-only pipeline lowering. A same-line
+`|` connects two to 32 native host stages after expansion and complete
+resolution preflight. Intermediate stdout travels directly through OS pipes;
+unredirected final stdout and stderr use bounded named captures. Status defaults
+to the final stage, while persistent `set -o pipefail` selects the rightmost
+unsuccessful stage and `set +o pipefail` restores the default. Native commands
+also accept source-spanned `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
+Targets expand to exactly one field, relative paths resolve from persistent cwd,
+descriptor assignments apply left to right, files attach directly to child
+handles, and shared targets retain OS write ordering. Invalid plans fail before
+side effects; source-ordered valid file opens still create or truncate
+superseded targets.
+Parent-facing, child-to-child, three-process, and ordered-redirection regressions
+lock backpressure, exact bytes, EOF, handle closure, and descriptor sharing.
+Unified supervision, visible terminal streaming, internal pipeline endpoint
+replacement, builtin/portable/WSL redirection and pipeline adapters, broader
+expansion, foreground interactive programs and jobs, mutations, and WSL
+execution remain staged work.
 
 ## Rejected alternatives
 

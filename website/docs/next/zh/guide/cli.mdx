@@ -30,7 +30,7 @@ ash 的主要 CLI 是机器接口：成功输出和错误诊断都使用稳定�
 当前 H1 检查点会在 stdin 为终端时打开跨平台行编辑 REPL，并针对同一份持久原生状态
 顺序执行当前命令与管道语法。已实现 `pwd`、`echo`（含 `-n`）、`cd`、展开后的
 `export`/`unset`、`set` pipefail 控制、`exit`、可移植 `ls`、原始字节 `cat`、文本
-`grep`、命名参数与上一状态展开、宿主原生命令，以及同一行的纯原生管道；源码也可以来自 `-c SOURCE`、原生
+`grep`、命名参数与上一状态展开、宿主原生命令，以及带有序原生重定向的同一行纯原生管道；源码也可以来自 `-c SOURCE`、原生
 脚本文件路径或 stdin：
 
 ```sh
@@ -38,6 +38,7 @@ ash shell
 ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
 ash shell -c 'export NAME=world; echo "hello $NAME"; echo $?'
 ash shell -c "native:rustc --version"
+ash shell -c 'native:rustc --version >version.txt 2>&1'
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ash shell --profile ./profile.ash
@@ -90,20 +91,32 @@ Ctrl+C 会把 `$?` 设为 130 并继续，EOF 则返回上一状态。`exit [STA
 
 原生程序通过持久 `PATH` 或显式 `native:` 前缀解析。ash 会把解析后的参数向量、当前
 目录和导出环境直接交给解析出的宿主可执行文件，绝不插入宿主 Shell 命令字符串。
-独立子进程仍使用空 stdin 并同步捕获输出，因此自身需要前台终端的程序属于 H4 作业
+未重定向的独立子进程仍使用空 stdin 并同步捕获输出，因此自身需要前台终端的程序属于 H4 作业
 控制，而不是当前行编辑 REPL。stdout 与 stderr 共享剩余的 128 MiB 捕获额度，普通
 的非零原生退出状态会直接成为命令状态，不额外生成诊断。
+
+原生命令支持 `<`、`>`、`>>`、`2>`、`2>>`、`2>&1` 与 `1>&2`，并从左到右应用：
+`command >out 2>&1` 会把两路流合入 `out`，而 `command 2>&1 >out` 会让 stderr 保留在
+原 stdout 捕获上。每个文件目标必须展开为恰好一个原生字段；相对路径以持久 cwd 为基准。
+文件直接连接子进程 OS 句柄，因此重定向输出不占同步捕获额度；被后续赋值覆盖的目标
+仍按源码顺序打开。目标缺失、歧义或无法打开时返回状态 1 和重定向诊断。状态命令、
+可移植命令与 WSL 命令会在执行或产生文件系统副作用前拒绝重定向。
 
 同一行的 `|` 可组成两个到 32 个宿主原生阶段的管道。所有阶段都会在任何子进程启动
 前完成展开、UTF-8 命令名校验、解析和原生类型确认。首阶段 stdin 为空设备，中间
 stdout 直接流经 OS 管道，只返回最终 stdout；所有阶段的 stderr 会并发捕获后按阶段
-顺序拼接。最终 stdout 与全部 stderr 共享剩余的 128 MiB 额度；状态默认取最后阶段，
+stdout 直接流经 OS 管道，只返回未重定向的最终 stdout；未重定向的 stderr 会并发捕获后按阶段
+顺序拼接。最终 stdout 与捕获的 stderr 共享剩余的 128 MiB 额度；状态默认取最后阶段，
 启用 `set -o pipefail` 后改取最右侧失败阶段（含 `128 + signal`），全成功时仍取最后阶段。
 状态命令、可移植命令、别名、函数与 WSL 阶段会在其流式适配器实现前明确拒绝且不会
 启动任何子进程。
+首阶段可以重定向 stdin，末阶段可以重定向 stdout，任意阶段可以重定向 stderr 或将其
+复制到该阶段 stdout。替换内部管道 stdin 或 stdout 端点时，会在打开文件或启动子进程
+前返回状态 2。
 
-更广的展开（包括命令替换与 glob）、修改命令、终端流式输出、重定向、
-统一管道监督、可移植/WSL 管道阶段、前台交互程序与作业控制，以及 WSL 执行尚未实现。
+更广的展开（包括命令替换与 glob）、修改命令、终端流式输出、统一管道监督、内部管道
+端点替换、builtin/可移植/WSL 重定向与管道适配器、前台交互程序与作业控制，以及 WSL
+执行尚未实现。
 常规二进制启用 `human-shell` feature；
 `cargo build -p a3s-ash --no-default-features` 保留最小机器专用构建。
 

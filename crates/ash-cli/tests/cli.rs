@@ -119,6 +119,19 @@ fn main() {
                 .expect("numeric exit status");
             process::exit(code);
         }
+        Some("--ordered") => {
+            let mut stdout = io::stdout().lock();
+            let mut stderr = io::stderr().lock();
+            stdout.write_all(b"stdout-a\n").expect("write stdout a");
+            stdout.flush().expect("flush stdout a");
+            stderr.write_all(b"stderr-a\n").expect("write stderr a");
+            stderr.flush().expect("flush stderr a");
+            stdout.write_all(b"stdout-b\n").expect("write stdout b");
+            stdout.flush().expect("flush stdout b");
+            stderr.write_all(b"stderr-b\n").expect("write stderr b");
+            stderr.flush().expect("flush stderr b");
+            return;
+        }
         _ => {}
     }
     let cwd = env::current_dir().expect("current directory");
@@ -759,6 +772,38 @@ fn shell_command_launches_native_argv_with_persistent_cwd_and_environment() {
     assert!(pipefail.status.success(), "stderr={:?}", pipefail.stderr);
     assert_eq!(pipefail.stdout, b"0\n7\n0\n");
     assert!(pipefail.stderr.is_empty());
+
+    fs::write(directory.0.join("input.bin"), b"redirected-cli-input")
+        .expect("write redirection input");
+    fs::write(directory.0.join("first.log"), b"stale").expect("seed first redirection target");
+    let redirection_source = format!(
+        "export PATH=bin; {executable} --ordered >first.log >combined.log 2>&1; {executable} --ordered 2>&1 >stdout.log; {executable} --copy <input.bin >copied.bin"
+    );
+    let redirected = run_in(
+        &directory,
+        &["shell", "--no-profile", "-c", &redirection_source],
+        b"",
+    );
+    assert!(
+        redirected.status.success(),
+        "stderr={:?}",
+        redirected.stderr
+    );
+    assert_eq!(redirected.stdout, b"stderr-a\nstderr-b\n");
+    assert!(redirected.stderr.is_empty());
+    assert_eq!(fs::read(directory.0.join("first.log")).expect("first"), b"");
+    assert_eq!(
+        fs::read(directory.0.join("combined.log")).expect("combined"),
+        b"stdout-a\nstderr-a\nstdout-b\nstderr-b\n"
+    );
+    assert_eq!(
+        fs::read(directory.0.join("stdout.log")).expect("stdout"),
+        b"stdout-a\nstdout-b\n"
+    );
+    assert_eq!(
+        fs::read(directory.0.join("copied.bin")).expect("copied"),
+        b"redirected-cli-input"
+    );
 }
 
 #[cfg(feature = "human-shell")]
