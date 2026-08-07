@@ -13,5 +13,6 @@ homepage.workspace = true
 ash-ops.workspace = true
 ash-platform.workspace = true
 futures.workspace = true
+regex.workspace = true
 rustyline.workspace = true
 tokio.workspace = true

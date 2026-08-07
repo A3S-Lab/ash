@@ -113,6 +113,7 @@ dependencies = [
  "a3s-ash-ops",
  "a3s-ash-platform",
  "futures",
+ "regex",
  "rustyline",
  "tokio",
 ]
