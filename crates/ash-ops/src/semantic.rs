@@ -1,4 +1,6 @@
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use ash_engine::{CancellationToken, ComputePool, ParallelismError};
 use ash_platform::{EntryKind, PlatformError, ResolvedPath, WalkOptions, Workspace};
@@ -108,6 +110,188 @@ pub trait SemanticFileSystem: Clone + Send + Sync + 'static {
         root: &Self::ResolvedPath,
         options: SemanticWalkOptions,
     ) -> Result<Vec<SemanticEntry>, SemanticError>;
+}
+
+/// Unconfined native filesystem provider for human-facing portable commands.
+///
+/// Relative paths are resolved from the captured working directory. Access is
+/// governed only by the operating-system identity running ash; this provider
+/// does not apply the ASH/1 workspace capability used by machine operations.
+#[derive(Clone, Debug)]
+pub struct NativeFileSystem {
+    cwd: PathBuf,
+}
+
+impl NativeFileSystem {
+    pub fn new(cwd: impl AsRef<Path>) -> Result<Self, SemanticError> {
+        let cwd = fs::canonicalize(cwd).map_err(PlatformError::from)?;
+        if !fs::metadata(&cwd).map_err(PlatformError::from)?.is_dir() {
+            return Err(PlatformError::InvalidWorkspace.into());
+        }
+        Ok(Self { cwd })
+    }
+
+    #[must_use]
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+}
+
+impl SemanticFileSystem for NativeFileSystem {
+    type ResolvedPath = PathBuf;
+
+    fn resolve_existing(&self, path: &Path) -> Result<Self::ResolvedPath, SemanticError> {
+        let path = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            self.cwd.join(path)
+        };
+        Ok(fs::canonicalize(path).map_err(PlatformError::from)?)
+    }
+
+    fn semantic_path(&self, path: &Self::ResolvedPath) -> SemanticPath {
+        SemanticPath::new(path.clone(), native_path_sort_key(path))
+    }
+
+    fn read_limited(
+        &self,
+        path: &Self::ResolvedPath,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, SemanticError> {
+        let size = fs::metadata(path).map_err(PlatformError::from)?.len();
+        if size > max_bytes {
+            return Err(PlatformError::InputTooLarge {
+                size,
+                max: max_bytes,
+            }
+            .into());
+        }
+        Ok(fs::read(path).map_err(PlatformError::from)?)
+    }
+
+    fn walk(
+        &self,
+        root: &Self::ResolvedPath,
+        options: SemanticWalkOptions,
+    ) -> Result<Vec<SemanticEntry>, SemanticError> {
+        if options.max_entries == 0 {
+            return Err(PlatformError::EntryLimit { max: 0 }.into());
+        }
+        let mut entries = Vec::new();
+        native_walk_inner(root, 0, options, &mut entries)?;
+        entries.sort_unstable_by(|left, right| {
+            left.path.stable_sort_key.cmp(&right.path.stable_sort_key)
+        });
+        Ok(entries)
+    }
+}
+
+fn native_walk_inner(
+    path: &Path,
+    depth: u16,
+    options: SemanticWalkOptions,
+    output: &mut Vec<SemanticEntry>,
+) -> Result<(), PlatformError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if depth > 0 && native_hidden(path, &metadata) && !options.include_hidden {
+        return Ok(());
+    }
+    if output.len() >= options.max_entries {
+        return Err(PlatformError::EntryLimit {
+            max: options.max_entries,
+        });
+    }
+    let kind = native_entry_kind(&metadata);
+    output.push(SemanticEntry {
+        path: SemanticPath::new(path.to_owned(), native_path_sort_key(path)),
+        kind,
+        size: if kind == SemanticEntryKind::File {
+            metadata.len()
+        } else {
+            0
+        },
+        modified_millis: native_modified_millis(&metadata),
+    });
+    if kind != SemanticEntryKind::Directory || depth >= options.max_depth {
+        return Ok(());
+    }
+
+    let mut children: Vec<_> = fs::read_dir(path)?.collect::<Result<_, _>>()?;
+    children.sort_unstable_by(|left, right| {
+        native_path_sort_key(&left.path()).cmp(&native_path_sort_key(&right.path()))
+    });
+    for child in children {
+        native_walk_inner(&child.path(), depth + 1, options, output)?;
+    }
+    Ok(())
+}
+
+fn native_entry_kind(metadata: &fs::Metadata) -> SemanticEntryKind {
+    let file_type = metadata.file_type();
+    if file_type.is_file() {
+        SemanticEntryKind::File
+    } else if file_type.is_dir() {
+        SemanticEntryKind::Directory
+    } else if file_type.is_symlink() {
+        SemanticEntryKind::Symlink
+    } else {
+        SemanticEntryKind::Other
+    }
+}
+
+fn native_modified_millis(metadata: &fs::Metadata) -> Option<i64> {
+    let duration = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    i64::try_from(duration.as_millis()).ok()
+}
+
+#[cfg(unix)]
+fn native_path_sort_key(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+fn native_path_sort_key(path: &Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_be_bytes)
+        .collect()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn native_path_sort_key(path: &Path) -> Vec<u8> {
+    path.to_string_lossy().into_owned().into_bytes()
+}
+
+#[cfg(unix)]
+fn native_hidden(path: &Path, _metadata: &fs::Metadata) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.file_name()
+        .is_some_and(|name| name.as_bytes().starts_with(b"."))
+}
+
+#[cfg(windows)]
+fn native_hidden(path: &Path, metadata: &fs::Metadata) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
+        || path
+            .file_name()
+            .and_then(|name| name.encode_wide().next())
+            .is_some_and(|unit| unit == u16::from(b'.'))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn native_hidden(path: &Path, _metadata: &fs::Metadata) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.'))
 }
 
 impl SemanticFileSystem for Workspace {
@@ -490,18 +674,33 @@ where
             .await?;
         let mut entries = Vec::new();
         for batch in batches {
-            entries.extend(batch?);
-            if entries.len() > self.limits.max_list_entries {
-                return Err(SemanticError::WorkLimit);
-            }
+            extend_list_entries(&mut entries, batch?, self.limits.max_list_entries)?;
         }
         check_cancelled(cancellation)?;
-        entries.retain(|entry| selected(entry, query.filter));
-        entries.sort_unstable_by(|left, right| {
-            left.path.stable_sort_key.cmp(&right.path.stable_sort_key)
-        });
-        entries.dedup_by(|left, right| left.path.stable_sort_key == right.path.stable_sort_key);
-        Ok(SemanticListResult { entries })
+        Ok(finish_list(entries, query.filter))
+    }
+
+    /// Executes list semantics serially for the current synchronous human
+    /// frontend. This retains the same provider bounds, filtering, ordering,
+    /// and deduplication as [`Self::list`] but has no compute-pool scheduling or
+    /// built-in cancellation point.
+    pub fn list_serial(&self, query: &ListQuery) -> Result<SemanticListResult, SemanticError> {
+        let roots = query
+            .paths
+            .iter()
+            .map(|path| self.filesystem.resolve_existing(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let options = SemanticWalkOptions {
+            max_depth: query.depth,
+            include_hidden: query.include_hidden,
+            max_entries: self.limits.max_list_entries,
+        };
+        let mut entries = Vec::new();
+        for root in roots {
+            let batch = self.filesystem.walk(&root, options)?;
+            extend_list_entries(&mut entries, batch, self.limits.max_list_entries)?;
+        }
+        Ok(finish_list(entries, query.filter))
     }
 
     pub async fn search(
@@ -594,6 +793,27 @@ where
             partial,
         })
     }
+}
+
+fn extend_list_entries(
+    entries: &mut Vec<SemanticEntry>,
+    batch: Vec<SemanticEntry>,
+    max_entries: usize,
+) -> Result<(), SemanticError> {
+    entries.extend(batch);
+    if entries.len() > max_entries {
+        Err(SemanticError::WorkLimit)
+    } else {
+        Ok(())
+    }
+}
+
+fn finish_list(mut entries: Vec<SemanticEntry>, filter: SemanticListFilter) -> SemanticListResult {
+    entries.retain(|entry| selected(entry, filter));
+    entries
+        .sort_unstable_by(|left, right| left.path.stable_sort_key.cmp(&right.path.stable_sort_key));
+    entries.dedup_by(|left, right| left.path.stable_sort_key == right.path.stable_sort_key);
+    SemanticListResult { entries }
 }
 
 fn selected(entry: &SemanticEntry, filter: SemanticListFilter) -> bool {
@@ -766,8 +986,9 @@ mod tests {
     use ash_platform::{PlatformError, Workspace};
 
     use super::{
-        ListQuery, ReadQuery, SearchQuery, SemanticError, SemanticLimits, SemanticListFilter,
-        SemanticReadMode, SemanticSearchPattern, SemanticServices,
+        ListQuery, NativeFileSystem, ReadQuery, SearchQuery, SemanticEntryKind, SemanticError,
+        SemanticLimits, SemanticListFilter, SemanticReadMode, SemanticSearchPattern,
+        SemanticServices,
     };
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -920,6 +1141,147 @@ mod tests {
         );
     }
 
+    #[test]
+    fn serial_native_lists_resolve_relative_paths_and_bound_depth() {
+        let directory = TestDirectory::new();
+        fs::create_dir(directory.0.join("nested")).expect("mkdir nested");
+        fs::write(directory.0.join("b.txt"), b"b").expect("write b");
+        fs::write(directory.0.join("a.txt"), b"a").expect("write a");
+        fs::write(directory.0.join(".hidden"), b"h").expect("write hidden");
+        fs::write(directory.0.join("nested/deep.txt"), b"deep").expect("write deep");
+        let root = fs::canonicalize(&directory.0).expect("canonical root");
+        let services =
+            SemanticServices::new(NativeFileSystem::new(&directory.0).expect("native filesystem"));
+
+        let visible = services
+            .list_serial(&ListQuery::new(
+                vec![PathBuf::from(".")],
+                1,
+                false,
+                SemanticListFilter::All,
+            ))
+            .expect("visible list");
+        let relative: Vec<_> = visible
+            .entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .path
+                    .as_path()
+                    .strip_prefix(&root)
+                    .expect("entry below root")
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            relative,
+            [
+                PathBuf::new(),
+                PathBuf::from("a.txt"),
+                PathBuf::from("b.txt"),
+                PathBuf::from("nested"),
+            ]
+        );
+        assert_eq!(visible.entries[0].kind, SemanticEntryKind::Directory);
+
+        let all = services
+            .list_serial(&ListQuery::new(
+                vec![PathBuf::from(".")],
+                1,
+                true,
+                SemanticListFilter::All,
+            ))
+            .expect("all list");
+        assert!(
+            all.entries
+                .iter()
+                .any(|entry| entry.path.as_path().ends_with(".hidden"))
+        );
+        assert!(
+            all.entries
+                .iter()
+                .all(|entry| !entry.path.as_path().ends_with("deep.txt"))
+        );
+    }
+
+    #[tokio::test]
+    async fn serial_and_parallel_lists_share_postprocessing() {
+        let directory = TestDirectory::new();
+        fs::create_dir(directory.0.join("src")).expect("mkdir src");
+        fs::write(directory.0.join("src/b.rs"), b"b").expect("write b");
+        fs::write(directory.0.join("src/a.rs"), b"a").expect("write a");
+        let services = SemanticServices::new(Workspace::new(&directory.0).expect("workspace"));
+        let query = ListQuery::new(
+            vec![PathBuf::from("src"), PathBuf::from("src")],
+            1,
+            false,
+            SemanticListFilter::Files,
+        );
+
+        let serial = services.list_serial(&query).expect("serial list");
+        let parallel = services
+            .list(&query, &pool(), &CancellationToken::default())
+            .await
+            .expect("parallel list");
+
+        assert_eq!(serial, parallel);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_walk_records_symlinks_without_recursing_through_them() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TestDirectory::new();
+        fs::create_dir(directory.0.join("target")).expect("mkdir target");
+        fs::write(directory.0.join("target/nested.txt"), b"nested").expect("write nested");
+        symlink("target", directory.0.join("link")).expect("create symlink");
+        let services =
+            SemanticServices::new(NativeFileSystem::new(&directory.0).expect("native filesystem"));
+
+        let result = services
+            .list_serial(&ListQuery::new(
+                vec![PathBuf::from(".")],
+                2,
+                false,
+                SemanticListFilter::All,
+            ))
+            .expect("list symlink");
+
+        assert!(result.entries.iter().any(|entry| {
+            entry.path.as_path().ends_with("link") && entry.kind == SemanticEntryKind::Symlink
+        }));
+        assert!(
+            result
+                .entries
+                .iter()
+                .all(|entry| !entry.path.as_path().ends_with("link/nested.txt"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_sort_keys_preserve_unix_path_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let bytes = b"native-\xff-name".to_vec();
+        let path = PathBuf::from(std::ffi::OsString::from_vec(bytes.clone()));
+        assert_eq!(super::native_path_sort_key(&path), bytes);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_sort_keys_preserve_windows_code_units_without_collisions() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let units = [0x0061, 0xd800, 0x0100];
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&units));
+        assert_eq!(
+            super::native_path_sort_key(&path),
+            [0x00, 0x61, 0xd8, 0x00, 0x01, 0x00]
+        );
+    }
+
     #[tokio::test]
     async fn raw_search_reports_crlf_normalization_binary_partiality_and_regex_matches() {
         let directory = TestDirectory::new();
@@ -1057,6 +1419,15 @@ mod tests {
             )
             .await
             .expect_err("aggregate list limit");
+        assert!(matches!(error, SemanticError::WorkLimit));
+        let error = services
+            .list_serial(&ListQuery::new(
+                vec![PathBuf::from("src"), PathBuf::from("src")],
+                1,
+                false,
+                SemanticListFilter::All,
+            ))
+            .expect_err("serial aggregate list limit");
         assert!(matches!(error, SemanticError::WorkLimit));
 
         let services = SemanticServices {

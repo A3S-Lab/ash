@@ -31,20 +31,23 @@ Harness interface.
 
 The current H1 checkpoint executes the H0 simple-command syntax sequentially
 against one persistent native state. It implements `pwd`, `echo` (with `-n`),
-and `cd`; source may come from `-c SOURCE`, a native script-file path, or stdin:
+`cd`, and portable `ls`; source may come from `-c SOURCE`, a native script-file
+path, or stdin:
 
 ```sh
-ash shell -c 'pwd; echo hello; cd crates; pwd'
+ash shell -c 'pwd; ls -a; cd crates; ls -d ash-shell'
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ```
 
 File and stdin sources must be valid UTF-8 and cannot exceed 1 MiB. Native file
 paths are not converted to UTF-8; use `ash shell -- ./-script.ash` for an
-operand beginning with `-`. Interactive input, profiles, external processes,
-and portable `ls`/`cat`/`grep` execution are not implemented yet. The regular
-binary enables the `human-shell` feature; `cargo build -p a3s-ash
---no-default-features` keeps a minimal machine-only build.
+operand beginning with `-`. Portable `ls` accepts one path (default `.`), emits
+one stably ordered native name per line, and supports `-a`/`--all`,
+`-d`/`--directory`, `-1`, combined short options, and `--`. Interactive input,
+profiles, external processes, and portable `cat`/`grep` execution are not
+implemented yet. The regular binary enables the `human-shell` feature; `cargo
+build -p a3s-ash --no-default-features` keeps a minimal machine-only build.
 
 ## Error contract
 
@@ -68,6 +71,7 @@ File operations are confined to the startup workspace. Paths must use canonical
 logical form and cannot escape through lexical traversal, symbolic links, or
 Windows reparse points. `exec` never switches to an implicit host shell.
 
-Human-shell state instead uses native `PathBuf` and `OsString` values. `cd`
-inherits normal user filesystem authority, and `pwd` preserves native Unix path
-bytes; this does not weaken or replace ASH/1 workspace confinement.
+Human-shell state instead uses native `PathBuf` and `OsString` values. `cd` and
+`ls` inherit normal user filesystem authority, while native path units are
+preserved or reversibly escaped; this does not weaken or replace ASH/1 workspace
+confinement.

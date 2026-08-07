@@ -2,6 +2,11 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::PathBuf;
 
+use ash_ops::{
+    ListQuery, NativeFileSystem, SemanticEntryKind, SemanticFileSystem, SemanticListFilter,
+    SemanticServices,
+};
+
 use crate::{
     CommandResolver, DiagnosticCode, ExecutionBackend, HostPlatform, NativeCommandLookup,
     PathCommandLookup, PortableCommand, ResolutionError, ResolvedCommand, ShellState, ShellStatus,
@@ -96,8 +101,9 @@ impl ShellExecution {
 /// Parses and executes the currently implemented foreground shell subset.
 ///
 /// Commands run sequentially against one mutable `ShellState`. This first H1
-/// slice implements `pwd`, `echo`, and `cd`; other resolved command categories
-/// produce explicit diagnostics without invoking a host shell.
+/// slice implements `pwd`, `echo`, `cd`, and a bounded portable `ls`; other
+/// resolved command categories produce explicit diagnostics without invoking a
+/// host shell.
 #[must_use]
 pub fn execute_source(source: &str, state: &mut ShellState) -> ShellExecution {
     execute_source_with(source, state, &PathCommandLookup, HostPlatform::current())
@@ -195,6 +201,9 @@ fn execute_command(
         ResolvedCommand::Portable(PortableCommand::Echo) => {
             execute_echo(arguments, span, stdout, diagnostics)
         }
+        ResolvedCommand::Portable(PortableCommand::List) => {
+            execute_ls(state, arguments, span, stdout, diagnostics)
+        }
         ResolvedCommand::StatefulBuiltin(command) => unsupported(
             format!("builtin `{}` is not implemented yet", command.name()),
             span,
@@ -291,6 +300,141 @@ fn execute_echo(
         stdout.push(b'\n');
     }
     ShellStatus::success()
+}
+
+#[derive(Default)]
+struct ListCommandOptions {
+    include_hidden: bool,
+    directory: bool,
+    path: Option<OsString>,
+}
+
+fn execute_ls(
+    state: &ShellState,
+    arguments: &[OsString],
+    span: SourceSpan,
+    stdout: &mut Vec<u8>,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    let options = match parse_ls_options(arguments) {
+        Ok(options) => options,
+        Err(message) => return invalid_arguments(&message, span, diagnostics),
+    };
+    let target = options.path.unwrap_or_else(|| OsString::from("."));
+    if target.is_empty() {
+        return filesystem_failure("cannot list: path is empty".to_owned(), span, diagnostics);
+    }
+
+    let filesystem = match NativeFileSystem::new(state.cwd()) {
+        Ok(filesystem) => filesystem,
+        Err(error) => {
+            return filesystem_failure(
+                format!("cannot list from the current directory: {error}"),
+                span,
+                diagnostics,
+            );
+        }
+    };
+    let path = PathBuf::from(&target);
+    let resolved = match filesystem.resolve_existing(&path) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return list_filesystem_failure(&target, error, span, diagnostics);
+        }
+    };
+    let root = filesystem.semantic_path(&resolved);
+    let services = SemanticServices::new(filesystem);
+    let result = match services.list_serial(&ListQuery::new(
+        vec![path],
+        if options.directory { 0 } else { 1 },
+        options.include_hidden,
+        SemanticListFilter::All,
+    )) {
+        Ok(result) => result,
+        Err(error) => {
+            return list_filesystem_failure(&target, error, span, diagnostics);
+        }
+    };
+    let target_is_directory = result.entries.iter().any(|entry| {
+        entry.path.stable_sort_key() == root.stable_sort_key()
+            && entry.kind == SemanticEntryKind::Directory
+    });
+    if options.directory || !target_is_directory {
+        push_os_string(stdout, &target);
+        stdout.push(b'\n');
+        return ShellStatus::success();
+    }
+
+    for entry in result
+        .entries
+        .iter()
+        .filter(|entry| entry.path.stable_sort_key() != root.stable_sort_key())
+    {
+        let name = entry
+            .path
+            .as_path()
+            .file_name()
+            .unwrap_or_else(|| entry.path.as_path().as_os_str());
+        push_os_string(stdout, name);
+        stdout.push(b'\n');
+    }
+    ShellStatus::success()
+}
+
+fn parse_ls_options(arguments: &[OsString]) -> Result<ListCommandOptions, String> {
+    let mut options = ListCommandOptions::default();
+    let mut options_ended = false;
+    for argument in arguments {
+        if !options_ended {
+            if argument == "--" {
+                options_ended = true;
+                continue;
+            }
+            match argument.to_str() {
+                Some("--all") => {
+                    options.include_hidden = true;
+                    continue;
+                }
+                Some("--directory") => {
+                    options.directory = true;
+                    continue;
+                }
+                Some(value) if value.starts_with('-') && value != "-" => {
+                    if value.starts_with("--")
+                        || value.as_bytes()[1..]
+                            .iter()
+                            .any(|option| !matches!(option, b'a' | b'd' | b'1'))
+                    {
+                        return Err(format!(
+                            "ls does not support option `{}`",
+                            display_os_string(argument)
+                        ));
+                    }
+                    options.include_hidden |= value.as_bytes()[1..].contains(&b'a');
+                    options.directory |= value.as_bytes()[1..].contains(&b'd');
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if options.path.replace(argument.clone()).is_some() {
+            return Err("ls accepts at most one path".to_owned());
+        }
+    }
+    Ok(options)
+}
+
+fn list_filesystem_failure(
+    target: &OsStr,
+    error: impl std::fmt::Display,
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    filesystem_failure(
+        format!("cannot list `{}`: {error}", display_os_string(target)),
+        span,
+        diagnostics,
+    )
 }
 
 fn execute_cd(
@@ -598,14 +742,125 @@ mod tests {
         );
         assert_eq!(empty_home.status().code(), 1);
 
-        let unsupported = execute_source("ls", &mut state);
+        let unsupported = execute_source("cat", &mut state);
         assert_eq!(
             unsupported.diagnostics()[0].code(),
             ExecutionDiagnosticCode::Unsupported
         );
-        assert_eq!(unsupported.diagnostics()[0].span(), SourceSpan::new(0, 2));
+        assert_eq!(unsupported.diagnostics()[0].span(), SourceSpan::new(0, 3));
         assert_eq!(unsupported.status().kind(), ShellStatusKind::Exited);
         assert_eq!(unsupported.status().code(), 2);
+    }
+
+    #[test]
+    fn ls_lists_direct_children_in_stable_order_and_observes_cd() {
+        let directory = TestDirectory::new();
+        fs::create_dir(directory.0.join("child")).expect("create child");
+        fs::write(directory.0.join("b.txt"), b"b").expect("write b");
+        fs::write(directory.0.join("a.txt"), b"a").expect("write a");
+        fs::write(directory.0.join(".hidden"), b"hidden").expect("write hidden");
+        fs::write(directory.0.join("child/nested.txt"), b"nested").expect("write nested");
+        let mut state = ShellState::new(&directory.0);
+
+        let visible = execute_source("ls -1", &mut state);
+        assert_eq!(visible.stdout(), b"a.txt\nb.txt\nchild\n");
+        assert!(visible.diagnostics().is_empty());
+        assert_eq!(visible.status().code(), 0);
+
+        let all = execute_source("ls --all", &mut state);
+        assert_eq!(all.stdout(), b".hidden\na.txt\nb.txt\nchild\n");
+
+        let nested = execute_source("cd child; ls", &mut state);
+        assert_eq!(nested.stdout(), b"nested.txt\n");
+        assert!(nested.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn ls_supports_directory_end_of_options_and_clear_failures() {
+        let directory = TestDirectory::new();
+        fs::create_dir(directory.0.join("child")).expect("create child");
+        fs::write(directory.0.join("sample.txt"), b"sample").expect("write sample");
+        fs::write(directory.0.join("-dash"), b"dash").expect("write dash");
+        let mut state = ShellState::new(&directory.0);
+
+        let file = execute_source("ls sample.txt", &mut state);
+        assert_eq!(file.stdout(), b"sample.txt\n");
+        assert!(file.diagnostics().is_empty());
+
+        let directory_only = execute_source("ls -ad1 child", &mut state);
+        assert_eq!(directory_only.stdout(), b"child\n");
+        let dash = execute_source("ls -- -dash", &mut state);
+        assert_eq!(dash.stdout(), b"-dash\n");
+
+        let option = execute_source("ls -l", &mut state);
+        assert_eq!(
+            option.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::InvalidArguments
+        );
+        assert_eq!(
+            option.diagnostics()[0].message(),
+            "ls does not support option `-l`"
+        );
+        assert_eq!(option.status().code(), 2);
+
+        let paths = execute_source("ls child sample.txt", &mut state);
+        assert_eq!(
+            paths.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::InvalidArguments
+        );
+        assert_eq!(
+            paths.diagnostics()[0].message(),
+            "ls accepts at most one path"
+        );
+
+        let missing = execute_source("ls missing", &mut state);
+        assert_eq!(
+            missing.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Filesystem
+        );
+        assert_eq!(missing.status().code(), 1);
+
+        let empty = execute_source("ls ''", &mut state);
+        assert_eq!(
+            empty.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Filesystem
+        );
+        assert_eq!(
+            empty.diagnostics()[0].message(),
+            "cannot list: path is empty"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn ls_preserves_and_stably_sorts_native_names() {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("a"), b"a").expect("write a");
+        fs::write(directory.0.join("雪"), b"unicode").expect("write unicode");
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStringExt;
+
+            fs::write(
+                directory.0.join(std::ffi::OsString::from_vec(vec![0x80])),
+                b"middle",
+            )
+            .expect("write middle");
+            fs::write(
+                directory.0.join(std::ffi::OsString::from_vec(vec![0xff])),
+                b"last",
+            )
+            .expect("write last");
+        }
+        let mut state = ShellState::new(&directory.0);
+
+        let execution = execute_source("ls", &mut state);
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(execution.stdout(), b"a\n\x80\n\xe9\x9b\xaa\n\xff\n");
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(execution.stdout(), "a\n雪\n".as_bytes());
+        assert!(execution.diagnostics().is_empty());
     }
 
     #[cfg(any(unix, windows))]
