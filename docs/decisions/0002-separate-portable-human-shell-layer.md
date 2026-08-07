@@ -71,10 +71,10 @@ native script path. Startup Profiles are explicit through `--profile FILE` or
 `ASH_PROFILE`, with `--no-profile` as the deterministic recovery path. These
 human features do not change the machine diagnostics of `ash run` or `ash rpc`.
 H2 now includes explicit per-stream modes and validated native OS pipe graphs in
-the shared platform boundary plus native/portable/stateful pipeline lowering. A
-same-line `|` connects two to 32 native host stages, implemented portable `pwd`,
-`echo`, `ls`, `cat`, and `grep` stages, or implemented stateful `cd`, `export`,
-`unset`, `set`, and `exit` stages after expansion and complete resolution,
+the shared platform boundary plus native/WSL/portable/stateful pipeline lowering. A
+same-line `|` connects two to 32 native host or explicit WSL stages, implemented
+portable `pwd`, `echo`, `ls`, `cat`, and `grep` stages, or implemented stateful
+`cd`, `export`, `unset`, `set`, and `exit` stages after expansion and complete resolution,
 argument, regular-expression, and redirection preflight. Native-to-native stdout
 travels directly through OS pipes. Boundaries involving a portable task use only
 explicitly retained asynchronous parent ends and remain concurrent, bounded,
@@ -111,14 +111,22 @@ and terminates plus reaps every native member's owned process tree on a setup,
 capture, or wait failure. The shell completes its in-process stages and capture
 drains before the job's non-cancelled ordered wait, under one pipeline
 completion boundary.
+On Windows, explicit `linux:COMMAND` resolution now locates `wsl.exe` or returns
+a typed backend-unavailable diagnostic. `WslLaunchPlan` lowers an optional
+distribution, the current host cwd through `--cd`, and the Linux command plus
+exact user arguments after `--exec`, without a host or Linux shell string. The
+wrapper participates in the existing graph, so simple and mixed WSL commands
+reuse direct OS streams, ordered host-file redirections, capture, `pipefail`,
+and job supervision. Selected status retains the WSL backend and distribution.
+An opt-in Windows regression streams an 8 MiB fixture through a prepared distro.
 Parent-facing, child-to-child,
 native, mixed, portable-only,
 stateful, closed-reader, and ordered-redirection regressions lock backpressure,
 exact bytes, EOF, handle closure, cloned-state isolation, descriptor sharing,
-and global file-open order. Visible terminal streaming, WSL pipeline and
-redirection adapters, broader expansion,
-foreground interactive programs and jobs, mutations, and WSL execution remain
-staged work.
+and global file-open order. Visible terminal streaming, broader expansion,
+foreground interactive programs and jobs, mutations, plus installed-distribution
+probing, general WSL path/environment mapping, backend policy, Linux-side
+ownership, and interruption normalization remain staged work.
 
 ## Rejected alternatives
 

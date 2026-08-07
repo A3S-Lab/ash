@@ -34,8 +34,9 @@ a terminal and executes the current command and pipeline syntax sequentially
 against one persistent native state. It implements `pwd`, `echo` (with `-n`),
 `cd`, expanded `export`/`unset`, `set` pipefail control, `exit`, portable `ls`,
 raw-byte `cat`, text `grep`, named and last-status parameter expansion, native host executables, and
-same-line native/portable/stateful pipelines with ordered native, portable, and
-stateful redirections. Source may also come from `-c SOURCE`, a native
+explicit WSL commands on Windows, plus same-line native/WSL/portable/stateful
+pipelines with ordered native, WSL, portable, and stateful redirections. Source
+may also come from `-c SOURCE`, a native
 script-file path, or stdin:
 
 ```sh
@@ -43,6 +44,7 @@ ash shell
 ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
 ash shell -c 'export NAME=world; echo "hello $NAME"; echo $?'
 ash shell -c "native:rustc --version"
+ash shell -c "linux:uname -a" # Windows with WSL
 ash shell -c 'native:rustc --version >version.txt 2>&1'
 ash shell -c 'cat - <input.bin >copy.bin'
 ash shell ./script.ash
@@ -120,8 +122,17 @@ part of H4 job control rather than this line-edited REPL. Stdout and stderr shar
 the remaining 128 MiB capture allowance, and a normal nonzero native exit
 becomes the command status without an added diagnostic.
 
-Native and portable commands plus implemented stateful builtins accept `<`, `>`,
-`>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
+On Windows, `linux:COMMAND` explicitly selects WSL. Ash first resolves
+`wsl.exe`; a missing launcher returns status 126 with a resolution diagnostic,
+and an unresolved ordinary command never falls through to WSL. The wrapper
+receives an optional distribution, the current Windows cwd through `--cd`, then
+`--exec`, the Linux command, and each argument as a separate native string. No
+host or Linux shell string is inserted. The CLI currently uses the user's
+default distribution; an embedding may select one through `ShellOptions`, and
+the selected WSL backend/distribution is retained in command status.
+
+Native, WSL, and portable commands plus implemented stateful builtins accept
+`<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
 Assignments apply from left to right: `command >out 2>&1` merges both streams
 into `out`, while `command 2>&1 >out` leaves stderr on the original stdout
 capture. Every file target must expand to exactly one native field; relative
@@ -133,14 +144,15 @@ opened. Missing, ambiguous, or unopenable targets return status 1 with a
 redirection diagnostic. Source-spanned shell diagnostics remain shell stderr,
 not raw command stderr. Stateful arguments and targets preflight before opens;
 simple-command files open before parent mutation, and failed opens block the
-mutation or `exit` request. WSL commands reject redirections before execution or
-filesystem side effects.
+mutation or `exit` request. WSL redirection files are opened by the Windows host
+and connect directly to the wrapper's standard handles.
 
 A same-line `|` forms a pipeline of two to 32 stages. Each may be a native host
-command, portable `pwd`, `echo`, `ls`, `cat`, or `grep`, or implemented stateful
-`cd`, `export`, `unset`, `set`, or `exit`; aliases, functions, unimplemented
-stateful commands, and WSL stages fail during complete preflight. Native pairs
-remain connected by direct OS pipes. Boundaries involving an in-process stage
+command, explicit WSL command on Windows, portable `pwd`, `echo`, `ls`, `cat`,
+or `grep`, or implemented stateful `cd`, `export`, `unset`, `set`, or `exit`;
+aliases, functions, and unimplemented stateful commands fail during complete
+preflight. Native and WSL wrapper pairs remain connected by direct OS pipes.
+Boundaries involving an in-process stage
 keep only explicit asynchronous parent ends and poll the bounded task
 concurrently with native execution and capture, preserving OS backpressure without
 materializing native or portable `cat`/`grep` streams in full. Only `cat -` and
@@ -148,14 +160,14 @@ materializing native or portable `cat`/`grep` streams in full. Only `cat -` and
 so an upstream producer can observe broken-pipe failure. Final in-process output,
 final native output, and captured native stderr share the remaining 128 MiB
 allowance. Status defaults to the final stage. With `set -o pipefail`, the
-rightmost unsuccessful native, portable, or stateful stage is selected,
+rightmost unsuccessful native, WSL, portable, or stateful stage is selected,
 including `128 + signal`; an all-success pipeline still uses its final stage.
 Stateful stages never consume stdin, execute against independent `ShellState`
 clones, and close their empty stdout on completion. The parent cwd, variables,
 environment, options, and exit request remain unchanged; downstream readers see
 EOF, and pipeline `exit` contributes only an ordinary stage status.
-Any native, portable, or implemented stateful stage may redirect stdin, stdout,
-or stderr, with descriptor duplication still applied in source order. If a producer no longer references
+Any native, WSL, portable, or implemented stateful stage may redirect stdin,
+stdout, or stderr, with descriptor duplication still applied in source order. If a producer no longer references
 an internal pipe, ash closes its parent writer and the downstream reader sees
 EOF. If a consumer replaces its pipe stdin, ash closes the parent reader and the
 upstream writer sees native broken-pipe behavior. Final-stage or `pipefail`
@@ -163,8 +175,8 @@ selection then determines the visible status. A descriptor copy that still
 references the pipe remains connected even if the original descriptor is later
 redirected. Stateful files participate in the same global open order; these
 builtins emit no raw command output, and redirecting their empty stdout closes
-an outgoing pipe normally. WSL stage redirections remain unsupported and fail
-before runner or file side effects.
+an outgoing pipe normally. A WSL stage reuses the same validated pipe and file
+graph without a relay buffer.
 After parent pipe/file handles are claimed, ash converts the native graph into
 one job supervisor. Native exits retain specification order, and any setup,
 capture, or wait failure terminates and reaps every native member's owned
@@ -173,9 +185,10 @@ drains settle before the supervisor enters a non-cancelled ordered wait under
 that same completion boundary.
 
 Broader expansion (including command substitution and globbing), mutations,
-terminal streaming, WSL pipeline adapters,
-WSL redirection adapters, foreground interactive programs and
-jobs, and WSL execution are not implemented yet. The regular binary enables the
+terminal streaming, foreground interactive programs and jobs, plus installed
+WSL distribution probing, backend policy/configuration, general argument path
+mapping, environment forwarding, Linux-side ownership, and interruption
+normalization are not implemented yet. The regular binary enables the
 `human-shell`
 feature;
 `cargo build -p a3s-ash --no-default-features` keeps a minimal machine-only

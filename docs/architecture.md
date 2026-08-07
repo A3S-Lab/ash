@@ -62,14 +62,25 @@ wait failures clean up the remaining job before surfacing. The shell polls that
 job only after portable/stateful tasks and capture drains settle successfully,
 so an in-progress native reap is never canceled. Success and failure still share
 one pipeline completion boundary while stage exits retain source order.
+The twelfth checkpoint adds an explicit WSL wrapper adapter on Windows.
+`linux:COMMAND` resolution must locate `wsl.exe`, then `WslLaunchPlan` lowers an
+optional distribution, the current host cwd through `--cd`, and the Linux
+command plus exact argument vector after `--exec`; no command shell is inserted.
+The wrapper is an ordinary member of the validated native graph, so WSL stages
+reuse direct OS pipes, ordered host-file redirections, bounded capture, and the
+same `NativeProcessJob` completion boundary. Selected pipeline status preserves
+the WSL backend and distribution. Cross-platform lowering tests lock launcher
+absence, exact argv, mixed endpoints, redirection order, and `pipefail`; a
+Windows-only test can stream an 8 MiB host fixture through a configured distro
+when `ASH_TEST_WSL_DISTRIBUTION` is set.
 Eight-megabyte parent-facing,
 child-to-child, native, mixed, and closed-reader regressions lock exact bytes,
 EOF, backpressure, and completion; ordered-output regressions lock child and
 parent file resources, capture, surviving-pipe sharing, and global file-open
-side effects. User-visible terminal streaming, WSL pipeline and redirection
-adapters, foreground interactive
-programs and job control, broader expansion and mutations, and WSL launch remain
-open.
+side effects. User-visible terminal streaming, foreground interactive programs
+and job control, broader expansion and mutations, plus installed-distribution
+probing, general WSL argument path mapping, environment forwarding, backend
+policy, and interruption normalization remain open.
 Release-key and platform-signing credential provisioning, the first published release, enough accumulated fuzz duration to claim a soak gate, captured real multi-model Coding Agent runs, medium/large task families, and published hardware-labelled runtime measurements remain open.
 
 The runtime evidence covers fifteen end-to-end paths: recursive listing, literal and regular-expression search, snapshot, disk spill/fetch, paired disk-spill I/O with the compute plane idle and fully occupied, fresh `ash run` startup, empty child spawn, steady, fragmented, and paced-bursty simultaneous disk-backed stdout/stderr capture, repeated cancellation of a parent plus pipe-inheriting descendant, warm framed RPC dispatch, and retained ASON table projection. The mixed-load pair alternates sample order, consumes identical bytes, times only `capture` through asynchronous flush, and checks that every Rayon worker remains inside a bounded integer workload at I/O completion. It releases that workload before BLAKE3 retention and exact tail validation, so compute queueing cannot contaminate the I/O interval. Capture metadata records exact producer chunk cycles, flush boundaries, pacing, and output seeds; the compiled helper must independently describe the same profiles before timing starts. List and search split the deterministic fixture into disjoint roots so traversal and scanning can use the bounded worker pool. Structured projection reads and parses the retained value, applies ordered column reduction across the configured Rayon pool, and emits the same canonical row order at every worker count. Three compute-plane reducer scenarios separately process 131,072 deterministic lines as 512-line runs, eight-line blocks repeated 64 times, and sparse failure diagnostics with fixed context windows; all require the same compact evidence at every worker count. Four isolated single-caller scenarios additionally measure 4,096 hot lookups in a 1,024-entry path dictionary and DAG validation/scheduling at 64, 256, and 1,024 nodes. They report no scaling curve because they bypass the configurable engine worker pools. Cold startup launches and reaps a real shell process for every observation. Warm dispatch uses the same embeddable gateway as `ash rpc`, excludes its handshake, and keeps one session alive per worker configuration. Cancellation is recorded only after the owned native process group or Job Object has emptied and the final response is canonicalized; it is not merely a signal-delivery timer.
@@ -463,8 +474,8 @@ validates parent file identifiers and requires every native and parent file once
 in the global order before opening any resource. Only declared parent files are
 returned through a one-time take method.
 
-The shell accepts same-line `|` syntax for two to 32 native, implemented
-portable, or implemented stateful-builtin stages after complete expansion,
+The shell accepts same-line `|` syntax for two to 32 native, explicit WSL,
+implemented portable, or implemented stateful-builtin stages after complete expansion,
 resolution, argument, regular-expression, and redirection preflight.
 Native-to-native edges remain direct OS pipes. Boundaries involving portable
 `pwd`, `echo`, `ls`, `cat`, or `grep` retain the required async parent ends and
@@ -479,11 +490,11 @@ the parent shell is unchanged and downstream readers receive EOF. Pipeline
 stage writes to a parent-to-parent pipe whose reader joins the same aggregate
 128 MiB capture. Native stderr is concatenated in stage order.
 Status defaults to the final stage; persistent `set -o pipefail` instead selects
-the rightmost unsuccessful native, portable, or stateful exit, while
+the rightmost unsuccessful native, WSL, portable, or stateful exit, while
 `set +o pipefail` restores the default.
 
-Native and portable shell commands plus implemented stateful builtins lower
-`<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2` from left to right after
+Native, explicit WSL, and portable shell commands plus implemented stateful
+builtins lower `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2` from left to right after
 assigning default capture or pipeline endpoints. A file
 target must expand to exactly one native field and is resolved against the
 persistent shell cwd. The platform validates the complete graph and every
@@ -500,14 +511,17 @@ internal producer endpoint delivers EOF downstream; replacing a consumer stdin
 exposes broken-pipe behavior upstream. Stateful arguments preflight before
 files, simple-command opens precede parent mutation, and stateful pipeline files
 participate in the same graph order. Their commands emit no raw stdout or
-stderr, so source-spanned failures remain shell diagnostics. Applying a
-redirection to a WSL stage still fails before file opens or spawn. Once parent
+stderr, so source-spanned failures remain shell diagnostics. A WSL stage lowers
+to the resolved `wsl.exe` wrapper with exact `--distribution`, `--cd`, and
+`--exec` argv entries, then uses the same child-owned pipe and file endpoints as
+a native stage. Once parent
 resources have been taken, `NativeProcessGraph` becomes a `NativeProcessJob`.
 It waits every native member in specification order and terminates plus reaps
 all owned process trees before returning a setup, capture, or wait failure. The
 shell completes in-process stages and capture drains before entering the job's
-non-cancelled ordered wait. WSL pipeline and redirection adapters remain later
-layers.
+non-cancelled ordered wait. The job owns the Windows wrapper process boundary;
+Linux-side descendant and interruption semantics remain part of the H5 platform
+contract rather than being inferred from Windows Job Object ownership.
 
 Inputs include:
 
