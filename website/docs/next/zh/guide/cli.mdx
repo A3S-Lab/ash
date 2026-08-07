@@ -104,19 +104,20 @@ Ctrl+C 会把 `$?` 设为 130 并继续，EOF 则返回上一状态。`exit [STA
 
 同一行的 `|` 可组成两个到 32 个宿主原生阶段的管道。所有阶段都会在任何子进程启动
 前完成展开、UTF-8 命令名校验、解析和原生类型确认。首阶段 stdin 为空设备，中间
-stdout 直接流经 OS 管道，只返回最终 stdout；所有阶段的 stderr 会并发捕获后按阶段
 stdout 直接流经 OS 管道，只返回未重定向的最终 stdout；未重定向的 stderr 会并发捕获后按阶段
 顺序拼接。最终 stdout 与捕获的 stderr 共享剩余的 128 MiB 额度；状态默认取最后阶段，
 启用 `set -o pipefail` 后改取最右侧失败阶段（含 `128 + signal`），全成功时仍取最后阶段。
 状态命令、可移植命令、别名、函数与 WSL 阶段会在其流式适配器实现前明确拒绝且不会
 启动任何子进程。
-首阶段可以重定向 stdin，末阶段可以重定向 stdout，任意阶段可以重定向 stderr 或将其
-复制到该阶段 stdout。替换内部管道 stdin 或 stdout 端点时，会在打开文件或启动子进程
-前返回状态 2。
+任意原生阶段都可以重定向 stdin、stdout 或 stderr，描述符复制仍按源码顺序应用。若
+producer 不再引用内部管道，ash 会关闭父进程 writer，使下游 reader 收到 EOF；若
+consumer 用文件替换管道 stdin，ash 会关闭父进程 reader，使上游 writer 遇到原生
+broken-pipe 行为，随后仍由最终阶段或 `pipefail` 策略决定可见状态。即使原描述符随后
+被重定向，只要复制出的描述符仍引用管道，该连接就会保留。
 
-更广的展开（包括命令替换与 glob）、修改命令、终端流式输出、统一管道监督、内部管道
-端点替换、builtin/可移植/WSL 重定向与管道适配器、前台交互程序与作业控制，以及 WSL
-执行尚未实现。
+更广的展开（包括命令替换与 glob）、修改命令、终端流式输出、统一管道监督、
+builtin/可移植/WSL 重定向与管道适配器、前台交互程序与作业控制，以及 WSL 执行尚未
+实现。
 常规二进制启用 `human-shell` feature；
 `cargo build -p a3s-ash --no-default-features` 保留最小机器专用构建。
 

@@ -777,7 +777,7 @@ fn shell_command_launches_native_argv_with_persistent_cwd_and_environment() {
         .expect("write redirection input");
     fs::write(directory.0.join("first.log"), b"stale").expect("seed first redirection target");
     let redirection_source = format!(
-        "export PATH=bin; {executable} --ordered >first.log >combined.log 2>&1; {executable} --ordered 2>&1 >stdout.log; {executable} --copy <input.bin >copied.bin"
+        "export PATH=bin; {executable} --ordered >first.log >combined.log 2>&1; {executable} --ordered 2>&1 >stdout.log; {executable} --copy <input.bin >copied.bin; {executable} --emit producer >producer-only.log | {executable} --copy >eof.log; {executable} --ordered 2>&1 >descriptor-stdout.log | {executable} --copy >descriptor-pipe.log; {executable} --emit both >both-producer.log | {executable} --copy <input.bin >both-consumer.log"
     );
     let redirected = run_in(
         &directory,
@@ -802,6 +802,31 @@ fn shell_command_launches_native_argv_with_persistent_cwd_and_environment() {
     );
     assert_eq!(
         fs::read(directory.0.join("copied.bin")).expect("copied"),
+        b"redirected-cli-input"
+    );
+    assert_eq!(
+        fs::read(directory.0.join("producer-only.log")).expect("producer-only"),
+        b"producer\n"
+    );
+    assert!(
+        fs::read(directory.0.join("eof.log"))
+            .expect("EOF")
+            .is_empty()
+    );
+    assert_eq!(
+        fs::read(directory.0.join("descriptor-stdout.log")).expect("descriptor stdout"),
+        b"stdout-a\nstdout-b\n"
+    );
+    assert_eq!(
+        fs::read(directory.0.join("descriptor-pipe.log")).expect("descriptor pipe"),
+        b"stderr-a\nstderr-b\n"
+    );
+    assert_eq!(
+        fs::read(directory.0.join("both-producer.log")).expect("both producer"),
+        b"both\n"
+    );
+    assert_eq!(
+        fs::read(directory.0.join("both-consumer.log")).expect("both consumer"),
         b"redirected-cli-input"
     );
 }

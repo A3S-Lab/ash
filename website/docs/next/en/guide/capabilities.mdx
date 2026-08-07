@@ -156,10 +156,13 @@ the default. Native commands also accept source-ordered `<`, `>`, `>>`, `2>`,
 `2>>`, `2>&1`, and `1>&2`. File targets expand to exactly one field, relative
 paths resolve against persistent cwd, and files attach directly to OS handles; shared files or captures
 preserve real descriptor write order. Parent-facing, direct child-to-child,
-three-process, and ordered-redirection regressions lock backpressure, exact
-bytes, EOF closure, handle exposure, and side-effect ordering across platforms.
-Unified supervision, visible terminal streaming, internal pipeline endpoint
-replacement, and builtin/portable/WSL redirection and pipeline adapters remain
+three-process, closed-reader, and ordered-redirection regressions lock
+backpressure, exact bytes, EOF closure, broken-pipe behavior, handle exposure,
+and side-effect ordering across platforms. Ordered lowering may replace any
+native stage's internal stdin or stdout: explicit parent-closed ends deliver EOF
+downstream or native broken-pipe behavior upstream, while a descriptor copy that
+still names the pipe remains connected. Unified supervision, visible terminal
+streaming, and builtin/portable/WSL redirection and pipeline adapters remain
 later slices.
 
 For Agent adoption, continue with [Coding Agent integration](/guide/coding-agents).

@@ -82,13 +82,17 @@ Targets expand to exactly one field, relative paths resolve from persistent cwd,
 descriptor assignments apply left to right, files attach directly to child
 handles, and shared targets retain OS write ordering. Invalid plans fail before
 side effects; source-ordered valid file opens still create or truncate
-superseded targets.
-Parent-facing, child-to-child, three-process, and ordered-redirection regressions
-lock backpressure, exact bytes, EOF, handle closure, and descriptor sharing.
-Unified supervision, visible terminal streaming, internal pipeline endpoint
-replacement, builtin/portable/WSL redirection and pipeline adapters, broader
-expansion, foreground interactive programs and jobs, mutations, and WSL
-execution remain staged work.
+superseded targets. A second graph entry accepts explicit parent-closed reader
+and writer ends while the original entry remains strict about unmatched pipes.
+Ordered Shell lowering uses that contract when any native stage replaces an
+internal stdin or stdout; downstream readers observe EOF, upstream writers
+observe native broken-pipe behavior, and descriptor copies that still name the
+pipe remain connected. Parent-facing, child-to-child, three-process,
+closed-reader, and ordered-redirection regressions lock backpressure, exact
+bytes, EOF, handle closure, and descriptor sharing. Unified supervision, visible
+terminal streaming, builtin/portable/WSL redirection and pipeline adapters,
+broader expansion, foreground interactive programs and jobs, mutations, and
+WSL execution remain staged work.
 
 ## Rejected alternatives
 

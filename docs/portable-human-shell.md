@@ -1,8 +1,8 @@
 # Portable Human Shell Architecture
 
-- Status: accepted; H1 plus five native H2 checkpoints implemented
+- Status: accepted; H1 plus six native H2 checkpoints implemented
 - Target: post-ASH/1 version one
-- Last updated: 2026-08-07
+- Last updated: 2026-08-08
 
 This document defines the accepted architecture for an optional human-facing
 shell for `ash`. Contracts not explicitly labeled as the current source
@@ -30,9 +30,8 @@ redirections. All stages are expanded and resolved before spawn; intermediate
 stdout uses direct pipes, while unredirected final stdout and stage-ordered
 stderr remain bounded captures. Native file output attaches directly to OS
 handles. Foreground interactive programs and jobs, terminal streaming, unified
-pipeline supervision, internal pipeline endpoint replacement,
-builtin/portable/WSL redirection and pipeline adapters, broader expansion,
-mutations, and WSL launch remain unimplemented.
+pipeline supervision, builtin/portable/WSL redirection and pipeline adapters,
+broader expansion, mutations, and WSL launch remain unimplemented.
 
 ## 1. Executive decision
 
@@ -565,9 +564,31 @@ name the same file or capture ID clone one underlying OS resource, preserving
 real stdout/stderr write order without buffering file output in shell memory.
 Missing, ambiguous, or unopenable targets return status 1 with a redirection
 diagnostic. Builtin, portable, and WSL commands reject redirections before
-execution. A pipeline permits redirected stdin only on its first stage,
-redirected stdout only on its last stage, and redirected stderr on every stage;
-replacing an internal pipe endpoint is rejected before open or spawn.
+execution. At this checkpoint, a pipeline admitted redirected stdin only on its
+first stage, redirected stdout only on its last stage, and redirected stderr on
+every stage; replacing an internal pipe endpoint was rejected before open or
+spawn.
+
+The sixth H2 checkpoint adds
+`spawn_native_graph_with_closed_pipe_ends` and
+`ClosedProcessPipeEnd::{Reader, Writer}` without weakening the strict
+`spawn_native_graph` API. For every pipe, its reader and writer must each be
+represented exactly once by either a real child endpoint or an explicit
+parent-closed marker. Duplicate markers, a marker that conflicts with a real
+endpoint, and any still-missing end fail graph validation before file opens or
+spawn. Only real writer-to-reader pairs add topology edges; every declared pipe
+is still created, and all parent copies are dropped after child spawn. A closed
+writer therefore delivers EOF to a child reader, while a closed reader exposes
+native broken-pipe behavior to a child writer.
+
+After applying redirections left to right, pipeline lowering now declares a
+writer closed only when neither the producer's final stdout nor final stderr
+still names that pipe, and declares a reader closed when the consumer's final
+stdin no longer names it. This preserves cases such as
+`producer 2>&1 >stdout.log | consumer`, where stderr remains the real pipe
+writer. Any native stage may now replace stdin, stdout, or stderr. The existing
+final-stage and `pipefail` status policies expose downstream success or an
+upstream broken-pipe failure without adding a special shell status.
 
 ## 12. Streaming pipelines
 
@@ -600,10 +621,10 @@ The current checkpoint implements native graph validation, pipe creation,
 consumer-first spawn, parent-handle closure, the bounded native-only shell
 lowering, default final-stage status, and configurable rightmost-failure
 selection. It also implements ordered native file and descriptor redirections,
-whole-plan validation before file opens, and shared OS file/capture resources.
-Capacity reservation, unified job supervision, internal pipeline endpoint
-replacement, and builtin/portable/WSL streaming and redirection adapters remain
-open.
+whole-plan validation before file opens, shared OS file/capture resources, and
+explicit parent-closed internal endpoints that preserve OS EOF and broken-pipe
+semantics. Capacity reservation, unified job supervision, and
+builtin/portable/WSL streaming and redirection adapters remain open.
 
 Data flows directly through OS pipes. It does not pass through ASON or the
 result store, and it is not materialized in memory before the next command
@@ -877,9 +898,9 @@ first pipeline stage still receive null stdin, so foreground terminal programs
 and Ctrl+C job-tree delivery remain H4 rather than being claimed by this REPL
 checkpoint. The `human-shell` feature is enabled for the normal binary and can
 be disabled for a minimal machine-only build. Broader expansion, terminal
-streaming, unified pipeline supervision, internal endpoint replacement,
-mutations, builtin/portable/WSL pipeline and redirection adapters, job control,
-and WSL launch remain for later increments.
+streaming, unified pipeline supervision, mutations, builtin/portable/WSL
+pipeline and redirection adapters, job control, and WSL launch remain for later
+increments.
 
 ### H2: streaming execution
 
@@ -887,8 +908,9 @@ and WSL launch remain for later increments.
 - native-only foreground pipeline lowering, final-stage status, and configurable
   rightmost-failure `pipefail` are implemented;
 - ordered native file and descriptor redirections are implemented;
-- internal pipeline endpoint replacement and builtin/portable/WSL streaming and
-  redirection adapters remain open;
+- internal native pipeline endpoint replacement with explicit parent-closed
+  ends is implemented;
+- builtin/portable/WSL streaming and redirection adapters remain open;
 - unified multi-process supervision remains open.
 
 Current checkpoint: the shared platform process boundary requires explicit
@@ -899,13 +921,15 @@ and `Capture(ProcessCaptureId)` provide source-ordered native opens and shared
 parent-facing captures. The shell lowers same-line, two-to-32-stage native-only
 pipelines after complete preflight, applies the persistent
 `set -o pipefail`/`set +o pipefail` policy to the ordered exit vector, and lowers
-the seven supported redirection forms left to right. Three 8 MiB regressions
-lock parent-facing, child-to-child, and shell-level exact bytes, EOF,
-backpressure, deterministic stderr order, and cross-platform completion;
-additional regressions lock superseded-file effects, descriptor sharing,
-relative input, append behavior, and preflight rejection. Unified shell
-supervision, internal endpoint replacement, and builtin/portable/WSL streaming
-and redirection adapters remain open.
+the seven supported redirection forms left to right. Explicit parent-closed
+reader/writer markers let any native stage replace an internal endpoint while
+preserving EOF, broken-pipe, descriptor-duplication, and `pipefail` behavior.
+Four 8 MiB regressions lock parent-facing, child-to-child, shell-level, and
+closed-reader exact bytes, EOF, backpressure, deterministic stderr order, and
+cross-platform completion; additional regressions lock superseded-file effects,
+descriptor sharing, relative input, append behavior, closed-end validation, and
+preflight rejection. Unified shell supervision and builtin/portable/WSL
+streaming and redirection adapters remain open.
 
 ### H3: mutations and command language
 

@@ -35,8 +35,10 @@ the machine contracts of `ash run` and `ash rpc`. H2 now provides explicit
 process-stdio modes, validated native OS pipe graphs, same-line native pipelines
 of two to 32 stages, configurable `pipefail`, and source-ordered native
 redirections. Every stage is preflighted before spawn and connected through
-direct OS handles. Unredirected final stdout and stderr share the remaining
-bounded capture allowance.
+direct OS handles. Redirections may replace internal pipeline endpoints: ash
+closes the unused parent end so downstream readers receive EOF or upstream
+writers receive the native broken-pipe behavior. Unredirected final stdout and
+stderr share the remaining bounded capture allowance.
 
 ## What ash covers
 
@@ -50,7 +52,7 @@ bounded capture allowance.
 | Retained evidence    | `/ # ? - \| >`                        | Byte and line slices, search, release, ordered table projection, and capability-gated materialization                                                                  |
 | Model context        | ASON, `×N`, `×N#K`, `⋯N`              | Columnar records, path dictionaries, explicit reductions, stable merge, and references back to the full source                                                         |
 | Trust and delivery   | capabilities, permits, signed updates | Least-privilege negotiation, session/action/policy/expiry-bound one-time permits, replay rejection, transactional activation, recovery, rollback, SBOM, and provenance |
-| Human shell          | `ash shell`                           | H1 REPL lifecycle and commands plus H2 native pipelines, configurable `pipefail`, and ordered native redirections                                                  |
+| Human shell          | `ash shell`                           | H1 REPL lifecycle and commands plus H2 native pipelines, configurable `pipefail`, ordered native redirections, and internal endpoint replacement                       |
 
 The [complete capability map](https://a3s-lab.github.io/ash/guide/capabilities.html)
 documents guarantees, evidence, and deliberate non-goals for the full surface.
@@ -172,16 +174,18 @@ stage. With
 conventional `128 + signal` mapping; an all-success pipeline still uses its
 final stage. Stateful and portable commands, aliases, functions, and WSL stages
 fail explicitly before spawn because their streaming adapters do not exist yet.
-The first stage may redirect stdin, the final stage may redirect stdout, and any
-stage may redirect stderr or duplicate it into that stage's stdout. Replacing an
-internal pipeline stdin or stdout endpoint is rejected before files are opened
-or children start.
+Any native stage may redirect stdin, stdout, or stderr or duplicate descriptors
+in source order. If a producer no longer writes an internal pipe, the downstream
+reader receives EOF. If a consumer replaces its pipe stdin, the upstream writer
+receives the platform's broken-pipe behavior; the usual final-stage or
+`pipefail` policy selects the visible pipeline status. A descriptor duplicated
+from the pipe remains connected even if the original descriptor is later
+redirected.
 
-User-visible terminal streaming, unified pipeline job supervision, internal
-pipeline endpoint replacement, builtin/portable/WSL redirection and pipeline
-adapters, foreground interactive programs and job control, broader expansion,
-mutations, and WSL execution are not implemented yet. A minimal machine-only
-binary can be built with
+User-visible terminal streaming, unified pipeline job supervision,
+builtin/portable/WSL redirection and pipeline adapters, foreground interactive
+programs and job control, broader expansion, mutations, and WSL execution are
+not implemented yet. A minimal machine-only binary can be built with
 `--no-default-features`.
 
 ## First typed request
