@@ -3,8 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use ash_ops::{
-    ListQuery, NativeFileSystem, SemanticEntryKind, SemanticFileSystem, SemanticListFilter,
-    SemanticServices,
+    ListQuery, MAX_READ_FILE_BYTES, NativeFileSystem, ReadQuery, SemanticEntryKind,
+    SemanticFileSystem, SemanticListFilter, SemanticReadMode, SemanticServices,
 };
 
 use crate::{
@@ -101,9 +101,9 @@ impl ShellExecution {
 /// Parses and executes the currently implemented foreground shell subset.
 ///
 /// Commands run sequentially against one mutable `ShellState`. This first H1
-/// slice implements `pwd`, `echo`, `cd`, and a bounded portable `ls`; other
-/// resolved command categories produce explicit diagnostics without invoking a
-/// host shell.
+/// slice implements `pwd`, `echo`, `cd`, and bounded portable `ls` and `cat`
+/// commands; other resolved command categories produce explicit diagnostics
+/// without invoking a host shell.
 #[must_use]
 pub fn execute_source(source: &str, state: &mut ShellState) -> ShellExecution {
     execute_source_with(source, state, &PathCommandLookup, HostPlatform::current())
@@ -203,6 +203,9 @@ fn execute_command(
         }
         ResolvedCommand::Portable(PortableCommand::List) => {
             execute_ls(state, arguments, span, stdout, diagnostics)
+        }
+        ResolvedCommand::Portable(PortableCommand::Cat) => {
+            execute_cat(state, arguments, span, stdout, diagnostics)
         }
         ResolvedCommand::StatefulBuiltin(command) => unsupported(
             format!("builtin `{}` is not implemented yet", command.name()),
@@ -432,6 +435,100 @@ fn list_filesystem_failure(
 ) -> ShellStatus {
     filesystem_failure(
         format!("cannot list `{}`: {error}", display_os_string(target)),
+        span,
+        diagnostics,
+    )
+}
+
+fn execute_cat(
+    state: &ShellState,
+    arguments: &[OsString],
+    span: SourceSpan,
+    stdout: &mut Vec<u8>,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    let target = match parse_cat_path(arguments) {
+        Ok(target) => target,
+        Err(message) => return invalid_arguments(&message, span, diagnostics),
+    };
+    if target.is_empty() {
+        return filesystem_failure("cannot read: path is empty".to_owned(), span, diagnostics);
+    }
+
+    let filesystem = match NativeFileSystem::new(state.cwd()) {
+        Ok(filesystem) => filesystem,
+        Err(error) => {
+            return filesystem_failure(
+                format!("cannot read from the current directory: {error}"),
+                span,
+                diagnostics,
+            );
+        }
+    };
+    let remaining = MAX_READ_FILE_BYTES.saturating_sub(stdout.len() as u64);
+    let services = SemanticServices::new(filesystem);
+    let result = match services.read_serial_limited(
+        &ReadQuery::new(
+            vec![PathBuf::from(&target)],
+            SemanticReadMode::Bytes,
+            0,
+            u64::MAX,
+        ),
+        remaining,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            return read_filesystem_failure(&target, error, span, diagnostics);
+        }
+    };
+    let Some(read) = result.reads.into_iter().next() else {
+        return filesystem_failure(
+            "cannot read: semantic read returned no result".to_owned(),
+            span,
+            diagnostics,
+        );
+    };
+    stdout.extend_from_slice(&read.bytes);
+    ShellStatus::success()
+}
+
+fn parse_cat_path(arguments: &[OsString]) -> Result<OsString, String> {
+    if arguments.is_empty() || arguments == ["--"] {
+        return Err("cat requires exactly one path".to_owned());
+    }
+    if arguments.first().is_some_and(|argument| argument == "--") {
+        if arguments.len() != 2 {
+            return Err("cat accepts exactly one path".to_owned());
+        }
+        return Ok(arguments[1].clone());
+    }
+    if arguments.len() != 1 {
+        return Err("cat accepts exactly one path".to_owned());
+    }
+    let target = &arguments[0];
+    if target == "-" {
+        return Err("cat standard-input operand `-` is not implemented yet".to_owned());
+    }
+    if target
+        .to_str()
+        .is_some_and(|target| target.starts_with('-'))
+    {
+        return Err(format!(
+            "cat does not support option `{}`",
+            display_os_string(target)
+        ));
+    }
+    Ok(target.clone())
+}
+
+fn read_filesystem_failure(
+    target: &OsStr,
+    error: impl std::fmt::Display,
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    filesystem_failure(
+        format!("cannot read `{}`: {error}", display_os_string(target)),
         span,
         diagnostics,
     )
@@ -742,12 +839,12 @@ mod tests {
         );
         assert_eq!(empty_home.status().code(), 1);
 
-        let unsupported = execute_source("cat", &mut state);
+        let unsupported = execute_source("grep", &mut state);
         assert_eq!(
             unsupported.diagnostics()[0].code(),
             ExecutionDiagnosticCode::Unsupported
         );
-        assert_eq!(unsupported.diagnostics()[0].span(), SourceSpan::new(0, 3));
+        assert_eq!(unsupported.diagnostics()[0].span(), SourceSpan::new(0, 4));
         assert_eq!(unsupported.status().kind(), ShellStatusKind::Exited);
         assert_eq!(unsupported.status().code(), 2);
     }
@@ -861,6 +958,83 @@ mod tests {
         #[cfg(not(target_os = "linux"))]
         assert_eq!(execution.stdout(), "a\n雪\n".as_bytes());
         assert!(execution.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn cat_emits_exact_binary_bytes_and_observes_cd() {
+        let directory = TestDirectory::new();
+        fs::create_dir(directory.0.join("child")).expect("create child");
+        fs::write(directory.0.join("雪.bin"), b"root").expect("write unicode path");
+        fs::write(directory.0.join("child/payload.bin"), [0x00, 0xff, b'\n'])
+            .expect("write binary payload");
+        let mut state = ShellState::new(&directory.0);
+
+        let execution = execute_source("cat '雪.bin'; cd child; cat payload.bin", &mut state);
+
+        assert_eq!(execution.stdout(), b"root\x00\xff\n");
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(execution.status().code(), 0);
+        assert_eq!(
+            state.cwd(),
+            fs::canonicalize(directory.0.join("child")).expect("canonical child")
+        );
+    }
+
+    #[test]
+    fn cat_supports_end_of_options_and_clear_bounded_failures() {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("-"), b"hyphen").expect("write hyphen");
+        fs::create_dir(directory.0.join("child")).expect("create child");
+        let oversized =
+            fs::File::create(directory.0.join("oversized.bin")).expect("create oversized file");
+        oversized
+            .set_len(super::MAX_READ_FILE_BYTES + 1)
+            .expect("set oversized length");
+        let mut state = ShellState::new(&directory.0);
+
+        let dash = execute_source("cat -- -", &mut state);
+        assert_eq!(dash.stdout(), b"hyphen");
+        assert!(dash.diagnostics().is_empty());
+
+        let option = execute_source("cat -n", &mut state);
+        assert_eq!(
+            option.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::InvalidArguments
+        );
+        assert_eq!(
+            option.diagnostics()[0].message(),
+            "cat does not support option `-n`"
+        );
+        assert_eq!(option.status().code(), 2);
+
+        let stdin = execute_source("cat -", &mut state);
+        assert_eq!(
+            stdin.diagnostics()[0].message(),
+            "cat standard-input operand `-` is not implemented yet"
+        );
+        assert_eq!(stdin.status().code(), 2);
+
+        let missing_argument = execute_source("cat", &mut state);
+        assert_eq!(
+            missing_argument.diagnostics()[0].message(),
+            "cat requires exactly one path"
+        );
+        let paths = execute_source("cat one two", &mut state);
+        assert_eq!(
+            paths.diagnostics()[0].message(),
+            "cat accepts exactly one path"
+        );
+
+        for source in ["cat missing", "cat child", "cat ''", "cat oversized.bin"] {
+            let failure = execute_source(source, &mut state);
+            assert!(failure.stdout().is_empty(), "source={source}");
+            assert_eq!(
+                failure.diagnostics()[0].code(),
+                ExecutionDiagnosticCode::Filesystem,
+                "source={source}"
+            );
+            assert_eq!(failure.status().code(), 1, "source={source}");
+        }
     }
 
     #[cfg(any(unix, windows))]

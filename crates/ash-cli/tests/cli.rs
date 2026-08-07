@@ -451,13 +451,14 @@ fn shell_command_executes_stateful_sequence_without_machine_framing() {
     fs::create_dir(directory.0.join("child")).expect("create child");
     fs::write(directory.0.join("b.txt"), b"b").expect("write b");
     fs::write(directory.0.join("a.txt"), b"a").expect("write a");
+    fs::write(directory.0.join("child/payload.bin"), b"payload").expect("write payload");
     let output = run_in(
         &directory,
         &[
             "shell",
             "--no-profile",
             "-c",
-            "cd .; pwd; echo \"hello world\"; ls -1; cd child; pwd; echo -n done",
+            "cd .; pwd; echo \"hello world\"; ls -1; cd child; pwd; cat payload.bin; echo -n done",
         ],
         b"",
     );
@@ -468,7 +469,7 @@ fn shell_command_executes_stateful_sequence_without_machine_framing() {
     assert_eq!(
         output.stdout,
         format!(
-            "{}\nhello world\na.txt\nb.txt\nchild\n{}\ndone",
+            "{}\nhello world\na.txt\nb.txt\nchild\n{}\npayloaddone",
             root.display(),
             child.display()
         )
