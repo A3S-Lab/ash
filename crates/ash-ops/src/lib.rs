@@ -30,9 +30,9 @@ pub use reducer::{
     collapse_repeated_lines, focus_error_output,
 };
 pub use semantic::{
-    ListQuery, ReadQuery, SearchQuery, SemanticEntry, SemanticEntryKind, SemanticError,
-    SemanticFileSystem, SemanticListFilter, SemanticListResult, SemanticPath, SemanticRead,
-    SemanticReadMode, SemanticReadResult, SemanticSearchMatch, SemanticSearchPattern,
+    ListQuery, NativeFileSystem, ReadQuery, SearchQuery, SemanticEntry, SemanticEntryKind,
+    SemanticError, SemanticFileSystem, SemanticListFilter, SemanticListResult, SemanticPath,
+    SemanticRead, SemanticReadMode, SemanticReadResult, SemanticSearchMatch, SemanticSearchPattern,
     SemanticSearchResult, SemanticServices, SemanticWalkOptions,
 };
 

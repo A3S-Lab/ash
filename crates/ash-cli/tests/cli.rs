@@ -449,13 +449,15 @@ fn usage_and_missing_handshake_are_machine_only() {
 fn shell_command_executes_stateful_sequence_without_machine_framing() {
     let directory = TestDirectory::new();
     fs::create_dir(directory.0.join("child")).expect("create child");
+    fs::write(directory.0.join("b.txt"), b"b").expect("write b");
+    fs::write(directory.0.join("a.txt"), b"a").expect("write a");
     let output = run_in(
         &directory,
         &[
             "shell",
             "--no-profile",
             "-c",
-            "cd .; pwd; echo \"hello world\"; cd child; pwd; echo -n done",
+            "cd .; pwd; echo \"hello world\"; ls -1; cd child; pwd; echo -n done",
         ],
         b"",
     );
@@ -465,7 +467,12 @@ fn shell_command_executes_stateful_sequence_without_machine_framing() {
     assert!(output.status.success(), "stderr={:?}", output.stderr);
     assert_eq!(
         output.stdout,
-        format!("{}\nhello world\n{}\ndone", root.display(), child.display()).as_bytes()
+        format!(
+            "{}\nhello world\na.txt\nb.txt\nchild\n{}\ndone",
+            root.display(),
+            child.display()
+        )
+        .as_bytes()
     );
     assert!(output.stderr.is_empty());
 

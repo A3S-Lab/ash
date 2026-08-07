@@ -2,9 +2,10 @@
 
 //! Portable human-shell syntax, state, and command resolution.
 //!
-//! This crate is deliberately independent from the ASH/1 machine protocol.
-//! It establishes the human frontend boundary without adding a free-form
-//! shell-string operation to the machine interface.
+//! This crate does not expose the ASH/1 machine protocol. It establishes the
+//! human frontend boundary without adding a free-form shell-string operation to
+//! the machine interface, while portable builtins may reuse protocol-neutral
+//! semantic services.
 
 mod diagnostic;
 mod execution;

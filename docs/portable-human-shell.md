@@ -19,8 +19,8 @@ resolution fixtures, and provider-neutral raw read/list/search semantic
 services. Existing ASH/1 adapters reuse those services while retaining permit,
 deadline, budget, projection, retention, and ASON ownership. H1 has started with
 a feature-gated `ash shell` route for inline plus bounded stdin and native
-script-file sources, with sequential `pwd`, `echo`, and `cd` execution.
-Interactive input, external execution, the remaining portable commands,
+script-file sources, with sequential `pwd`, `echo`, `cd`, and portable `ls`
+execution. Interactive input, external execution, the remaining portable commands,
 expansion, pipelines, jobs, and WSL launch remain unimplemented.
 
 ## 1. Executive decision
@@ -352,6 +352,15 @@ The first portable command set reuses existing semantics where possible:
 | `mkdir`, `rmdir` | future directory service | Requires explicit recovery and capability design. |
 | `env`, `export`, `unset` | shell state | Host-aware environment names. |
 
+The current executable `ls` contract accepts at most one native path and uses
+`.` by default. A directory lists only its immediate children; a file lists
+itself; `-d`/`--directory` lists a directory itself. Output is one native name
+per line in the list service's collision-free stable order. `-a`/`--all`,
+`-d`/`--directory`, `-1`, combined short options, and `--` are accepted.
+Unsupported options and multiple paths fail explicitly. Relative paths inherit
+the human shell's current directory and ordinary OS authority, not ASH/1
+workspace confinement.
+
 Every portable command has a versioned option contract. Common Linux spelling
 is preferred, but unsupported GNU flags fail clearly. The project must not
 claim GNU compatibility based only on matching command names.
@@ -651,12 +660,15 @@ builtin adapters.
 
 Current checkpoint: `ash shell -c SOURCE`, `ash shell < script.ash`, and
 `ash shell script.ash` parse the H0 syntax subset, execute sequential `pwd`,
-`echo`, and `cd` commands against one native `ShellState`, emit source-spanned
-human diagnostics, and return the last command status. Stdin and file sources
-share a 1 MiB valid-UTF-8 ceiling, while file operands retain native path
-representation. The `human-shell` feature is enabled for the normal binary and
-can be disabled for a minimal machine-only build. Interactive input, profiles,
-native process launch, and `ls`/`cat`/`grep` remain for later H1 increments.
+`echo`, `cd`, and portable `ls` commands against one native `ShellState`, emit
+source-spanned human diagnostics, and return the last command status. Stdin and
+file sources share a 1 MiB valid-UTF-8 ceiling, while file operands retain
+native path representation. `ls` reuses the provider-neutral list service with
+an unconfined native provider, bounded traversal, stable native-unit ordering,
+and the option contract in section 10. The `human-shell` feature is enabled for
+the normal binary and can be disabled for a minimal machine-only build.
+Interactive input, profiles, native process launch, and `cat`/`grep` remain for
+later H1 increments.
 
 ### H2: streaming execution
 
