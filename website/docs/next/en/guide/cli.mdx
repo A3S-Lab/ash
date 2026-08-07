@@ -27,14 +27,15 @@ uses conventional bytes, diagnostics, and exit statuses instead of ASON.
 `ash self replace` is an internal Windows helper used by activation, not a normal
 Harness interface.
 
-## Human shell checkpoint
+## Human shell checkpoints
 
-The current H1 checkpoint opens a cross-platform line-edited REPL when stdin is
+The current human-shell checkpoints open a cross-platform line-edited REPL when stdin is
 a terminal and executes the current command and pipeline syntax sequentially
 against one persistent native state. It implements `pwd`, `echo` (with `-n`),
 `cd`, expanded `export`/`unset`, `set` pipefail control, `exit`, portable `ls`,
-raw-byte `cat`, text `grep`, named and last-status parameter expansion, native host executables, and
-explicit WSL commands on Windows, plus same-line native/WSL/portable/stateful
+raw-byte `cat`, text `grep`, portable `cp`, `mv`, `rm`, create-only `touch`,
+named and last-status parameter expansion, native host executables, explicit
+WSL commands on Windows, plus same-line native/WSL/portable/stateful
 pipelines with ordered native, WSL, portable, and stateful redirections. Source
 may also come from `-c SOURCE`, a native
 script-file path, or stdin:
@@ -47,6 +48,7 @@ ash shell -c "native:rustc --version"
 ash shell -c "linux:uname -a" # Windows with WSL
 ash shell -c 'native:rustc --version >version.txt 2>&1'
 ash shell -c 'cat - <input.bin >copy.bin'
+ash shell -c 'cp input.bin backup.bin; mv backup.bin archive.bin'
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ash shell --profile ./profile.ash
@@ -71,6 +73,18 @@ In a multi-stage pipeline, `grep PATTERN -` consumes incoming UTF-8 with the
 same semantics and a 128 MiB output ceiling; a simple command may provide `-`
 through `<`. Directories, multiple files, unredirected standalone stdin `-`, and
 unsupported options fail explicitly.
+
+Portable `cp SOURCE DESTINATION`, `mv SOURCE DESTINATION`, `rm PATH`, and
+`touch PATH` accept only those exact regular-file arities plus `--`. The
+persistent cwd is their durable transaction root. Parent traversal, escape,
+symlink/reparse traversal, directories, files above 128 MiB, and paths that
+cannot be represented in the UTF-8 journal fail explicitly. Copy, move, and
+touch never overwrite; `touch` creates a new empty file rather than updating an
+existing timestamp. Copy, move, and remove derive a BLAKE3 source preimage
+immediately before the shared ASH/1 `fs` transaction revalidates it. A conflict
+returns status 1 without retry and preserves the external change or destination.
+The root's reserved `.ash` directory holds locking, rollback, and restart
+recovery state.
 
 Startup Profiles are opt-in. `--profile FILE` selects one explicitly, a
 non-empty `ASH_PROFILE` supplies the configured default, and `--no-profile`
@@ -142,14 +156,15 @@ capture allowance. One validated graph order interleaves native, portable, and
 stateful files by stage and redirection source order; superseded targets are still
 opened. Missing, ambiguous, or unopenable targets return status 1 with a
 redirection diagnostic. Source-spanned shell diagnostics remain shell stderr,
-not raw command stderr. Stateful arguments and targets preflight before opens;
+not raw command stderr. Stateful and portable-mutation arguments and targets preflight before opens;
 simple-command files open before parent mutation, and failed opens block the
-mutation or `exit` request. WSL redirection files are opened by the Windows host
+state mutation, portable filesystem transaction, or `exit` request. WSL redirection files are opened by the Windows host
 and connect directly to the wrapper's standard handles.
 
 A same-line `|` forms a pipeline of two to 32 stages. Each may be a native host
 command, explicit WSL command on Windows, portable `pwd`, `echo`, `ls`, `cat`,
-or `grep`, or implemented stateful `cd`, `export`, `unset`, `set`, or `exit`;
+`grep`, `cp`, `mv`, `rm`, or `touch`, or implemented stateful `cd`, `export`,
+`unset`, `set`, or `exit`;
 aliases, functions, and unimplemented stateful commands fail during complete
 preflight. Native and WSL wrapper pairs remain connected by direct OS pipes.
 Boundaries involving an in-process stage
@@ -166,6 +181,9 @@ Stateful stages never consume stdin, execute against independent `ShellState`
 clones, and close their empty stdout on completion. The parent cwd, variables,
 environment, options, and exit request remain unchanged; downstream readers see
 EOF, and pipeline `exit` contributes only an ordinary stage status.
+Mutation stages likewise close stdin, emit no stdout, and contribute their
+transaction conflict or filesystem status to final-stage/`pipefail` selection.
+Their redirection files open in graph order before the transaction begins.
 Any native, WSL, portable, or implemented stateful stage may redirect stdin,
 stdout, or stderr, with descriptor duplication still applied in source order. If a producer no longer references
 an internal pipe, ash closes its parent writer and the downstream reader sees
@@ -184,8 +202,9 @@ process tree before the pipeline returns. Portable/stateful futures and capture
 drains settle before the supervisor enters a non-cancelled ordered wait under
 that same completion boundary.
 
-Broader expansion (including command substitution and globbing), mutations,
-terminal streaming, foreground interactive programs and jobs, plus installed
+Broader expansion and command language (including conditional lists, command
+substitution, globbing, aliases, functions, and subshell state), terminal
+streaming, foreground interactive programs and jobs, plus installed
 WSL distribution probing, backend policy/configuration, general argument path
 mapping, environment forwarding, Linux-side ownership, and interruption
 normalization are not implemented yet. The regular binary enables the
@@ -217,7 +236,9 @@ logical form and cannot escape through lexical traversal, symbolic links, or
 Windows reparse points. `exec` never switches to an implicit host shell.
 
 Human-shell state instead uses native `PathBuf` and `OsString` values. `cd`,
-`export`, `unset`, `ls`, `cat`, and `grep` inherit normal user authority, while
-native external programs inherit the same cwd/environment state and ordinary OS
-authority. Native path and environment units are preserved or reversibly
-escaped; this does not weaken or replace ASH/1 workspace confinement.
+`export`, `unset`, `ls`, `cat`, and `grep` inherit normal user authority.
+Portable `cp`, `mv`, `rm`, and `touch` deliberately bind the current cwd as a
+journaled workspace and cannot traverse above it. Native external programs
+inherit the same cwd/environment state and ordinary OS authority. Native path
+and environment units are preserved or reversibly escaped; this does not
+weaken or replace ASH/1 workspace confinement.

@@ -8,6 +8,7 @@ mod error;
 mod exec;
 mod filesystem;
 mod list;
+mod mutation;
 mod patch;
 mod projection;
 mod read;
@@ -25,6 +26,7 @@ use ash_protocol::response::FinalResponse;
 
 pub use authorization::{AuthorizationError, AuthorizationPolicy, PermitAuthority};
 pub use error::OperationError;
+pub use mutation::SemanticMutationServices;
 pub use reducer::{
     ErrorFocusedReduction, RepeatedBlockReduction, RepeatedLineReduction, collapse_repeated_blocks,
     collapse_repeated_lines, focus_error_output,

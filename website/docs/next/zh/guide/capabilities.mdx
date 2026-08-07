@@ -90,7 +90,7 @@ Windows 的 x86-64 和 ARM64，并生成校验和、SBOM 与来源证明。
 
 ## 支撑这些描述的证据
 
-- 302 个 Rust 工作区测试覆盖类型化 Schema、RPC、操作、存储、事务、恢复、取消、
+- 309 个 Rust 工作区测试覆盖类型化 Schema、RPC、操作、存储、事务、恢复、取消、
   更新、确定性调度与人类 Shell。
 - schema-14 运行时 Harness 包含 22 个场景，并在不同 Worker 配置下验证 8 MiB 输出
   跨越 4 MiB 内存上限后的落盘与区间取回。
@@ -112,7 +112,8 @@ ASH/1 不是人类 REPL、POSIX Shell 兼容层、内嵌模型、远程执行器
 独立且受 feature 控制的 `ash shell` H1 检查点加入行编辑 REPL、可配置提示符、经过
 安全检查的持久历史、显式启用的启动 Profile 与 `exit`，并可顺序执行 `pwd`、`echo`、
 `cd`、展开后的 `export`/`unset`、`set` pipefail 控制、可移植 `ls`、有界原始字节
-`cat`、有界文本 `grep` 与直接 argv 的宿主原生命令。带源码位置的 `$NAME`、`${NAME}` 与 `$?` 节点会先经过
+`cat`、有界文本 `grep`、带日志事务的 `cp`/`mv`/`rm`、只创建空文件的 `touch`，
+以及直接 argv 的宿主原生命令。带源码位置的 `$NAME`、`${NAME}` 与 `$?` 节点会先经过
 引用感知的原生字符串展开和固定的未引用字段拆分，再进行命令解析。源码可来自终端、
 内联参数，或有界 stdin/原生脚本文件。状态命令和可移植操作使用普通用户权限；原生
 程序则通过平台进程树边界继承持久 Shell cwd/环境与普通 OS 权限。未重定向的独立原生
@@ -121,8 +122,9 @@ ASH/1 不是人类 REPL、POSIX Shell 兼容层、内嵌模型、远程执行器
 
 H2 现已提供每条标准流的显式模式、经过完整性与无环校验的原生 OS 管道图，以及
 原生/WSL/可移植/状态 builtin 管道 lowering。同一行的 `|` 可连接两个到 32 个宿主
-原生或 Windows 显式 WSL 阶段、已实现的可移植 `pwd`、`echo`、`ls`、`cat`、`grep`，或已实现的状态 `cd`、
-`export`、`unset`、`set`、`exit`，但只有在完整预检成功后才会执行。相邻原生阶段由
+原生或 Windows 显式 WSL 阶段、已实现的可移植 `pwd`、`echo`、`ls`、`cat`、`grep`、
+`cp`、`mv`、`rm`、`touch`，或已实现的状态 `cd`、`export`、`unset`、`set`、`exit`，
+但只有在完整预检成功后才会执行。相邻原生阶段由
 OS 管道直连；进程内边界保留显式父进程异步端点，以并发、有界且保留背压的方式执行。
 `cat -` 与 `grep PATTERN -` 消费上游流。状态阶段会关闭上游 stdin，在独立状态克隆上
 执行并向下游传递 EOF，因此不能修改父 Shell；管道中的 `exit` 只贡献该阶段状态。
@@ -145,7 +147,11 @@ lowering 可以替换任意原生、WSL、可移植或已实现状态阶段的�
 `--distribution`/`--cd`/`--exec` argv 把 wrapper 降到同一流与宿主文件图；launcher
 缺失会在预检阶段失败，所选状态保留 backend/发行版元数据。设置
 `ASH_TEST_WSL_DISTRIBUTION` 后，Windows 回归会通过准备好的发行版流式传输 8 MiB
-fixture。用户可见终端流式输出、已安装发行版探测、backend 策略、通用 WSL 参数
+fixture。第一个 H3 检查点把可移植文件修改绑定到持久 cwd，并与 ASH/1 `fs` 共用
+BLAKE3 preimage、持久日志与禁止覆盖的事务服务。`cp`、`mv`、`rm` 会立即派生并在
+事务内重验源文件身份；`touch` 只创建新的空文件。路径逃逸、符号链接/reparse
+穿越、目录、超限文件、覆盖与无法写入日志的路径都会显式失败。重定向文件先于事务
+打开，修改阶段不输出字节，冲突进入普通最终阶段/`pipefail` 状态选择。用户可见终端流式输出、已安装发行版探测、backend 策略、通用 WSL 参数
 路径/环境映射、Linux 侧所有权与中断归一化仍属于后续切片。
 
 要让 Agent 采用这套能力，请继续阅读 [Coding Agent 接入](/guide/coding-agents)。

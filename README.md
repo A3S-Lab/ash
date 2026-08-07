@@ -29,7 +29,8 @@ feature-gated `ash shell` route. A terminal invocation opens a line-edited REPL
 with a configurable prompt, private persistent history, opt-in startup Profile,
 and `exit [STATUS]`. The same persistent state executes sequential `pwd`,
 `echo`, `cd`, `export`, `unset`, `set` pipefail control, portable `ls`, `cat`,
-and `grep`, plus native host executables with direct argument vectors. Inline
+and `grep`, portable `cp`, `mv`, `rm`, and create-only `touch`, plus native host
+executables with direct argument vectors. Inline
 source, native script files, and bounded stdin remain available without changing
 the machine contracts of `ash run` and `ash rpc`. H2 now provides explicit
 process-stdio modes, validated native OS pipe graphs, same-line pipelines of two
@@ -44,6 +45,8 @@ remaining bounded capture allowance. After parent resources are claimed, the
 native graph becomes one `NativeProcessJob`: waits preserve specification order,
 and any post-spawn setup, capture, or wait failure terminates and reaps every
 native member's owned process tree before returning.
+The first H3 checkpoint routes those four portable mutations through the same
+BLAKE3-preimage, journaled, no-overwrite transaction service as ASH/1 `fs`.
 
 ## What ash covers
 
@@ -57,7 +60,7 @@ native member's owned process tree before returning.
 | Retained evidence    | `/ # ? - \| >`                        | Byte and line slices, search, release, ordered table projection, and capability-gated materialization                                                                  |
 | Model context        | ASON, `×N`, `×N#K`, `⋯N`              | Columnar records, path dictionaries, explicit reductions, stable merge, and references back to the full source                                                         |
 | Trust and delivery   | capabilities, permits, signed updates | Least-privilege negotiation, session/action/policy/expiry-bound one-time permits, replay rejection, transactional activation, recovery, rollback, SBOM, and provenance |
-| Human shell          | `ash shell`                           | H1 REPL lifecycle and commands plus H2 native/portable/stateful pipelines, configurable `pipefail`, ordered redirections, endpoint replacement, and unified pipeline supervision |
+| Human shell          | `ash shell`                           | H1 REPL lifecycle, H2 supervised streaming/redirection, and H3 journaled portable `cp`/`mv`/`rm`/`touch` mutations                                                     |
 
 The [complete capability map](https://a3s-lab.github.io/ash/guide/capabilities.html)
 documents guarantees, evidence, and deliberate non-goals for the full surface.
@@ -137,6 +140,19 @@ ceiling; a simple command may provide `-` through `<`. Directories, multiple
 files, unredirected standalone stdin `-`, and unsupported options fail
 explicitly.
 
+Portable `cp SOURCE DESTINATION`, `mv SOURCE DESTINATION`, `rm PATH`, and
+`touch PATH` accept only those exact regular-file arities plus `--`. They bind
+the current cwd as a durable transaction root, reject parent traversal,
+symlink/reparse traversal, directories, files above 128 MiB, and paths that
+cannot be represented by the UTF-8 transaction journal. Copy, move, and touch
+never overwrite; this checkpoint's `touch` creates a new empty file and does
+not update timestamps on an existing file. Copy, move, and remove derive a
+BLAKE3 preimage immediately before execution, then the shared transaction
+revalidates it without silent retries. Conflict returns status 1 and preserves
+the externally changed or existing file. The reserved `.ash` directory under
+the transaction root owns cross-process locking, rollback, and restart
+recovery.
+
 `export NAME=VALUE` and `unset NAME` update both shell-variable and exported
 environment state for later commands. Each accepts one expanded assignment or
 name plus `--`; names are ASCII shell identifiers, empty values are preserved,
@@ -185,9 +201,11 @@ the persistent cwd, and connect directly to child or parent-task OS handles
 without buffering file output in shell memory. One graph order interleaves
 native, portable, and stateful resources by stage and redirection source order;
 superseded targets are still opened. Missing, ambiguous, or unopenable targets
-return status 1 with a redirection diagnostic. Stateful arguments are validated
+return status 1 with a redirection diagnostic. Stateful and portable-mutation arguments are validated
 before file opens; successful opens precede parent-state mutation, so a later
-builtin filesystem failure retains normal shell file side effects. Stateful
+builtin filesystem failure retains normal shell file side effects. Portable
+mutation transactions likewise begin only after all of their redirection files
+open successfully. Stateful
 builtins emit no raw command output, and their source-spanned diagnostics remain
 shell stderr rather than being captured by command stderr redirections. WSL
 files are opened by the Windows host in the same source order and attach
@@ -195,7 +213,7 @@ directly to the wrapper's standard handles.
 
 A same-line `|` forms a foreground pipeline of two to 32 stages. Each stage may
 be a native host command, explicit WSL command on Windows, portable `pwd`,
-`echo`, `ls`, `cat`, or `grep`, or the implemented stateful `cd`, `export`,
+`echo`, `ls`, `cat`, `grep`, `cp`, `mv`, `rm`, or `touch`, or the implemented stateful `cd`, `export`,
 `unset`, `set`, or `exit`; aliases, functions, and unimplemented stateful
 commands still fail during complete preflight. Native and WSL wrapper edges
 remain direct OS pipes. An in-process
@@ -205,7 +223,9 @@ portable `cat`/`grep` streams are not materialized as a whole before the next
 stage, and normal OS backpressure applies. Only
 `cat -` and `grep PATTERN -` consume incoming stdin. Other portable forms close
 that reader, allowing an upstream writer and `pipefail` to observe broken-pipe
-failure. Stateful stages likewise close incoming stdin, execute against
+failure. Mutation stages emit no stdout, execute their filesystem transaction,
+and contribute conflict or filesystem status to the same `pipefail` vector.
+Stateful stages likewise close incoming stdin, execute against
 independent `ShellState` clones, and close their empty stdout when complete, so
 they cannot mutate the parent and downstream readers receive EOF. Pipeline
 `exit` contributes only its stage status and never stops the parent source. A
@@ -234,8 +254,8 @@ their empty stdout closes an outgoing pipe normally. A WSL stage reuses the
 same pipe and file graph without an intermediate relay or full-stream buffer.
 
 User-visible terminal streaming, foreground interactive programs and job
-control, broader expansion, mutations, and the remaining H5 WSL policy, path,
-environment, and interruption contracts are not implemented yet. A minimal
+control, broader expansion and command language, and the remaining H5 WSL
+policy, path, environment, and interruption contracts are not implemented yet. A minimal
 machine-only binary can be built with `--no-default-features`.
 
 ## First typed request
@@ -295,7 +315,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **302 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **309 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, signed updates, and
   the human shell.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB

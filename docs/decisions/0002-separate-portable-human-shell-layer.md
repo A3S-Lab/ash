@@ -56,13 +56,15 @@ independent `a3s-ash-shell` crate now owns source-spanned parsing, persistent
 state, deterministic command resolution, a cross-platform line editor, private
 file history, and a sequential executor for `pwd`, `echo`, `cd`, expanded
 `export`/`unset` environment updates, `set` pipefail control, `exit`, portable
-`ls`, bounded raw-byte `cat`, bounded text `grep`, named and last-status
+`ls`, bounded raw-byte `cat`, bounded text `grep`, journaled `cp`/`mv`/`rm`,
+create-only `touch`, named and last-status
 parameter expansion, and native host executables. Parameter nodes retain exact quote and source-span
 metadata; a separate native-string expansion stage performs the documented
 fixed field splitting before resolution. Shared provider-neutral semantic
-services live below the ASH/1 adapters in `a3s-ash-ops`; the portable commands
-reuse their bounded list/read/search semantics through an ordinary-authority
-native provider. Native commands reuse the `ash-platform` process-tree boundary
+services live below the ASH/1 adapters in `a3s-ash-ops`; portable discovery
+commands reuse bounded list/read/search semantics through an ordinary-authority
+native provider, while portable mutations and ASH/1 `fs` share the raw durable
+transaction service. Native commands reuse the `ash-platform` process-tree boundary
 and launch an already-resolved native executable with the exact argument vector,
 persistent cwd/environment, closed stdin, bounded captured stdout/stderr, and
 propagated exit status; no host shell is inserted. The feature-gated `ash shell`
@@ -73,7 +75,8 @@ human features do not change the machine diagnostics of `ash run` or `ash rpc`.
 H2 now includes explicit per-stream modes and validated native OS pipe graphs in
 the shared platform boundary plus native/WSL/portable/stateful pipeline lowering. A
 same-line `|` connects two to 32 native host or explicit WSL stages, implemented
-portable `pwd`, `echo`, `ls`, `cat`, and `grep` stages, or implemented stateful
+portable `pwd`, `echo`, `ls`, `cat`, `grep`, `cp`, `mv`, `rm`, and `touch`
+stages, or implemented stateful
 `cd`, `export`, `unset`, `set`, and `exit` stages after expansion and complete resolution,
 argument, regular-expression, and redirection preflight. Native-to-native stdout
 travels directly through OS pipes. Boundaries involving a portable task use only
@@ -102,7 +105,12 @@ closed, or parent-owned and returns only explicitly declared readers and
 writers. A fourth entry also returns source-ordered parent files for portable
 simple commands and stages. Portable stdin and stdout may replace a pipeline
 endpoint without a relay buffer; `cat -` and `grep PATTERN -` consume redirected
-input directly. Stateful simple-command files open before parent mutation, and
+input directly. Portable mutation arguments preflight before opens, all
+redirection files open before their transaction begins, and a mutation stage
+closes incoming stdin, emits no stdout, and contributes its status to
+`pipefail`. Copy, move, and remove derive BLAKE3 preimages immediately before
+the shared no-overwrite transaction; create-only `touch` never changes an
+existing file. Stateful simple-command files open before parent mutation, and
 stateful stage files join the same global order while redirected empty stdout
 closes downstream normally. Their source-spanned failures remain shell
 diagnostics rather than raw command stderr. After parent resources are claimed,
@@ -123,8 +131,9 @@ Parent-facing, child-to-child,
 native, mixed, portable-only,
 stateful, closed-reader, and ordered-redirection regressions lock backpressure,
 exact bytes, EOF, handle closure, cloned-state isolation, descriptor sharing,
-and global file-open order. Visible terminal streaming, broader expansion,
-foreground interactive programs and jobs, mutations, plus installed-distribution
+global file-open order, transaction conflicts, and mutation/open ordering.
+Visible terminal streaming, broader expansion and command language,
+foreground interactive programs and jobs, plus installed-distribution
 probing, general WSL path/environment mapping, backend policy, Linux-side
 ownership, and interruption normalization remain staged work.
 

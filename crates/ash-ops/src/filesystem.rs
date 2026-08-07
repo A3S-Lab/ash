@@ -1,6 +1,6 @@
 use ash_engine::{PermitKind, Program};
 use ash_platform::{
-    FileAction, FileActionOutcome, FileActionState, FileTransactionFailure, FileTransactionLimits,
+    FileAction, FileActionOutcome, FileActionState, FileTransactionFailure,
     MAX_FILE_TRANSACTION_FILE_BYTES, MAX_FILE_TRANSACTION_TOTAL_BYTES, TransactionControl,
     Workspace,
 };
@@ -10,8 +10,8 @@ use ash_protocol::response::{
     ResultData, RetryClass, Status,
 };
 
-use crate::OperationError;
 use crate::projection::{charge, intern_paths, presentation_limit, temporary_paths};
+use crate::{OperationError, SemanticMutationServices};
 
 pub async fn execute(
     workspace: &Workspace,
@@ -21,22 +21,18 @@ pub async fn execute(
 ) -> Result<FinalResponse, OperationError> {
     check_control(program)?;
     let actions = resolve_actions(arguments, program).await?;
-    workspace.validate_file_actions(&actions)?;
-    let limits = FileTransactionLimits::new(
-        MAX_FILE_TRANSACTION_FILE_BYTES,
-        MAX_FILE_TRANSACTION_TOTAL_BYTES,
-    )?;
+    let services = SemanticMutationServices::new(workspace.clone());
+    services.validate(&actions)?;
     let (ids, mappings) = reserve_response(request.id(), arguments.actions(), program)?;
 
     let _filesystem = program.acquire(PermitKind::Filesystem).await?;
     let _compute = program.acquire(PermitKind::Compute).await?;
-    let workspace = workspace.clone();
     let cancellation = program.cancellation().clone();
     let budget = program.budget().clone();
     let outcome = program
         .compute_pool()
         .run(move || {
-            workspace.file_transaction(actions, limits, || {
+            services.execute(actions, || {
                 if cancellation.is_cancelled() {
                     TransactionControl::Cancelled
                 } else if budget.check_deadline().is_err() {

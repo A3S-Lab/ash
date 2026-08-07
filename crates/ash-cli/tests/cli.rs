@@ -593,6 +593,55 @@ fn shell_command_executes_stateful_sequence_without_machine_framing() {
 
 #[cfg(feature = "human-shell")]
 #[test]
+fn shell_command_executes_journaled_portable_mutations() {
+    let directory = TestDirectory::new();
+    fs::write(directory.0.join("source file"), b"payload\n").expect("source file");
+
+    let output = run_in(
+        &directory,
+        &[
+            "shell",
+            "--no-profile",
+            "-c",
+            "touch created; cp 'source file' copied; mv copied moved; rm 'source file'; echo done",
+        ],
+        b"",
+    );
+
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert_eq!(output.stdout, b"done\n");
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        fs::read(directory.0.join("created")).expect("created file"),
+        b""
+    );
+    assert_eq!(
+        fs::read(directory.0.join("moved")).expect("moved file"),
+        b"payload\n"
+    );
+    assert!(!directory.0.join("source file").exists());
+    assert!(!directory.0.join("copied").exists());
+
+    let conflict = run_in(
+        &directory,
+        &["shell", "--no-profile", "-c", "touch moved"],
+        b"",
+    );
+    assert_eq!(conflict.status.code(), Some(1));
+    assert!(conflict.stdout.is_empty());
+    assert!(
+        std::str::from_utf8(&conflict.stderr)
+            .expect("human diagnostic")
+            .contains("no-overwrite destination already exists")
+    );
+    assert_eq!(
+        fs::read(directory.0.join("moved")).expect("conflicting target remains"),
+        b"payload\n"
+    );
+}
+
+#[cfg(feature = "human-shell")]
+#[test]
 fn shell_profiles_are_opt_in_share_state_and_keep_cli_paths_anchored() {
     let directory = TestDirectory::new();
     fs::create_dir(directory.0.join("child")).expect("child directory");
