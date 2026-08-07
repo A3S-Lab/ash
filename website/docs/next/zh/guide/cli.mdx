@@ -28,12 +28,13 @@ ash 的主要 CLI 是机器接口：成功输出和错误诊断都使用稳定�
 ## 人类 Shell 检查点
 
 当前 H1 检查点针对同一份持久原生状态，顺序执行 H0 的简单命令语法。已实现 `pwd`、
-`echo`（含 `-n`）、`cd`、字面量 `export`/`unset`、可移植 `ls`、原始字节 `cat` 与
-文本 `grep`，并可执行宿主原生命令；源码可以来自 `-c SOURCE`、原生脚本文件路径或
-stdin：
+`echo`（含 `-n`）、`cd`、展开后的 `export`/`unset`、可移植 `ls`、原始字节 `cat`、
+文本 `grep`、命名参数与上一状态展开，并可执行宿主原生命令；源码可以来自
+`-c SOURCE`、原生脚本文件路径或 stdin：
 
 ```sh
 ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
+ash shell -c 'export NAME=world; echo "hello $NAME"; echo $?'
 ash shell -c "native:rustc --version"
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
@@ -51,17 +52,24 @@ UTF-8。以 `-` 开头的文件参数可写成 `ash shell -- ./-script.ash`。�
 `-` 与不支持的选项都会明确失败。
 
 `export NAME=VALUE` 与 `unset NAME` 会持久更新 Shell 变量和导出环境。两者各接受一个
-字面参数和 `--`；名称必须是 ASCII Shell 标识符，空值会被保留，移除不存在的名称也会
-成功。列出环境、多个名称与参数展开尚未实现。
+展开后的参数和 `--`；名称必须是 ASCII Shell 标识符，空值会被保留，移除不存在的
+名称也会成功。可能含分隔符的值需要引用，例如 `export COPY="$SOURCE"`。列出环境与
+多个名称尚未实现。
+
+`$NAME`、`${NAME}` 与 `$?` 会在每条命令解析执行目标前展开。Shell 变量优先于按宿主
+规则查询的导出环境，未定义名称为空。单引号与转义后的美元符保持字面量；双引号保留
+单个原生字段（包括空字段），未引用值则按固定 ASCII 空格、制表符与 LF 拆分，未引用
+空展开可能移除整个词。当前检查点不使用 `IFS` 配置拆分；原生字符串单元会无损通过
+展开和直接 argv 启动。
 
 原生程序通过持久 `PATH` 或显式 `native:` 前缀解析。ash 会把解析后的参数向量、当前
 目录和导出环境直接交给解析出的宿主可执行文件，绝不插入宿主 Shell 命令字符串。本
 检查点关闭子进程 stdin；stdout 与 stderr 共享剩余的 128 MiB 同步捕获额度，普通的
 非零原生退出状态会直接成为命令状态，不额外生成诊断。
 
-交互输入、Profile、参数展开、流式 stdio 与 WSL 执行尚未实现。常规二进制启用
-`human-shell` feature；`cargo build -p a3s-ash --no-default-features` 保留最小机器专用
-构建。
+交互输入、Profile、更广的展开（包括命令替换与 glob）、流式 stdio 与 WSL 执行尚未
+实现。常规二进制启用 `human-shell` feature；
+`cargo build -p a3s-ash --no-default-features` 保留最小机器专用构建。
 
 ## 错误契约
 

@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use a3s_ash_shell::{
-    CommandResolver, Diagnostic, HostPlatform, NativeCommandLookup, PlatformEnvironment,
+    CommandResolver, Diagnostic, HostPlatform, NativeCommandLookup, Parameter, PlatformEnvironment,
     PortableCommand, QuoteMode, ResolutionError, ResolvedCommand, Script, ShellFunction,
     ShellState, StatefulBuiltin, parse,
 };
@@ -12,6 +12,14 @@ fn parser_ast_fixture_is_stable() {
     let source = include_str!("fixtures/parser/basic.ash");
     let expected = include_str!("fixtures/parser/basic.ast");
     let script = parse(source).expect("parse golden source");
+    assert_eq!(render_script(&script), expected);
+}
+
+#[test]
+fn parameter_ast_fixture_is_stable() {
+    let source = include_str!("fixtures/parser/parameters.ash");
+    let expected = include_str!("fixtures/parser/parameters.ast");
+    let script = parse(source).expect("parse parameter golden source");
     assert_eq!(render_script(&script), expected);
 }
 
@@ -83,19 +91,45 @@ fn render_script(script: &Script) -> String {
             )
             .expect("string write");
             for part in word.parts() {
-                writeln!(
-                    output,
-                    "    literal {} {}..{} \"{}\"",
-                    quote_name(part.quote()),
-                    part.span().start(),
-                    part.span().end(),
-                    part.value().escape_debug()
-                )
-                .expect("string write");
+                if let Some(parameter) = part.parameter() {
+                    let (kind, name) = parameter_name(parameter);
+                    writeln!(
+                        output,
+                        "    parameter {} {}..{} {kind} \"{}\"",
+                        quote_name(part.quote()),
+                        part.span().start(),
+                        part.span().end(),
+                        name.escape_debug()
+                    )
+                    .expect("string write");
+                } else {
+                    writeln!(
+                        output,
+                        "    literal {} {}..{} \"{}\"",
+                        quote_name(part.quote()),
+                        part.span().start(),
+                        part.span().end(),
+                        part.value().escape_debug()
+                    )
+                    .expect("string write");
+                }
             }
         }
     }
     output
+}
+
+fn parameter_name(parameter: &Parameter) -> (&'static str, &str) {
+    match parameter {
+        Parameter::Variable {
+            name,
+            braced: false,
+        } => ("named", name),
+        Parameter::Variable { name, braced: true } => ("braced", name),
+        Parameter::LastStatus => ("status", "?"),
+        #[allow(unreachable_patterns)]
+        _ => ("unknown", ""),
+    }
 }
 
 const fn quote_name(quote: QuoteMode) -> &'static str {

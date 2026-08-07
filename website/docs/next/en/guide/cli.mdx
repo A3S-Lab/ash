@@ -31,12 +31,13 @@ Harness interface.
 
 The current H1 checkpoint executes the H0 simple-command syntax sequentially
 against one persistent native state. It implements `pwd`, `echo` (with `-n`),
-`cd`, literal `export`/`unset`, portable `ls`, raw-byte `cat`, text `grep`, and
-native host executables. Source may come from `-c SOURCE`, a native script-file
-path, or stdin:
+`cd`, expanded `export`/`unset`, portable `ls`, raw-byte `cat`, text `grep`,
+named and last-status parameter expansion, and native host executables. Source
+may come from `-c SOURCE`, a native script-file path, or stdin:
 
 ```sh
 ash shell -c "grep -in 'semantic' crates/ash-ops/src/semantic.rs"
+ash shell -c 'export NAME=world; echo "hello $NAME"; echo $?'
 ash shell -c "native:rustc --version"
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
@@ -57,10 +58,18 @@ Searches are capped at 64 MiB; no matches return status 1 without a diagnostic.
 Directories, multiple files, stdin `-`, and unsupported options fail explicitly.
 
 `export NAME=VALUE` and `unset NAME` persistently update both shell-variable and
-exported environment state. Each accepts one literal argument and `--`; names
+exported environment state. Each accepts one expanded argument and `--`; names
 must be ASCII shell identifiers, empty values are preserved, and unsetting a
-missing name succeeds. Listing, multiple names, and parameter expansion are not
-implemented yet.
+missing name succeeds. Quote values that can contain separators, as in
+`export COPY="$SOURCE"`. Listing and multiple names are not implemented yet.
+
+`$NAME`, `${NAME}`, and `$?` expand immediately before each command resolves.
+Shell variables precede host-aware environment lookup and undefined names are
+empty. Single quotes and escaped dollars remain literal. Double quotes preserve
+one native field, including an empty field; unquoted values split on fixed ASCII
+space, tab, and LF separators, and an unquoted empty expansion can remove its
+word. `IFS` does not configure splitting in this checkpoint. Native string units
+remain lossless through expansion and direct argv launch.
 
 Native programs resolve through the persistent `PATH` or an explicit `native:`
 prefix. The resolved host executable receives the parsed argument vector,
@@ -69,10 +78,11 @@ shell command string. Child stdin is closed in this checkpoint. Stdout and
 stderr share the remaining 128 MiB synchronous capture allowance, and a normal
 nonzero native exit becomes the command status without an added diagnostic.
 
-Interactive input, profiles, parameter expansion, streaming stdio, and WSL
-execution are not implemented yet. The regular binary enables the `human-shell`
-feature; `cargo build -p a3s-ash --no-default-features` keeps a minimal
-machine-only build.
+Interactive input, profiles, broader expansion (including command substitution
+and globbing), streaming stdio, and WSL execution are not implemented yet. The
+regular binary enables the `human-shell` feature;
+`cargo build -p a3s-ash --no-default-features` keeps a minimal machine-only
+build.
 
 ## Error contract
 

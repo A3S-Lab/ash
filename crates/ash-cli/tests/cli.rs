@@ -556,6 +556,21 @@ fn shell_command_launches_native_argv_with_persistent_cwd_and_environment() {
         b"cwd=work\ntoken=present\narguments=alpha beta|plain\n"
     );
     assert_eq!(output.stderr, b"native-stderr\n");
+
+    let expanded_source = format!(
+        "cd work; export PATH=../bin; export TOKEN='alpha beta'; export ASH_NATIVE_TOKEN=\"$TOKEN\"; {executable} pre${{TOKEN}}post \"$TOKEN\"; echo $?"
+    );
+    let expanded = run_in(
+        &directory,
+        &["shell", "--no-profile", "-c", &expanded_source],
+        b"",
+    );
+    assert!(expanded.status.success(), "stderr={:?}", expanded.stderr);
+    assert_eq!(
+        expanded.stdout,
+        b"cwd=work\ntoken=alpha beta\narguments=prealpha|betapost|alpha beta\n23\n"
+    );
+    assert_eq!(expanded.stderr, b"native-stderr\n");
 }
 
 #[cfg(feature = "human-shell")]
@@ -639,6 +654,14 @@ fn shell_usage_and_parse_failures_are_human_diagnostics() {
         b"ash: single-quoted text is missing its closing quote at bytes 5..18\n"
     );
     assert!(!parse.stderr.starts_with(b"s:1\n"));
+
+    let parameter = run(&["shell", "-c", "echo ${NAME"], b"");
+    assert_eq!(parameter.status.code(), Some(2));
+    assert!(parameter.stdout.is_empty());
+    assert_eq!(
+        parameter.stderr,
+        b"ash: braced parameter expansion is missing its closing brace at bytes 5..11\n"
+    );
 }
 
 #[test]
