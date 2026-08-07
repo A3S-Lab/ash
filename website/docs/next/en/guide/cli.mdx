@@ -32,8 +32,8 @@ Harness interface.
 The current H1 checkpoint opens a cross-platform line-edited REPL when stdin is
 a terminal and executes the current command and pipeline syntax sequentially
 against one persistent native state. It implements `pwd`, `echo` (with `-n`),
-`cd`, expanded `export`/`unset`, `exit`, portable `ls`, raw-byte `cat`, text
-`grep`, named and last-status parameter expansion, native host executables, and
+`cd`, expanded `export`/`unset`, `set` pipefail control, `exit`, portable `ls`,
+raw-byte `cat`, text `grep`, named and last-status parameter expansion, native host executables, and
 same-line native-only pipelines. Source may also come from `-c SOURCE`, a native
 script-file path, or stdin:
 
@@ -90,6 +90,11 @@ must be ASCII shell identifiers, empty values are preserved, and unsetting a
 missing name succeeds. Quote values that can contain separators, as in
 `export COPY="$SOURCE"`. Listing and multiple names are not implemented yet.
 
+`set -o pipefail` persistently enables rightmost-failure pipeline status;
+`set +o pipefail` restores the default final-stage policy. Any other `set` form
+returns status 2. A startup Profile can select the policy, while a `set` pipeline
+stage is rejected before spawn and cannot mutate parent state.
+
 `$NAME`, `${NAME}`, and `$?` expand immediately before each command resolves.
 Shell variables precede host-aware environment lookup and undefined names are
 empty. Single quotes and escaped dollars remain literal. Double quotes preserve
@@ -112,12 +117,14 @@ expanded, UTF-8 checked, resolved, and confirmed native before any child starts.
 The first stage receives null stdin, intermediate stdout flows through direct OS
 pipes, and only final stdout is returned. Every stage's stderr is captured
 concurrently and appended in stage order; final stdout and all stderr share the
-remaining 128 MiB allowance. Status follows the final stage. Stateful and
+remaining 128 MiB allowance. Status defaults to the final stage. With
+`set -o pipefail`, the rightmost unsuccessful stage is selected, including
+`128 + signal`; an all-success pipeline still uses its final stage. Stateful and
 portable commands, aliases, functions, and WSL stages fail before spawn until
 their streaming adapters exist.
 
 Broader expansion (including command substitution and globbing), mutations,
-terminal streaming, redirections, `pipefail`, unified pipeline supervision,
+terminal streaming, redirections, unified pipeline supervision,
 portable/WSL pipeline stages, foreground interactive programs and jobs, and WSL
 execution are not implemented yet. The regular binary enables the `human-shell`
 feature;

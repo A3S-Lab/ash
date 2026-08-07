@@ -132,9 +132,10 @@ struct ExecutionOutput {
 /// before resolution, implements stateful environment updates and the portable
 /// command set, provides bounded direct-argv native execution, and connects
 /// two-to-32-stage native-only foreground pipelines with direct operating-system
-/// pipes. Pipeline status follows the final stage; final stdout and every stage's
-/// stderr share the synchronous capture ceiling. Unresolved backends produce
-/// explicit diagnostics without invoking a host shell.
+/// pipes. Pipeline status defaults to the final stage and can select the
+/// rightmost failure through persistent `pipefail`; final stdout and every
+/// stage's stderr share the synchronous capture ceiling. Unresolved backends
+/// produce explicit diagnostics without invoking a host shell.
 #[must_use]
 pub async fn execute_source(source: &str, state: &mut ShellState) -> ShellExecution {
     execute_source_with(source, state, &PathCommandLookup, HostPlatform::current()).await
@@ -313,6 +314,9 @@ where
         }
         ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Unset) => {
             execute_unset(state, arguments, span, &mut output.diagnostics)
+        }
+        ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Set) => {
+            execute_set(state, arguments, span, &mut output.diagnostics)
         }
         ResolvedCommand::StatefulBuiltin(StatefulBuiltin::Exit) => {
             let (status, requested) = execute_exit(state, arguments, span, &mut output.diagnostics);
@@ -727,10 +731,15 @@ where
         .await
     {
         Ok(native) if native.exits.len() == commands.len() => {
-            let exit = *native
-                .exits
-                .last()
-                .expect("a multi-stage pipeline has a final exit");
+            let Some(exit) = select_pipeline_exit(&native.exits, state.options().pipefail()) else {
+                return process_failure(
+                    "native pipeline supervision returned no exit status".to_owned(),
+                    span,
+                    &mut output.diagnostics,
+                    ShellStatusKind::SpawnError,
+                    126,
+                );
+            };
             output.stdout.extend_from_slice(&native.stdout);
             output.stderr.extend_from_slice(&native.stderr);
             native_exit_status(exit)
@@ -856,6 +865,19 @@ fn native_exit_status(exit: ProcessExit) -> ShellStatus {
         )
     };
     ShellStatus::new(code, kind, exit.signal, ExecutionBackend::Native)
+}
+
+fn select_pipeline_exit(exits: &[ProcessExit], pipefail: bool) -> Option<ProcessExit> {
+    if pipefail {
+        exits
+            .iter()
+            .rev()
+            .copied()
+            .find(|exit| !exit.success)
+            .or_else(|| exits.last().copied())
+    } else {
+        exits.last().copied()
+    }
 }
 
 fn execute_pwd(
@@ -1386,6 +1408,27 @@ fn execute_unset(
     };
     state.unset_variable(&name);
     state.environment_mut().remove(&name);
+    ShellStatus::success()
+}
+
+fn execute_set(
+    state: &mut ShellState,
+    arguments: &[OsString],
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    let enabled = match arguments {
+        [mode, option] if mode == OsStr::new("-o") && option == OsStr::new("pipefail") => true,
+        [mode, option] if mode == OsStr::new("+o") && option == OsStr::new("pipefail") => false,
+        _ => {
+            return invalid_arguments(
+                "set supports exactly `-o pipefail` or `+o pipefail`",
+                span,
+                diagnostics,
+            );
+        }
+    };
+    state.options_mut().set_pipefail(enabled);
     ShellStatus::success()
 }
 
@@ -2109,13 +2152,15 @@ fn main() {
     }
 
     #[tokio::test]
-    async fn native_pipelines_preflight_every_stage_and_use_the_final_status() {
+    async fn native_pipelines_preflight_every_stage_and_apply_the_status_policy() {
         let mut state = ShellState::new("/fixture/work");
         state.environment_mut().insert("PATH", "/fixture/bin");
         let lookup =
             |command: &str, _cwd: &std::path::Path, _environment: &crate::PlatformEnvironment| {
                 match command {
-                    "first" | "second" => Some(PathBuf::from(format!("/fixture/bin/{command}"))),
+                    "first" | "second" | "third" => {
+                        Some(PathBuf::from(format!("/fixture/bin/{command}")))
+                    }
                     _ => None,
                 }
             };
@@ -2177,6 +2222,100 @@ fn main() {
                 .all(|stage| stage.capture_limit == invocation.capture_limit)
         );
 
+        state.options_mut().set_pipefail(true);
+        let successful_runner = RecordingPipelineRunner::new(NativePipelineOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exits: vec![
+                ProcessExit {
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                },
+                ProcessExit {
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                },
+            ],
+        });
+        let successful = execute_source_with_runner(
+            "native:first | native:second",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &successful_runner,
+        )
+        .await;
+        assert_eq!(successful.status().code(), 0);
+        assert!(successful.diagnostics().is_empty());
+
+        let pipefail_runner = RecordingPipelineRunner::new(NativePipelineOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exits: vec![
+                ProcessExit {
+                    success: false,
+                    code: Some(9),
+                    signal: None,
+                },
+                ProcessExit {
+                    success: false,
+                    code: Some(7),
+                    signal: None,
+                },
+                ProcessExit {
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                },
+            ],
+        });
+        let pipefail = execute_source_with_runner(
+            "native:first | native:second | native:third; echo $?",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &pipefail_runner,
+        )
+        .await;
+        assert_eq!(pipefail.stdout(), b"7\n");
+        assert!(pipefail.stderr().is_empty());
+        assert!(pipefail.diagnostics().is_empty());
+
+        let signaled_runner = RecordingPipelineRunner::new(NativePipelineOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exits: vec![
+                ProcessExit {
+                    success: false,
+                    code: Some(9),
+                    signal: None,
+                },
+                ProcessExit {
+                    success: false,
+                    code: None,
+                    signal: Some(15),
+                },
+                ProcessExit {
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                },
+            ],
+        });
+        let signaled = execute_source_with_runner(
+            "native:first | native:second | native:third",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &signaled_runner,
+        )
+        .await;
+        assert_eq!(signaled.status().code(), 143);
+        assert_eq!(signaled.status().kind(), ShellStatusKind::Interrupted);
+        assert_eq!(signaled.status().signal(), Some(15));
+
         let rejected_runner = RecordingPipelineRunner::new(NativePipelineOutput {
             stdout: Vec::new(),
             stderr: Vec::new(),
@@ -2231,6 +2370,48 @@ fn main() {
                 .is_none(),
             "oversized pipelines must fail before resolution or spawn"
         );
+    }
+
+    #[tokio::test]
+    async fn set_toggles_only_the_documented_pipefail_option_in_parent_state() {
+        let mut state = ShellState::new(".");
+        assert!(!state.options().pipefail());
+
+        let enabled = execute_source("set -o pipefail", &mut state).await;
+        assert_eq!(enabled.status().code(), 0);
+        assert!(enabled.diagnostics().is_empty());
+        assert!(state.options().pipefail());
+
+        let disabled = execute_source("set +o pipefail", &mut state).await;
+        assert_eq!(disabled.status().code(), 0);
+        assert!(disabled.diagnostics().is_empty());
+        assert!(!state.options().pipefail());
+
+        let pipeline = execute_source("set -o pipefail | echo ignored", &mut state).await;
+        assert_eq!(pipeline.status().code(), 2);
+        assert_eq!(pipeline.diagnostics().len(), 1);
+        assert_eq!(
+            pipeline.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Unsupported
+        );
+        assert!(!state.options().pipefail());
+
+        for source in ["set", "set -o", "set -o unknown", "set -o pipefail extra"] {
+            let invalid = execute_source(source, &mut state).await;
+            assert_eq!(invalid.status().code(), 2, "source={source}");
+            assert_eq!(invalid.diagnostics().len(), 1, "source={source}");
+            assert_eq!(
+                invalid.diagnostics()[0].code(),
+                ExecutionDiagnosticCode::InvalidArguments,
+                "source={source}"
+            );
+            assert_eq!(
+                invalid.diagnostics()[0].message(),
+                "set supports exactly `-o pipefail` or `+o pipefail`",
+                "source={source}"
+            );
+            assert!(!state.options().pipefail(), "source={source}");
+        }
     }
 
     #[tokio::test]
