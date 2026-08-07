@@ -10,7 +10,9 @@ mod workspace;
 
 pub use identity::FileIdentity;
 pub use mutation::{MutationGuard, ReplaceOutcome};
-pub use process::{EnvironmentChange, ProcessExit, ProcessHandle, ProcessSpec};
+pub use process::{
+    EnvironmentChange, NativeProcessSpec, ProcessExit, ProcessHandle, ProcessSpec, spawn_native,
+};
 pub use transaction::{
     FileAction, FileActionKind, FileActionOutcome, FileActionState, FileTransactionFailure,
     FileTransactionLimits, FileTransactionOutcome, MAX_FILE_TRANSACTION_FILE_BYTES,

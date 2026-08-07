@@ -111,6 +111,8 @@ name = "a3s-ash-shell"
 version = "0.1.0"
 dependencies = [
  "a3s-ash-ops",
+ "a3s-ash-platform",
+ "tokio",
 ]
 
 [[package]]

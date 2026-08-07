@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::process::Stdio;
 
 #[cfg(windows)]
@@ -26,6 +27,20 @@ pub struct ProcessSpec {
     pub pipe_stdin: bool,
 }
 
+/// Native-string process description for host-authority frontends.
+///
+/// Unlike [`ProcessSpec`], paths are already resolved native paths and are not
+/// interpreted relative to an ASH workspace capability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeProcessSpec {
+    pub executable: OsString,
+    pub argv: Vec<OsString>,
+    pub cwd: PathBuf,
+    pub environment: Vec<EnvironmentChange>,
+    pub clear_environment: bool,
+    pub pipe_stdin: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessExit {
     pub success: bool,
@@ -48,40 +63,53 @@ impl Workspace {
         } else {
             spec.executable.clone().into()
         };
-        let mut command = Command::new(executable);
-        command
-            .args(&spec.argv)
-            .current_dir(cwd.native)
-            .stdin(if spec.pipe_stdin {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if spec.clear_environment {
-            command.env_clear();
-        }
-        for change in &spec.environment {
-            match change {
-                EnvironmentChange::Set(name, value) => {
-                    command.env(name, value);
-                }
-                EnvironmentChange::Remove(name) => {
-                    command.env_remove(name);
-                }
-            }
-        }
-        let mut command = CommandWrap::from(command);
-        command.wrap(KillOnDrop);
-        #[cfg(unix)]
-        command.wrap(ProcessGroup::leader());
-        #[cfg(windows)]
-        command.wrap(JobObject);
-        Ok(ProcessHandle {
-            child: command.spawn()?,
+        spawn_native(&NativeProcessSpec {
+            executable: executable.into_os_string(),
+            argv: spec.argv.iter().map(OsString::from).collect(),
+            cwd: cwd.native,
+            environment: spec.environment.clone(),
+            clear_environment: spec.clear_environment,
+            pipe_stdin: spec.pipe_stdin,
         })
     }
+}
+
+/// Launches one host executable directly from an already-resolved native
+/// specification. No command shell or workspace path interpretation is added.
+pub fn spawn_native(spec: &NativeProcessSpec) -> Result<ProcessHandle, PlatformError> {
+    let mut command = Command::new(&spec.executable);
+    command
+        .args(&spec.argv)
+        .current_dir(&spec.cwd)
+        .stdin(if spec.pipe_stdin {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if spec.clear_environment {
+        command.env_clear();
+    }
+    for change in &spec.environment {
+        match change {
+            EnvironmentChange::Set(name, value) => {
+                command.env(name, value);
+            }
+            EnvironmentChange::Remove(name) => {
+                command.env_remove(name);
+            }
+        }
+    }
+    let mut command = CommandWrap::from(command);
+    command.wrap(KillOnDrop);
+    #[cfg(unix)]
+    command.wrap(ProcessGroup::leader());
+    #[cfg(windows)]
+    command.wrap(JobObject);
+    Ok(ProcessHandle {
+        child: command.spawn()?,
+    })
 }
 
 fn validate_process_spec(spec: &ProcessSpec) -> Result<(), PlatformError> {
@@ -170,6 +198,7 @@ fn normalize_exit(status: std::process::ExitStatus) -> ProcessExit {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
     use std::process::Command;
@@ -178,7 +207,7 @@ mod tests {
 
     use tokio::io::AsyncReadExt;
 
-    use super::ProcessSpec;
+    use super::{EnvironmentChange, NativeProcessSpec, ProcessSpec, spawn_native};
     use crate::Workspace;
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -213,6 +242,14 @@ use std::{env, fs, process::Command, thread, time::Duration};
 fn main() {
     let mut arguments = env::args().skip(1);
     match arguments.next().as_deref() {
+        Some("inspect") => {
+            let argument = arguments.next().expect("argument");
+            let cwd = env::current_dir().expect("current directory");
+            println!("cwd={}", cwd.file_name().expect("directory name").to_string_lossy());
+            println!("token={}", env::var("ASH_NATIVE_TOKEN").expect("environment"));
+            println!("argument={argument}");
+            eprintln!("native-stderr");
+        }
         Some("parent") => {
             let ready = arguments.next().expect("ready path");
             let escaped = arguments.next().expect("escaped path");
@@ -250,6 +287,48 @@ fn main() {
             .expect("run rustc");
         assert!(status.success(), "compile process-tree helper");
         format!("bin/{executable_name}")
+    }
+
+    #[tokio::test]
+    async fn native_process_spec_preserves_cwd_environment_and_argv() {
+        let directory = TestDirectory::new();
+        let executable = directory.0.join(compile_process_tree_helper(&directory));
+        let cwd = directory.0.join("native-cwd");
+        fs::create_dir(&cwd).expect("native cwd");
+        let mut process = spawn_native(&NativeProcessSpec {
+            executable: executable.into_os_string(),
+            argv: vec![OsString::from("inspect"), OsString::from("alpha beta")],
+            cwd,
+            environment: vec![EnvironmentChange::Set(
+                OsString::from("ASH_NATIVE_TOKEN"),
+                OsString::from("present"),
+            )],
+            clear_environment: true,
+            pipe_stdin: false,
+        })
+        .expect("spawn native helper");
+        let mut stdout = process.take_stdout().expect("stdout");
+        let mut stderr = process.take_stderr().expect("stderr");
+        let (stdout, stderr, exit) = tokio::join!(
+            async {
+                let mut bytes = Vec::new();
+                stdout.read_to_end(&mut bytes).await.expect("stdout");
+                bytes
+            },
+            async {
+                let mut bytes = Vec::new();
+                stderr.read_to_end(&mut bytes).await.expect("stderr");
+                bytes
+            },
+            process.wait(),
+        );
+
+        assert!(exit.expect("wait").success, "stderr={stderr:?}");
+        assert_eq!(
+            stdout,
+            b"cwd=native-cwd\ntoken=present\nargument=alpha beta\n"
+        );
+        assert_eq!(stderr, b"native-stderr\n");
     }
 
     #[tokio::test]

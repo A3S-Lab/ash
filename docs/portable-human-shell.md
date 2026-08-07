@@ -21,8 +21,8 @@ deadline, budget, projection, retention, and ASON ownership. H1 has started with
 a feature-gated `ash shell` route for inline plus bounded stdin and native
 script-file sources, with sequential `pwd`, `echo`, `cd`, literal
 `export`/`unset`, and portable `ls` plus bounded raw-byte `cat` and text `grep`
-execution. Interactive input, external execution, expansion, pipelines, jobs,
-and WSL launch remain unimplemented.
+execution, plus direct-argv native host commands. Interactive input, expansion,
+pipelines, jobs, streaming stdio, and WSL launch remain unimplemented.
 
 ## 1. Executive decision
 
@@ -202,10 +202,12 @@ streaming pipeline as ordinary DAG completion dependencies.
 
 ### 6.4 `ash-platform`
 
-Keep the current machine-oriented `ProcessSpec` behavior stable. Introduce a
-more general launch API underneath it with explicit standard-I/O and terminal
-attachment modes. The existing `ProcessSpec` becomes a strict adapter selecting
-null or captured pipes exactly as it does today.
+Keep the current machine-oriented `ProcessSpec` behavior stable. The native
+`NativeProcessSpec` launch API now sits underneath it for already-resolved
+native paths, native argument/environment strings, and direct process-tree
+creation. Generalized standard-I/O and terminal-attachment modes remain staged;
+the existing `ProcessSpec` still selects null or captured pipes exactly as it
+did before this API was added.
 
 The platform layer owns:
 
@@ -430,6 +432,19 @@ struct ExternalCommand {
     redirections: Vec<Redirection>,
 }
 ```
+
+The current H1 buffered executor lowers a resolved native command directly to
+`NativeProcessSpec`. It rebuilds the child environment from `ShellState`, uses
+the state's current directory, passes every parsed operand as one native argv
+entry, closes child stdin, and never inserts `sh -c`, `cmd /c`, or
+`pwsh -Command`. Stdout and stderr are read concurrently under the remaining
+128 MiB aggregate synchronous-capture allowance. Exceeding that allowance
+terminates the owned process tree and returns status 1 with a process
+diagnostic; launch or capture infrastructure failure returns status 126. A
+normal nonzero child exit produces no shell diagnostic and becomes the command
+status. On Unix, signal termination records the signal and exposes `128 +
+signal` as the conventional status. Streaming and inherited-terminal modes
+remain part of H2/H4 rather than being simulated by this buffered path.
 
 Redirections remain an ordered vector because these are observably different:
 
@@ -691,14 +706,17 @@ builtin adapters.
 Current checkpoint: `ash shell -c SOURCE`, `ash shell < script.ash`, and
 `ash shell script.ash` parse the H0 syntax subset, execute sequential `pwd`,
 `echo`, `cd`, literal `export`/`unset`, portable `ls`, bounded raw-byte `cat`, and
-bounded text `grep` commands against one native `ShellState`, emit source-spanned
-human diagnostics, and return the last command status. Stdin and file sources
-share a 1 MiB valid-UTF-8 ceiling, while file operands retain native path
-representation. `ls`, `cat`, and `grep` reuse the provider-neutral
-list/read/search services with an unconfined native provider and the option
-contracts in section 10. The `human-shell` feature is enabled for the normal
+bounded text `grep` commands plus native host executables against one native
+`ShellState`, emit source-spanned human diagnostics, and return the last command
+status. Stdin and file sources share a 1 MiB valid-UTF-8 ceiling, while file and
+external-command operands retain native representation. `ls`, `cat`, and `grep`
+reuse the provider-neutral list/read/search services with an unconfined native
+provider and the option contracts in section 10. Native programs resolve from
+the persistent environment, launch through the owned `ash-platform` process
+boundary with exact argv/cwd/environment, and use the bounded dual-stream
+contract in section 11. The `human-shell` feature is enabled for the normal
 binary and can be disabled for a minimal machine-only build. Interactive input,
-profiles, native process launch, and parameter expansion remain for later H1
+profiles, parameter expansion, streaming stdio, and WSL launch remain for later
 increments.
 
 ### H2: streaming execution
