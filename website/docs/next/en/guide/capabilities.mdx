@@ -147,22 +147,26 @@ free-form ASH/1 operation, and does not change any machine capability or
 confinement claim.
 
 H2 now provides explicit per-stream modes, validated native OS pipe graphs, and
-native-only pipeline lowering. A same-line `|` connects two to 32 native host
-stages only after every stage expands and resolves successfully. Intermediate
-stdout flows through direct OS pipes, while unredirected final stdout and stderr
-use bounded captures. Status defaults to the final stage;
-`set -o pipefail` selects the rightmost failure and `set +o pipefail` restores
-the default. Native commands also accept source-ordered `<`, `>`, `>>`, `2>`,
+native/portable pipeline lowering. A same-line `|` connects two to 32 native
+host or implemented portable `pwd`, `echo`, `ls`, `cat`, and `grep` stages only
+after complete preflight. Native pairs use direct OS pipes; portable boundaries
+retain explicit asynchronous parent ends and remain concurrent, bounded, and
+backpressured. `cat -` and `grep PATTERN -` consume incoming streams, and final
+portable output joins the bounded capture path. Status defaults to the final
+stage; `set -o pipefail` selects the rightmost native or portable failure and
+`set +o pipefail` restores the default. Native commands also accept
+source-ordered `<`, `>`, `>>`, `2>`,
 `2>>`, `2>&1`, and `1>&2`. File targets expand to exactly one field, relative
 paths resolve against persistent cwd, and files attach directly to OS handles; shared files or captures
-preserve real descriptor write order. Parent-facing, direct child-to-child,
-three-process, closed-reader, and ordered-redirection regressions lock
-backpressure, exact bytes, EOF closure, broken-pipe behavior, handle exposure,
-and side-effect ordering across platforms. Ordered lowering may replace any
-native stage's internal stdin or stdout: explicit parent-closed ends deliver EOF
-downstream or native broken-pipe behavior upstream, while a descriptor copy that
-still names the pipe remains connected. Unified supervision, visible terminal
-streaming, and builtin/portable/WSL redirection and pipeline adapters remain
-later slices.
+preserve real descriptor write order. Parent-facing, parent-to-parent, direct
+child-to-child, native, mixed, portable-only, closed-reader, and
+ordered-redirection regressions lock backpressure, exact bytes, EOF closure,
+broken-pipe behavior, handle exposure, and side-effect ordering across
+platforms. Ordered lowering may replace any native stage's internal stdin or
+stdout: explicit parent-closed ends deliver EOF downstream or native
+broken-pipe behavior upstream, while a descriptor copy that still names the
+pipe remains connected. Unified job supervision, visible terminal streaming,
+stateful-builtin and WSL pipeline adapters, and non-native redirection adapters
+remain later slices.
 
 For Agent adoption, continue with [Coding Agent integration](/guide/coding-agents).

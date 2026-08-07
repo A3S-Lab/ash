@@ -47,6 +47,17 @@ pub enum ClosedProcessPipeEnd {
     Writer(ProcessPipeId),
 }
 
+/// One process-graph pipe endpoint retained by the parent after spawning.
+///
+/// Parent readers and writers are returned as asynchronous files on
+/// [`NativeProcessGraph`] so in-process tasks can participate in the same OS
+/// pipe graph without relaying child-to-child edges through the parent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParentProcessPipeEnd {
+    Reader(ProcessPipeId),
+    Writer(ProcessPipeId),
+}
+
 /// Stable specification-local identifier for one opened native process file.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ProcessFileId(u32);
@@ -176,6 +187,31 @@ pub struct ProcessHandle {
     captures: BTreeMap<ProcessCaptureId, tokio::fs::File>,
 }
 
+/// Running native process graph plus explicitly retained parent pipe ends.
+pub struct NativeProcessGraph {
+    processes: Vec<ProcessHandle>,
+    pipe_readers: BTreeMap<ProcessPipeId, tokio::fs::File>,
+    pipe_writers: BTreeMap<ProcessPipeId, tokio::fs::File>,
+}
+
+impl NativeProcessGraph {
+    /// Takes one declared parent reader by its graph-local pipe identifier.
+    pub fn take_pipe_reader(&mut self, id: ProcessPipeId) -> Option<tokio::fs::File> {
+        self.pipe_readers.remove(&id)
+    }
+
+    /// Takes one declared parent writer by its graph-local pipe identifier.
+    pub fn take_pipe_writer(&mut self, id: ProcessPipeId) -> Option<tokio::fs::File> {
+        self.pipe_writers.remove(&id)
+    }
+
+    /// Consumes the graph wrapper and returns process handles in specification order.
+    #[must_use]
+    pub fn into_processes(self) -> Vec<ProcessHandle> {
+        self.processes
+    }
+}
+
 impl Workspace {
     pub fn spawn(&self, spec: &ProcessSpec) -> Result<ProcessHandle, PlatformError> {
         spawn_native(&self.resolve_process_spec(spec)?)
@@ -259,7 +295,23 @@ pub fn spawn_native_graph_with_closed_pipe_ends(
     specs: &[NativeProcessSpec],
     closed_ends: &[ClosedProcessPipeEnd],
 ) -> Result<Vec<ProcessHandle>, PlatformError> {
-    let graph = validate_process_graph_with_closed_pipe_ends(specs, closed_ends)?;
+    Ok(spawn_native_graph_with_parent_pipe_ends(specs, closed_ends, &[])?.into_processes())
+}
+
+/// Launches a native graph with parent-owned asynchronous pipe endpoints.
+///
+/// For every pipe, each reader and writer must be represented exactly once by
+/// a child endpoint, a closed marker, or a parent marker. Duplicate or
+/// conflicting ownership, unmatched ends, and cycles fail before file-open or
+/// child-process side effects. Child-to-child edges remain direct OS pipe
+/// connections; only endpoints listed in `parent_ends` are returned to the
+/// caller.
+pub fn spawn_native_graph_with_parent_pipe_ends(
+    specs: &[NativeProcessSpec],
+    closed_ends: &[ClosedProcessPipeEnd],
+    parent_ends: &[ParentProcessPipeEnd],
+) -> Result<NativeProcessGraph, PlatformError> {
+    let graph = validate_process_graph_with_parent_pipe_ends(specs, closed_ends, parent_ends)?;
     for spec in specs {
         validate_process_redirections(spec)?;
     }
@@ -268,8 +320,8 @@ pub fn spawn_native_graph_with_closed_pipe_ends(
         .map(PreparedProcessStdio::open)
         .collect::<Result<Vec<_>, _>>()?;
     let mut pipes = BTreeMap::new();
-    for id in graph.pipe_ids {
-        pipes.insert(id, std::io::pipe()?);
+    for id in &graph.pipe_ids {
+        pipes.insert(*id, std::io::pipe()?);
     }
 
     let mut processes: Vec<Option<ProcessHandle>> =
@@ -284,13 +336,31 @@ pub fn spawn_native_graph_with_closed_pipe_ends(
             spec, stdin, stdout, stderr, captures,
         )?);
     }
-    drop(pipes);
     drop(prepared);
 
-    processes
+    let processes = processes
         .into_iter()
         .map(|process| process.ok_or(PlatformError::InvalidProcessGraph))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut pipe_readers = BTreeMap::new();
+    let mut pipe_writers = BTreeMap::new();
+    for (id, (reader, writer)) in pipes {
+        if graph.parent_readers.binary_search(&id).is_ok() {
+            pipe_readers.insert(id, async_pipe_reader(reader));
+        } else {
+            drop(reader);
+        }
+        if graph.parent_writers.binary_search(&id).is_ok() {
+            pipe_writers.insert(id, async_pipe_writer(writer));
+        } else {
+            drop(writer);
+        }
+    }
+    Ok(NativeProcessGraph {
+        processes,
+        pipe_readers,
+        pipe_writers,
+    })
 }
 
 fn spawn_native_with_stdio(
@@ -487,6 +557,24 @@ fn async_pipe_reader(reader: PipeReader) -> tokio::fs::File {
     tokio::fs::File::from_std(File::from(descriptor))
 }
 
+#[cfg(unix)]
+fn async_pipe_writer(writer: PipeWriter) -> tokio::fs::File {
+    let descriptor = OwnedFd::from(writer);
+    tokio::fs::File::from_std(File::from(descriptor))
+}
+
+#[cfg(windows)]
+fn async_pipe_writer(writer: PipeWriter) -> tokio::fs::File {
+    let handle = OwnedHandle::from(writer);
+    tokio::fs::File::from_std(File::from(handle))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn async_pipe_writer(writer: PipeWriter) -> tokio::fs::File {
+    drop(writer);
+    panic!("process task pipes require a supported native host")
+}
+
 #[cfg(windows)]
 fn async_pipe_reader(reader: PipeReader) -> tokio::fs::File {
     let handle = OwnedHandle::from(reader);
@@ -501,6 +589,8 @@ fn async_pipe_reader(reader: PipeReader) -> tokio::fs::File {
 
 struct ProcessGraph {
     pipe_ids: Vec<ProcessPipeId>,
+    parent_readers: Vec<ProcessPipeId>,
+    parent_writers: Vec<ProcessPipeId>,
     spawn_order: Vec<usize>,
 }
 
@@ -510,16 +600,27 @@ struct PipeUsage {
     writer: Option<usize>,
     reader_closed: bool,
     writer_closed: bool,
+    reader_parent: bool,
+    writer_parent: bool,
 }
 
 #[cfg(test)]
 fn validate_process_graph(specs: &[NativeProcessSpec]) -> Result<ProcessGraph, PlatformError> {
-    validate_process_graph_with_closed_pipe_ends(specs, &[])
+    validate_process_graph_with_parent_pipe_ends(specs, &[], &[])
 }
 
+#[cfg(test)]
 fn validate_process_graph_with_closed_pipe_ends(
     specs: &[NativeProcessSpec],
     closed_ends: &[ClosedProcessPipeEnd],
+) -> Result<ProcessGraph, PlatformError> {
+    validate_process_graph_with_parent_pipe_ends(specs, closed_ends, &[])
+}
+
+fn validate_process_graph_with_parent_pipe_ends(
+    specs: &[NativeProcessSpec],
+    closed_ends: &[ClosedProcessPipeEnd],
+    parent_ends: &[ParentProcessPipeEnd],
 ) -> Result<ProcessGraph, PlatformError> {
     let mut usages = BTreeMap::<ProcessPipeId, PipeUsage>::new();
     for (index, spec) in specs.iter().enumerate() {
@@ -557,12 +658,39 @@ fn validate_process_graph_with_closed_pipe_ends(
         }
     }
 
+    for parent_end in parent_ends {
+        match *parent_end {
+            ParentProcessPipeEnd::Reader(id) => {
+                let usage = usages.entry(id).or_default();
+                if usage.reader.is_some()
+                    || usage.reader_closed
+                    || std::mem::replace(&mut usage.reader_parent, true)
+                {
+                    return Err(PlatformError::InvalidProcessGraph);
+                }
+            }
+            ParentProcessPipeEnd::Writer(id) => {
+                let usage = usages.entry(id).or_default();
+                if usage.writer.is_some()
+                    || usage.writer_closed
+                    || std::mem::replace(&mut usage.writer_parent, true)
+                {
+                    return Err(PlatformError::InvalidProcessGraph);
+                }
+            }
+        }
+    }
+
     let mut outgoing = vec![Vec::new(); specs.len()];
     let mut incoming = vec![0_usize; specs.len()];
     for usage in usages.values() {
-        if usage.reader.is_some() == usage.reader_closed
-            || usage.writer.is_some() == usage.writer_closed
-        {
+        let readers = usize::from(usage.reader.is_some())
+            + usize::from(usage.reader_closed)
+            + usize::from(usage.reader_parent);
+        let writers = usize::from(usage.writer.is_some())
+            + usize::from(usage.writer_closed)
+            + usize::from(usage.writer_parent);
+        if readers != 1 || writers != 1 {
             return Err(PlatformError::InvalidProcessGraph);
         }
         if let (Some(writer), Some(reader)) = (usage.writer, usage.reader) {
@@ -597,8 +725,19 @@ fn validate_process_graph_with_closed_pipe_ends(
         return Err(PlatformError::InvalidProcessGraph);
     }
 
+    let pipe_ids = usages.keys().copied().collect();
+    let parent_readers = usages
+        .iter()
+        .filter_map(|(id, usage)| usage.reader_parent.then_some(*id))
+        .collect();
+    let parent_writers = usages
+        .iter()
+        .filter_map(|(id, usage)| usage.writer_parent.then_some(*id))
+        .collect();
     Ok(ProcessGraph {
-        pipe_ids: usages.into_keys().collect(),
+        pipe_ids,
+        parent_readers,
+        parent_writers,
         spawn_order,
     })
 }
@@ -704,9 +843,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
-        ClosedProcessPipeEnd, EnvironmentChange, NativeProcessSpec, ProcessPipeId, ProcessSpec,
-        ProcessStdio, spawn_native, spawn_native_graph, spawn_native_graph_with_closed_pipe_ends,
+        ClosedProcessPipeEnd, EnvironmentChange, NativeProcessSpec, ParentProcessPipeEnd,
+        ProcessPipeId, ProcessSpec, ProcessStdio, spawn_native, spawn_native_graph,
+        spawn_native_graph_with_closed_pipe_ends, spawn_native_graph_with_parent_pipe_ends,
         validate_process_graph, validate_process_graph_with_closed_pipe_ends,
+        validate_process_graph_with_parent_pipe_ends,
     };
     use crate::{PlatformError, Workspace};
 
@@ -1137,6 +1278,68 @@ fn main() {
         assert_eq!(closed_graph.pipe_ids, vec![second_pipe]);
         assert!(closed_graph.spawn_order.is_empty());
 
+        let parent_reader_graph = validate_process_graph_with_parent_pipe_ends(
+            &writer_only,
+            &[],
+            &[ParentProcessPipeEnd::Reader(first_pipe)],
+        )
+        .expect("a parent reader completes a child-writer pipe");
+        assert_eq!(parent_reader_graph.parent_readers, vec![first_pipe]);
+        assert!(parent_reader_graph.parent_writers.is_empty());
+        let parent_writer_graph = validate_process_graph_with_parent_pipe_ends(
+            &reader_only,
+            &[],
+            &[ParentProcessPipeEnd::Writer(first_pipe)],
+        )
+        .expect("a parent writer completes a child-reader pipe");
+        assert!(parent_writer_graph.parent_readers.is_empty());
+        assert_eq!(parent_writer_graph.parent_writers, vec![first_pipe]);
+        let parent_graph = validate_process_graph_with_parent_pipe_ends(
+            &[],
+            &[],
+            &[
+                ParentProcessPipeEnd::Reader(second_pipe),
+                ParentProcessPipeEnd::Writer(second_pipe),
+            ],
+        )
+        .expect("both pipe ends may belong to parent tasks");
+        assert_eq!(parent_graph.pipe_ids, vec![second_pipe]);
+        assert_eq!(parent_graph.parent_readers, vec![second_pipe]);
+        assert_eq!(parent_graph.parent_writers, vec![second_pipe]);
+
+        for parent_ends in [
+            vec![ParentProcessPipeEnd::Reader(first_pipe)],
+            vec![
+                ParentProcessPipeEnd::Reader(first_pipe),
+                ParentProcessPipeEnd::Reader(first_pipe),
+                ParentProcessPipeEnd::Writer(first_pipe),
+            ],
+        ] {
+            assert!(matches!(
+                validate_process_graph_with_parent_pipe_ends(&[], &[], &parent_ends),
+                Err(PlatformError::InvalidProcessGraph)
+            ));
+        }
+        assert!(matches!(
+            validate_process_graph_with_parent_pipe_ends(
+                &writer_only,
+                &[ClosedProcessPipeEnd::Reader(first_pipe)],
+                &[ParentProcessPipeEnd::Reader(first_pipe)],
+            ),
+            Err(PlatformError::InvalidProcessGraph)
+        ));
+        assert!(matches!(
+            validate_process_graph_with_parent_pipe_ends(
+                &reader_only,
+                &[],
+                &[
+                    ParentProcessPipeEnd::Reader(first_pipe),
+                    ParentProcessPipeEnd::Writer(first_pipe),
+                ],
+            ),
+            Err(PlatformError::InvalidProcessGraph)
+        ));
+
         for closed_ends in [
             vec![ClosedProcessPipeEnd::Reader(first_pipe)],
             vec![
@@ -1327,6 +1530,155 @@ fn main() {
             .collect();
         assert_eq!(actual.len(), expected.len());
         assert!(actual == expected, "native pipe graph changed the payload");
+
+        let parent_reader_pipe = ProcessPipeId::new(11);
+        let mut parent_reader_graph = spawn_native_graph_with_parent_pipe_ends(
+            &[NativeProcessSpec {
+                executable: executable.clone().into_os_string(),
+                argv: vec![
+                    OsString::from("produce"),
+                    OsString::from(PAYLOAD_BYTES.to_string()),
+                ],
+                cwd: directory.0.clone(),
+                environment: vec![],
+                clear_environment: false,
+                files: Vec::new(),
+                stdin: ProcessStdio::Null,
+                stdout: ProcessStdio::Pipe(parent_reader_pipe),
+                stderr: ProcessStdio::Null,
+            }],
+            &[],
+            &[ParentProcessPipeEnd::Reader(parent_reader_pipe)],
+        )
+        .expect("spawn child writer with a parent reader");
+        let mut parent_reader = parent_reader_graph
+            .take_pipe_reader(parent_reader_pipe)
+            .expect("parent reader");
+        assert!(
+            parent_reader_graph
+                .take_pipe_reader(parent_reader_pipe)
+                .is_none()
+        );
+        assert!(
+            parent_reader_graph
+                .take_pipe_writer(parent_reader_pipe)
+                .is_none()
+        );
+        let mut parent_reader_processes = parent_reader_graph.into_processes();
+        let mut parent_reader_producer = parent_reader_processes.pop().expect("parent producer");
+        assert!(parent_reader_processes.is_empty());
+        let (parent_bytes, parent_reader_exit) =
+            tokio::time::timeout(Duration::from_secs(30), async {
+                tokio::join!(
+                    async {
+                        let mut bytes = Vec::new();
+                        parent_reader
+                            .read_to_end(&mut bytes)
+                            .await
+                            .expect("read parent endpoint");
+                        bytes
+                    },
+                    parent_reader_producer.wait(),
+                )
+            })
+            .await
+            .expect("parent reader drains with backpressure");
+        assert!(parent_reader_exit.expect("wait parent producer").success);
+        assert_eq!(parent_bytes, expected);
+
+        let parent_writer_pipe = ProcessPipeId::new(12);
+        let mut parent_writer_graph = spawn_native_graph_with_parent_pipe_ends(
+            &[NativeProcessSpec {
+                executable: executable.clone().into_os_string(),
+                argv: vec![OsString::from("copy")],
+                cwd: directory.0.clone(),
+                environment: vec![],
+                clear_environment: false,
+                files: Vec::new(),
+                stdin: ProcessStdio::Pipe(parent_writer_pipe),
+                stdout: ProcessStdio::Piped,
+                stderr: ProcessStdio::Null,
+            }],
+            &[],
+            &[ParentProcessPipeEnd::Writer(parent_writer_pipe)],
+        )
+        .expect("spawn child reader with a parent writer");
+        let mut parent_writer = parent_writer_graph
+            .take_pipe_writer(parent_writer_pipe)
+            .expect("parent writer");
+        let mut parent_writer_processes = parent_writer_graph.into_processes();
+        let mut parent_writer_consumer = parent_writer_processes.pop().expect("parent consumer");
+        assert!(parent_writer_processes.is_empty());
+        let mut copied_stdout = parent_writer_consumer
+            .take_stdout()
+            .expect("copied parent output");
+        let expected_for_writer = expected.clone();
+        let ((), copied, parent_writer_exit) =
+            tokio::time::timeout(Duration::from_secs(30), async {
+                tokio::join!(
+                    async move {
+                        parent_writer
+                            .write_all(&expected_for_writer)
+                            .await
+                            .expect("write parent endpoint");
+                        parent_writer.shutdown().await.expect("close parent writer");
+                    },
+                    async {
+                        let mut bytes = Vec::new();
+                        copied_stdout
+                            .read_to_end(&mut bytes)
+                            .await
+                            .expect("read copied parent input");
+                        bytes
+                    },
+                    parent_writer_consumer.wait(),
+                )
+            })
+            .await
+            .expect("parent writer streams with backpressure");
+        assert!(parent_writer_exit.expect("wait parent consumer").success);
+        assert_eq!(copied, expected);
+
+        let parent_task_pipe = ProcessPipeId::new(13);
+        let mut parent_task_graph = spawn_native_graph_with_parent_pipe_ends(
+            &[],
+            &[],
+            &[
+                ParentProcessPipeEnd::Reader(parent_task_pipe),
+                ParentProcessPipeEnd::Writer(parent_task_pipe),
+            ],
+        )
+        .expect("create parent task pipe");
+        let mut task_reader = parent_task_graph
+            .take_pipe_reader(parent_task_pipe)
+            .expect("task reader");
+        let mut task_writer = parent_task_graph
+            .take_pipe_writer(parent_task_pipe)
+            .expect("task writer");
+        assert!(parent_task_graph.into_processes().is_empty());
+        let expected_for_task = expected.clone();
+        let ((), task_bytes) = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(
+                async move {
+                    task_writer
+                        .write_all(&expected_for_task)
+                        .await
+                        .expect("write task pipe");
+                    task_writer.shutdown().await.expect("close task writer");
+                },
+                async {
+                    let mut bytes = Vec::new();
+                    task_reader
+                        .read_to_end(&mut bytes)
+                        .await
+                        .expect("read task pipe");
+                    bytes
+                },
+            )
+        })
+        .await
+        .expect("parent task pipe preserves backpressure");
+        assert_eq!(task_bytes, expected);
 
         let eof_pipe = ProcessPipeId::new(8);
         let mut eof_processes = spawn_native_graph_with_closed_pipe_ends(

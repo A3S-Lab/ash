@@ -6,17 +6,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ash_ops::{
-    ListQuery, MAX_READ_FILE_BYTES, NativeFileSystem, ReadQuery, SearchQuery, SemanticEntryKind,
-    SemanticError, SemanticFileSystem, SemanticListFilter, SemanticReadMode, SemanticSearchPattern,
-    SemanticServices,
+    ListQuery, MAX_READ_FILE_BYTES, MAX_SEARCH_FILE_BYTES, NativeFileSystem, ReadQuery,
+    SearchQuery, SemanticEntryKind, SemanticError, SemanticFileSystem, SemanticListFilter,
+    SemanticReadMode, SemanticSearchPattern, SemanticServices,
 };
 use ash_platform::{
     ClosedProcessPipeEnd, EnvironmentChange, NativeProcessFile, NativeProcessFileMode,
-    NativeProcessSpec, PlatformError, ProcessCaptureId, ProcessExit, ProcessFileId, ProcessHandle,
-    ProcessPipeId, ProcessStdio, spawn_native, spawn_native_graph_with_closed_pipe_ends,
+    NativeProcessSpec, ParentProcessPipeEnd, PlatformError, ProcessCaptureId, ProcessExit,
+    ProcessFileId, ProcessHandle, ProcessPipeId, ProcessStdio, spawn_native,
+    spawn_native_graph_with_parent_pipe_ends,
 };
-use futures::future::try_join_all;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use futures::future::{join_all, try_join_all};
+use regex::{Regex, RegexBuilder};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::expand::expand_words;
 use crate::state::validate_identifier;
@@ -27,7 +29,7 @@ use crate::{
     SimpleCommand, SourceSpan, StatefulBuiltin, parse,
 };
 
-/// Maximum native stages accepted by one foreground pipeline checkpoint.
+/// Maximum stages accepted by one foreground human-shell pipeline.
 pub const MAX_NATIVE_PIPELINE_STAGES: usize = 32;
 
 const STDOUT_CAPTURE: ProcessCaptureId = ProcessCaptureId::new(1);
@@ -438,9 +440,27 @@ struct NativeStdio {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct NativePipelineInvocation {
-    stages: Vec<NativeInvocation>,
+enum PipelineStageInvocation {
+    Native(NativeInvocation),
+    Portable(PortablePipelineInvocation),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PortablePipelineInvocation {
+    command: PortableCommand,
+    arguments: Vec<OsString>,
+    state: ShellState,
+    span: SourceSpan,
+    stdin_pipe: Option<ProcessPipeId>,
+    stdout_pipe: ProcessPipeId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PipelineInvocation {
+    stages: Vec<PipelineStageInvocation>,
     closed_pipe_ends: Vec<ClosedProcessPipeEnd>,
+    parent_pipe_ends: Vec<ParentProcessPipeEnd>,
+    final_stdout_pipe: Option<ProcessPipeId>,
     capture_limit: u64,
 }
 
@@ -452,10 +472,11 @@ struct NativeCommandOutput {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct NativePipelineOutput {
+struct PipelineOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     exits: Vec<ProcessExit>,
+    diagnostics: Vec<ExecutionDiagnostic>,
 }
 
 #[derive(Debug)]
@@ -497,8 +518,8 @@ trait NativeCommandRunner {
 
     async fn run_pipeline(
         &self,
-        invocation: NativePipelineInvocation,
-    ) -> Result<NativePipelineOutput, NativeCommandError>;
+        invocation: PipelineInvocation,
+    ) -> Result<PipelineOutput, NativeCommandError>;
 }
 
 struct DirectNativeCommandRunner;
@@ -559,59 +580,107 @@ impl NativeCommandRunner for DirectNativeCommandRunner {
 
     async fn run_pipeline(
         &self,
-        invocation: NativePipelineInvocation,
-    ) -> Result<NativePipelineOutput, NativeCommandError> {
-        run_native_pipeline(invocation).await
+        invocation: PipelineInvocation,
+    ) -> Result<PipelineOutput, NativeCommandError> {
+        run_pipeline(invocation).await
     }
 }
 
-async fn run_native_pipeline(
-    invocation: NativePipelineInvocation,
-) -> Result<NativePipelineOutput, NativeCommandError> {
-    let NativePipelineInvocation {
+async fn run_pipeline(
+    invocation: PipelineInvocation,
+) -> Result<PipelineOutput, NativeCommandError> {
+    let PipelineInvocation {
         stages,
         closed_pipe_ends,
+        parent_pipe_ends,
+        final_stdout_pipe,
         capture_limit,
     } = invocation;
     let stage_count = stages.len();
     let mut specs = Vec::with_capacity(stage_count);
-    for stage in stages {
+    let mut native_stage_indices = Vec::with_capacity(stage_count);
+    for (stage_index, stage) in stages.iter().enumerate() {
+        let PipelineStageInvocation::Native(stage) = stage else {
+            continue;
+        };
+        native_stage_indices.push(stage_index);
         specs.push(NativeProcessSpec {
-            executable: stage.executable.into_os_string(),
-            argv: stage.arguments,
-            cwd: stage.cwd,
+            executable: stage.executable.clone().into_os_string(),
+            argv: stage.arguments.clone(),
+            cwd: stage.cwd.clone(),
             environment: stage
                 .environment
-                .into_iter()
-                .map(|(name, value)| EnvironmentChange::Set(name, value))
+                .iter()
+                .map(|(name, value)| EnvironmentChange::Set(name.clone(), value.clone()))
                 .collect(),
             clear_environment: true,
-            files: stage.files,
+            files: stage.files.clone(),
             stdin: stage.stdin,
             stdout: stage.stdout,
             stderr: stage.stderr,
         });
     }
 
-    let mut processes = spawn_native_graph_with_closed_pipe_ends(&specs, &closed_pipe_ends)
-        .map_err(classify_native_spawn_error)?;
-    let mut stdout_streams = Vec::with_capacity(processes.len());
-    let mut stderr_streams = Vec::with_capacity(processes.len());
-    for (process, spec) in processes.iter_mut().zip(&specs) {
+    let mut graph =
+        spawn_native_graph_with_parent_pipe_ends(&specs, &closed_pipe_ends, &parent_pipe_ends)
+            .map_err(classify_native_spawn_error)?;
+    let mut stdout_streams: Vec<Option<tokio::fs::File>> =
+        std::iter::repeat_with(|| None).take(stage_count).collect();
+    let mut stderr_streams: Vec<Option<tokio::fs::File>> =
+        std::iter::repeat_with(|| None).take(stage_count).collect();
+    if let Some(pipe) = final_stdout_pipe {
+        let final_index = stage_count
+            .checked_sub(1)
+            .ok_or(NativeCommandError::MissingStream("final stage stdout"))?;
+        stdout_streams[final_index] = Some(
+            graph
+                .take_pipe_reader(pipe)
+                .ok_or(NativeCommandError::MissingStream("portable final stdout"))?,
+        );
+    }
+
+    let mut portable_tasks = Vec::new();
+    for (stage_index, stage) in stages.into_iter().enumerate() {
+        let PipelineStageInvocation::Portable(invocation) = stage else {
+            continue;
+        };
+        let input = invocation
+            .stdin_pipe
+            .map(|pipe| {
+                graph
+                    .take_pipe_reader(pipe)
+                    .ok_or(NativeCommandError::MissingStream("portable stage stdin"))
+            })
+            .transpose()?;
+        let output = graph
+            .take_pipe_writer(invocation.stdout_pipe)
+            .ok_or(NativeCommandError::MissingStream("portable stage stdout"))?;
+        portable_tasks.push(execute_portable_pipeline_stage(
+            stage_index,
+            invocation,
+            input,
+            output,
+        ));
+    }
+
+    let mut processes = graph.into_processes();
+    for ((process, spec), &stage_index) in
+        processes.iter_mut().zip(&specs).zip(&native_stage_indices)
+    {
         let captures_stdout = spec_uses_capture(spec, STDOUT_CAPTURE);
         let stdout = process.take_capture(STDOUT_CAPTURE);
         if captures_stdout && stdout.is_none() {
             terminate_and_reap(&mut processes).await;
             return Err(NativeCommandError::MissingStream("stage stdout"));
         }
-        stdout_streams.push(stdout);
+        stdout_streams[stage_index] = stdout;
         let captures_stderr = spec_uses_capture(spec, STDERR_CAPTURE);
         let stderr = process.take_capture(STDERR_CAPTURE);
         if captures_stderr && stderr.is_none() {
             terminate_and_reap(&mut processes).await;
             return Err(NativeCommandError::MissingStream("stage stderr"));
         }
-        stderr_streams.push(stderr);
+        stderr_streams[stage_index] = stderr;
     }
 
     let captured = Arc::new(AtomicU64::new(0));
@@ -627,16 +696,468 @@ async fn run_native_pipeline(
         }))
         .await
     };
-    match tokio::try_join!(stdout_capture, stderr_capture, wait_all) {
-        Ok((stdout, stderr, exits)) => Ok(NativePipelineOutput {
-            stdout: stdout.into_iter().flatten().collect(),
-            stderr: stderr.into_iter().flatten().collect(),
-            exits,
-        }),
+    let portable_all = async { Ok::<_, NativeCommandError>(join_all(portable_tasks).await) };
+    match tokio::try_join!(stdout_capture, stderr_capture, portable_all, wait_all) {
+        Ok((stdout, stderr, portable, native_exits)) => {
+            let mut exits = std::iter::repeat_with(|| None)
+                .take(stage_count)
+                .collect::<Vec<_>>();
+            for (&stage_index, exit) in native_stage_indices.iter().zip(native_exits) {
+                exits[stage_index] = Some(exit);
+            }
+            let mut diagnostics = Vec::new();
+            for output in portable {
+                exits[output.stage_index] = Some(output.exit);
+                diagnostics.extend(output.diagnostics);
+            }
+            let exits = exits
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .ok_or(NativeCommandError::MissingStream("pipeline stage status"))?;
+            Ok(PipelineOutput {
+                stdout: stdout.into_iter().flatten().collect(),
+                stderr: stderr.into_iter().flatten().collect(),
+                exits,
+                diagnostics,
+            })
+        }
         Err(error) => {
             terminate_and_reap(&mut processes).await;
             Err(error)
         }
+    }
+}
+
+struct PortableStageOutput {
+    stage_index: usize,
+    exit: ProcessExit,
+    diagnostics: Vec<ExecutionDiagnostic>,
+}
+
+type PortablePipelineReader = Box<dyn AsyncRead + Send + Unpin>;
+
+async fn execute_portable_pipeline_stage(
+    stage_index: usize,
+    invocation: PortablePipelineInvocation,
+    input: Option<tokio::fs::File>,
+    output: tokio::fs::File,
+) -> PortableStageOutput {
+    match invocation.command {
+        PortableCommand::Cat => {
+            execute_portable_pipeline_cat(stage_index, invocation, input, output).await
+        }
+        PortableCommand::Grep => {
+            execute_portable_pipeline_grep(stage_index, invocation, input, output).await
+        }
+        command => {
+            drop(input);
+            let mut stdout = Vec::new();
+            let mut diagnostics = Vec::new();
+            let mut status = match command {
+                PortableCommand::Pwd => execute_pwd(
+                    &invocation.state,
+                    &invocation.arguments,
+                    invocation.span,
+                    &mut stdout,
+                    &mut diagnostics,
+                ),
+                PortableCommand::Echo => execute_echo(
+                    &invocation.arguments,
+                    invocation.span,
+                    &mut stdout,
+                    &mut diagnostics,
+                ),
+                PortableCommand::List => execute_ls(
+                    &invocation.state,
+                    &invocation.arguments,
+                    invocation.span,
+                    &mut stdout,
+                    &mut diagnostics,
+                ),
+                PortableCommand::Cat | PortableCommand::Grep => unreachable!(),
+            };
+            if let Err(error) = write_portable_pipeline_output(output, &stdout).await
+                && status.code() == 0
+            {
+                status = portable_pipeline_write_failure(error, invocation.span, &mut diagnostics);
+            }
+            portable_stage_output(stage_index, status, diagnostics)
+        }
+    }
+}
+
+async fn execute_portable_pipeline_cat(
+    stage_index: usize,
+    invocation: PortablePipelineInvocation,
+    input: Option<tokio::fs::File>,
+    mut output: tokio::fs::File,
+) -> PortableStageOutput {
+    let target = parse_cat_path_with_stdin(&invocation.arguments, true)
+        .expect("portable pipeline cat arguments were preflighted");
+    let mut diagnostics = Vec::new();
+    let mut reader: PortablePipelineReader = if target == "-" {
+        input.map_or_else(
+            || Box::new(tokio::io::empty()) as PortablePipelineReader,
+            |input| Box::new(input) as PortablePipelineReader,
+        )
+    } else {
+        drop(input);
+        let filesystem = match NativeFileSystem::new(invocation.state.cwd()) {
+            Ok(filesystem) => filesystem,
+            Err(error) => {
+                let status = filesystem_failure(
+                    format!("cannot read from the current directory: {error}"),
+                    invocation.span,
+                    &mut diagnostics,
+                );
+                drop(output);
+                return portable_stage_output(stage_index, status, diagnostics);
+            }
+        };
+        let path = PathBuf::from(&target);
+        let resolved = match filesystem.resolve_existing(&path) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let status =
+                    read_filesystem_failure(&target, error, invocation.span, &mut diagnostics);
+                drop(output);
+                return portable_stage_output(stage_index, status, diagnostics);
+            }
+        };
+        match tokio::fs::File::open(&resolved).await {
+            Ok(file) => Box::new(file),
+            Err(error) => {
+                let status =
+                    read_filesystem_failure(&target, error, invocation.span, &mut diagnostics);
+                drop(output);
+                return portable_stage_output(stage_index, status, diagnostics);
+            }
+        }
+    };
+
+    let status = match copy_portable_pipeline_stream(&mut *reader, &mut output).await {
+        Ok(()) => ShellStatus::success(),
+        Err(PortableStreamError::Limit) => read_filesystem_failure(
+            &target,
+            format!("input exceeds the {MAX_READ_FILE_BYTES}-byte portable pipeline ceiling"),
+            invocation.span,
+            &mut diagnostics,
+        ),
+        Err(PortableStreamError::Read(error)) => {
+            read_filesystem_failure(&target, error, invocation.span, &mut diagnostics)
+        }
+        Err(PortableStreamError::Write(error)) => {
+            portable_pipeline_write_failure(error, invocation.span, &mut diagnostics)
+        }
+    };
+    portable_stage_output(stage_index, status, diagnostics)
+}
+
+async fn execute_portable_pipeline_grep(
+    stage_index: usize,
+    invocation: PortablePipelineInvocation,
+    input: Option<tokio::fs::File>,
+    mut output: tokio::fs::File,
+) -> PortableStageOutput {
+    let options = parse_grep_options_with_stdin(&invocation.arguments, true)
+        .expect("portable pipeline grep arguments were preflighted");
+    let matcher =
+        PipelineGrepMatcher::new(&options).expect("portable pipeline grep pattern was preflighted");
+    let mut diagnostics = Vec::new();
+    let mut reader: PortablePipelineReader = if options.path == "-" {
+        input.map_or_else(
+            || Box::new(tokio::io::empty()) as PortablePipelineReader,
+            |input| Box::new(input) as PortablePipelineReader,
+        )
+    } else {
+        drop(input);
+        let filesystem = match NativeFileSystem::new(invocation.state.cwd()) {
+            Ok(filesystem) => filesystem,
+            Err(error) => {
+                let status = filesystem_failure(
+                    format!("cannot search from the current directory: {error}"),
+                    invocation.span,
+                    &mut diagnostics,
+                );
+                drop(output);
+                return portable_stage_output(stage_index, status, diagnostics);
+            }
+        };
+        let path = PathBuf::from(&options.path);
+        let resolved = match filesystem.resolve_existing(&path) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let status = search_filesystem_failure(
+                    &options.path,
+                    error,
+                    invocation.span,
+                    &mut diagnostics,
+                );
+                drop(output);
+                return portable_stage_output(stage_index, status, diagnostics);
+            }
+        };
+        match tokio::fs::File::open(&resolved).await {
+            Ok(file) => Box::new(file),
+            Err(error) => {
+                let status = search_filesystem_failure(
+                    &options.path,
+                    error,
+                    invocation.span,
+                    &mut diagnostics,
+                );
+                drop(output);
+                return portable_stage_output(stage_index, status, diagnostics);
+            }
+        }
+    };
+
+    let status = match grep_portable_pipeline_stream(&mut *reader, &mut output, &options, &matcher)
+        .await
+    {
+        Ok(true) => ShellStatus::success(),
+        Ok(false) => shell_status(1, ShellStatusKind::Exited),
+        Err(PortableGrepStreamError::InputLimit) => search_filesystem_failure(
+            &options.path,
+            format!("input exceeds the {MAX_SEARCH_FILE_BYTES}-byte portable grep ceiling"),
+            invocation.span,
+            &mut diagnostics,
+        ),
+        Err(PortableGrepStreamError::OutputLimit) => search_filesystem_failure(
+            &options.path,
+            format!(
+                "output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
+            ),
+            invocation.span,
+            &mut diagnostics,
+        ),
+        Err(PortableGrepStreamError::InvalidUtf8) => search_filesystem_failure(
+            &options.path,
+            "input is not valid UTF-8",
+            invocation.span,
+            &mut diagnostics,
+        ),
+        Err(PortableGrepStreamError::Read(error)) => {
+            search_filesystem_failure(&options.path, error, invocation.span, &mut diagnostics)
+        }
+        Err(PortableGrepStreamError::Write(error)) => {
+            portable_pipeline_write_failure(error, invocation.span, &mut diagnostics)
+        }
+    };
+    portable_stage_output(stage_index, status, diagnostics)
+}
+
+enum PortableStreamError {
+    Read(io::Error),
+    Write(io::Error),
+    Limit,
+}
+
+async fn copy_portable_pipeline_stream(
+    reader: &mut (dyn AsyncRead + Send + Unpin),
+    writer: &mut (dyn AsyncWrite + Send + Unpin),
+) -> Result<(), PortableStreamError> {
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let remaining = MAX_READ_FILE_BYTES.saturating_sub(copied);
+        let requested = if remaining == 0 {
+            1
+        } else {
+            usize::try_from(remaining)
+                .unwrap_or(buffer.len())
+                .min(buffer.len())
+        };
+        let read = reader
+            .read(&mut buffer[..requested])
+            .await
+            .map_err(PortableStreamError::Read)?;
+        if read == 0 {
+            writer
+                .shutdown()
+                .await
+                .map_err(PortableStreamError::Write)?;
+            return Ok(());
+        }
+        if remaining == 0 {
+            return Err(PortableStreamError::Limit);
+        }
+        writer
+            .write_all(&buffer[..read])
+            .await
+            .map_err(PortableStreamError::Write)?;
+        copied = copied.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+    }
+}
+
+enum PipelineGrepMatcher {
+    Literal(String),
+    Regex(Regex),
+}
+
+impl PipelineGrepMatcher {
+    fn new(options: &GrepCommandOptions) -> Result<Self, regex::Error> {
+        if options.pattern == SemanticSearchPattern::Regex || options.case_insensitive {
+            let pattern = if options.pattern == SemanticSearchPattern::Regex {
+                options.query.clone()
+            } else {
+                regex::escape(&options.query)
+            };
+            RegexBuilder::new(&pattern)
+                .case_insensitive(options.case_insensitive)
+                .size_limit(16 * 1024 * 1024)
+                .build()
+                .map(Self::Regex)
+        } else {
+            Ok(Self::Literal(options.query.clone()))
+        }
+    }
+
+    fn is_match(&self, line: &str) -> bool {
+        match self {
+            Self::Literal(query) => line.contains(query),
+            Self::Regex(regex) => regex.is_match(line),
+        }
+    }
+}
+
+enum PortableGrepStreamError {
+    Read(io::Error),
+    Write(io::Error),
+    InputLimit,
+    OutputLimit,
+    InvalidUtf8,
+}
+
+async fn grep_portable_pipeline_stream(
+    reader: &mut (dyn AsyncRead + Send + Unpin),
+    writer: &mut (dyn AsyncWrite + Send + Unpin),
+    options: &GrepCommandOptions,
+    matcher: &PipelineGrepMatcher,
+) -> Result<bool, PortableGrepStreamError> {
+    let mut reader = BufReader::new(reader);
+    let mut line = Vec::new();
+    let mut line_number = 0_u64;
+    let mut input_bytes = 0_u64;
+    let mut output_bytes = 0_u64;
+    let mut matched_any = false;
+    loop {
+        line.clear();
+        let mut reached_eof = false;
+        loop {
+            let available = reader
+                .fill_buf()
+                .await
+                .map_err(PortableGrepStreamError::Read)?;
+            if available.is_empty() {
+                reached_eof = true;
+                break;
+            }
+            let take = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            let updated = input_bytes
+                .checked_add(u64::try_from(take).unwrap_or(u64::MAX))
+                .ok_or(PortableGrepStreamError::InputLimit)?;
+            if updated > MAX_SEARCH_FILE_BYTES {
+                return Err(PortableGrepStreamError::InputLimit);
+            }
+            let ends_line = available[take - 1] == b'\n';
+            line.extend_from_slice(&available[..take]);
+            input_bytes = updated;
+            reader.consume(take);
+            if ends_line {
+                break;
+            }
+        }
+        if line.is_empty() && reached_eof {
+            writer
+                .shutdown()
+                .await
+                .map_err(PortableGrepStreamError::Write)?;
+            return Ok(matched_any);
+        }
+        line_number = line_number.saturating_add(1);
+        if line.last() == Some(&b'\n') {
+            line.pop();
+        }
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        let text = std::str::from_utf8(&line).map_err(|_| PortableGrepStreamError::InvalidUtf8)?;
+        if !matcher.is_match(text) {
+            continue;
+        }
+        matched_any = true;
+        let prefix = options.line_number.then(|| format!("{line_number}:"));
+        let rendered_len = prefix
+            .as_ref()
+            .map_or(0, String::len)
+            .saturating_add(line.len())
+            .saturating_add(1);
+        output_bytes = output_bytes
+            .checked_add(u64::try_from(rendered_len).unwrap_or(u64::MAX))
+            .ok_or(PortableGrepStreamError::OutputLimit)?;
+        if output_bytes > MAX_READ_FILE_BYTES {
+            return Err(PortableGrepStreamError::OutputLimit);
+        }
+        if let Some(prefix) = prefix {
+            writer
+                .write_all(prefix.as_bytes())
+                .await
+                .map_err(PortableGrepStreamError::Write)?;
+        }
+        writer
+            .write_all(&line)
+            .await
+            .map_err(PortableGrepStreamError::Write)?;
+        writer
+            .write_all(b"\n")
+            .await
+            .map_err(PortableGrepStreamError::Write)?;
+    }
+}
+
+async fn write_portable_pipeline_output(
+    mut output: tokio::fs::File,
+    bytes: &[u8],
+) -> io::Result<()> {
+    output.write_all(bytes).await?;
+    output.shutdown().await
+}
+
+fn portable_pipeline_write_failure(
+    error: io::Error,
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    if error.kind() == io::ErrorKind::BrokenPipe {
+        shell_status(1, ShellStatusKind::Exited)
+    } else {
+        process_failure(
+            format!("cannot write portable pipeline output: {error}"),
+            span,
+            diagnostics,
+            ShellStatusKind::Exited,
+            1,
+        )
+    }
+}
+
+fn portable_stage_output(
+    stage_index: usize,
+    status: ShellStatus,
+    diagnostics: Vec<ExecutionDiagnostic>,
+) -> PortableStageOutput {
+    PortableStageOutput {
+        stage_index,
+        exit: ProcessExit {
+            success: status.code() == 0,
+            code: Some(status.code()),
+            signal: status.signal(),
+        },
+        diagnostics,
     }
 }
 
@@ -726,7 +1247,7 @@ where
 {
     if commands.len() > MAX_NATIVE_PIPELINE_STAGES {
         return invalid_arguments(
-            &format!("native pipelines support at most {MAX_NATIVE_PIPELINE_STAGES} stages"),
+            &format!("pipelines support at most {MAX_NATIVE_PIPELINE_STAGES} stages"),
             span,
             &mut output.diagnostics,
         );
@@ -743,7 +1264,7 @@ where
             .collect();
         if words.is_empty() {
             return invalid_arguments(
-                "a native pipeline stage expands to no command",
+                "a pipeline stage expands to no command",
                 command.span(),
                 &mut output.diagnostics,
             );
@@ -792,7 +1313,7 @@ where
                         stderr: ProcessStdio::Capture(STDERR_CAPTURE),
                     },
                 ) {
-                    Ok(invocation) => stages.push(invocation),
+                    Ok(invocation) => stages.push(PipelineStageInvocation::Native(invocation)),
                     Err(error) => {
                         return redirection_failure(
                             error.message,
@@ -810,11 +1331,39 @@ where
                 );
             }
             Ok(ResolvedCommand::Portable(portable)) => {
-                return unsupported_pipeline_stage(
-                    portable.name(),
-                    command.span(),
-                    &mut output.diagnostics,
-                );
+                if !command.redirections().is_empty() {
+                    return unsupported(
+                        "redirections currently require a native host command".to_owned(),
+                        command.span(),
+                        &mut output.diagnostics,
+                        ShellStatusKind::Exited,
+                        2,
+                    );
+                }
+                let arguments = words[1..].to_vec();
+                let reads_stdin = match portable_pipeline_reads_stdin(portable, &arguments) {
+                    Ok(reads_stdin) => reads_stdin,
+                    Err(error) => {
+                        return invalid_arguments(&error, command.span(), &mut output.diagnostics);
+                    }
+                };
+                let stdin_pipe = (reads_stdin && index > 0).then(|| {
+                    ProcessPipeId::new(
+                        u32::try_from(index - 1).expect("pipeline stage ceiling fits u32"),
+                    )
+                });
+                stages.push(PipelineStageInvocation::Portable(
+                    PortablePipelineInvocation {
+                        command: portable,
+                        arguments,
+                        state: state.clone(),
+                        span: command.span(),
+                        stdin_pipe,
+                        stdout_pipe: ProcessPipeId::new(
+                            u32::try_from(index).expect("pipeline stage ceiling fits u32"),
+                        ),
+                    },
+                ));
             }
             Ok(
                 ResolvedCommand::Alias { name, .. }
@@ -834,42 +1383,75 @@ where
     }
 
     let mut closed_pipe_ends = Vec::with_capacity((stages.len() - 1).saturating_mul(2));
+    let mut parent_pipe_ends = Vec::with_capacity(stages.len().saturating_mul(2));
     for index in 0..stages.len() - 1 {
         let pipe_id =
             ProcessPipeId::new(u32::try_from(index).expect("pipeline stage ceiling fits u32"));
         let pipe = ProcessStdio::Pipe(pipe_id);
-        if stages[index].stdout != pipe && stages[index].stderr != pipe {
-            closed_pipe_ends.push(ClosedProcessPipeEnd::Writer(pipe_id));
+        match &stages[index] {
+            PipelineStageInvocation::Native(stage) => {
+                if stage.stdout != pipe && stage.stderr != pipe {
+                    closed_pipe_ends.push(ClosedProcessPipeEnd::Writer(pipe_id));
+                }
+            }
+            PipelineStageInvocation::Portable(stage) => {
+                debug_assert_eq!(stage.stdout_pipe, pipe_id);
+                parent_pipe_ends.push(ParentProcessPipeEnd::Writer(pipe_id));
+            }
         }
-        if stages[index + 1].stdin != pipe {
-            closed_pipe_ends.push(ClosedProcessPipeEnd::Reader(pipe_id));
+        match &stages[index + 1] {
+            PipelineStageInvocation::Native(stage) => {
+                if stage.stdin != pipe {
+                    closed_pipe_ends.push(ClosedProcessPipeEnd::Reader(pipe_id));
+                }
+            }
+            PipelineStageInvocation::Portable(stage) => {
+                if stage.stdin_pipe == Some(pipe_id) {
+                    parent_pipe_ends.push(ParentProcessPipeEnd::Reader(pipe_id));
+                } else {
+                    closed_pipe_ends.push(ClosedProcessPipeEnd::Reader(pipe_id));
+                }
+            }
         }
     }
 
+    let final_stdout_pipe = match stages.last() {
+        Some(PipelineStageInvocation::Portable(stage)) => {
+            parent_pipe_ends.push(ParentProcessPipeEnd::Reader(stage.stdout_pipe));
+            parent_pipe_ends.push(ParentProcessPipeEnd::Writer(stage.stdout_pipe));
+            Some(stage.stdout_pipe)
+        }
+        Some(PipelineStageInvocation::Native(_)) | None => None,
+    };
+
     match runner
-        .run_pipeline(NativePipelineInvocation {
+        .run_pipeline(PipelineInvocation {
             stages,
             closed_pipe_ends,
+            parent_pipe_ends,
+            final_stdout_pipe,
             capture_limit,
         })
         .await
     {
-        Ok(native) if native.exits.len() == commands.len() => {
-            let Some(exit) = select_pipeline_exit(&native.exits, state.options().pipefail()) else {
+        Ok(pipeline) if pipeline.exits.len() == commands.len() => {
+            let Some(exit) = select_pipeline_exit(&pipeline.exits, state.options().pipefail())
+            else {
                 return process_failure(
-                    "native pipeline supervision returned no exit status".to_owned(),
+                    "pipeline supervision returned no exit status".to_owned(),
                     span,
                     &mut output.diagnostics,
                     ShellStatusKind::SpawnError,
                     126,
                 );
             };
-            output.stdout.extend_from_slice(&native.stdout);
-            output.stderr.extend_from_slice(&native.stderr);
+            output.stdout.extend_from_slice(&pipeline.stdout);
+            output.stderr.extend_from_slice(&pipeline.stderr);
+            output.diagnostics.extend(pipeline.diagnostics);
             native_exit_status(exit)
         }
         Ok(_) => process_failure(
-            "native pipeline supervision returned incomplete exit status".to_owned(),
+            "pipeline supervision returned incomplete exit status".to_owned(),
             span,
             &mut output.diagnostics,
             ShellStatusKind::SpawnError,
@@ -877,7 +1459,7 @@ where
         ),
         Err(NativeCommandError::CaptureLimit { .. }) => process_failure(
             format!(
-                "native pipeline output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
+                "pipeline output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
             ),
             span,
             &mut output.diagnostics,
@@ -885,12 +1467,12 @@ where
             1,
         ),
         Err(NativeCommandError::Redirection(error)) => redirection_failure(
-            format!("cannot apply native pipeline redirection: {error}"),
+            format!("cannot apply pipeline redirection: {error}"),
             span,
             &mut output.diagnostics,
         ),
         Err(error) => process_failure(
-            format!("cannot execute native pipeline: {error}"),
+            format!("cannot execute pipeline: {error}"),
             span,
             &mut output.diagnostics,
             ShellStatusKind::SpawnError,
@@ -1106,6 +1688,39 @@ fn select_pipeline_exit(exits: &[ProcessExit], pipefail: bool) -> Option<Process
     }
 }
 
+fn portable_pipeline_reads_stdin(
+    command: PortableCommand,
+    arguments: &[OsString],
+) -> Result<bool, String> {
+    match command {
+        PortableCommand::Pwd => {
+            if arguments.is_empty() {
+                Ok(false)
+            } else {
+                Err("pwd does not accept arguments".to_owned())
+            }
+        }
+        PortableCommand::Echo => {
+            parse_echo_arguments(arguments)?;
+            Ok(false)
+        }
+        PortableCommand::List => {
+            parse_ls_options(arguments)?;
+            Ok(false)
+        }
+        PortableCommand::Cat => {
+            let target = parse_cat_path_with_stdin(arguments, true)?;
+            Ok(target == "-")
+        }
+        PortableCommand::Grep => {
+            let options = parse_grep_options_with_stdin(arguments, true)?;
+            PipelineGrepMatcher::new(&options)
+                .map_err(|error| format!("grep regular expression is invalid: {error}"))?;
+            Ok(options.path == "-")
+        }
+    }
+}
+
 fn execute_pwd(
     state: &ShellState,
     arguments: &[OsString],
@@ -1127,20 +1742,10 @@ fn execute_echo(
     stdout: &mut Vec<u8>,
     diagnostics: &mut Vec<ExecutionDiagnostic>,
 ) -> ShellStatus {
-    let mut arguments = arguments;
-    let mut newline = true;
-    if arguments.first().is_some_and(|argument| argument == "-n") {
-        newline = false;
-        arguments = &arguments[1..];
-    } else if arguments.first().is_some_and(|argument| argument == "--") {
-        arguments = &arguments[1..];
-    } else if arguments.first().is_some_and(|argument| {
-        argument
-            .to_str()
-            .is_some_and(|argument| argument.starts_with('-') && argument != "-")
-    }) {
-        return invalid_arguments("echo supports only the `-n` option", span, diagnostics);
-    }
+    let (arguments, newline) = match parse_echo_arguments(arguments) {
+        Ok(parsed) => parsed,
+        Err(message) => return invalid_arguments(&message, span, diagnostics),
+    };
     for (index, argument) in arguments.iter().enumerate() {
         if index > 0 {
             stdout.push(b' ');
@@ -1151,6 +1756,22 @@ fn execute_echo(
         stdout.push(b'\n');
     }
     ShellStatus::success()
+}
+
+fn parse_echo_arguments(arguments: &[OsString]) -> Result<(&[OsString], bool), String> {
+    if arguments.first().is_some_and(|argument| argument == "-n") {
+        Ok((&arguments[1..], false))
+    } else if arguments.first().is_some_and(|argument| argument == "--") {
+        Ok((&arguments[1..], true))
+    } else if arguments.first().is_some_and(|argument| {
+        argument
+            .to_str()
+            .is_some_and(|argument| argument.starts_with('-') && argument != "-")
+    }) {
+        Err("echo supports only the `-n` option".to_owned())
+    } else {
+        Ok((arguments, true))
+    }
 }
 
 #[derive(Default)]
@@ -1341,6 +1962,13 @@ fn execute_cat(
 }
 
 fn parse_cat_path(arguments: &[OsString]) -> Result<OsString, String> {
+    parse_cat_path_with_stdin(arguments, false)
+}
+
+fn parse_cat_path_with_stdin(
+    arguments: &[OsString],
+    allow_stdin: bool,
+) -> Result<OsString, String> {
     if arguments.is_empty() || arguments == ["--"] {
         return Err("cat requires exactly one path".to_owned());
     }
@@ -1354,12 +1982,13 @@ fn parse_cat_path(arguments: &[OsString]) -> Result<OsString, String> {
         return Err("cat accepts exactly one path".to_owned());
     }
     let target = &arguments[0];
-    if target == "-" {
+    if target == "-" && !allow_stdin {
         return Err("cat standard-input operand `-` is not implemented yet".to_owned());
     }
-    if target
-        .to_str()
-        .is_some_and(|target| target.starts_with('-'))
+    if target != "-"
+        && target
+            .to_str()
+            .is_some_and(|target| target.starts_with('-'))
     {
         return Err(format!(
             "cat does not support option `{}`",
@@ -1494,6 +2123,13 @@ fn execute_grep(
 }
 
 fn parse_grep_options(arguments: &[OsString]) -> Result<GrepCommandOptions, String> {
+    parse_grep_options_with_stdin(arguments, false)
+}
+
+fn parse_grep_options_with_stdin(
+    arguments: &[OsString],
+    allow_stdin: bool,
+) -> Result<GrepCommandOptions, String> {
     let mut selected_pattern = None;
     let mut case_insensitive = false;
     let mut line_number = false;
@@ -1569,7 +2205,7 @@ fn parse_grep_options(arguments: &[OsString]) -> Result<GrepCommandOptions, Stri
         .ok_or_else(|| "grep pattern must be valid UTF-8".to_owned())?
         .to_owned();
     let path = operands[1].clone();
-    if path == "-" {
+    if path == "-" && !allow_stdin {
         return Err("grep standard-input operand `-` is not implemented yet".to_owned());
     }
     Ok(GrepCommandOptions {
@@ -1999,12 +2635,14 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use ash_platform::{ClosedProcessPipeEnd, ProcessExit, ProcessPipeId, ProcessStdio};
+    use ash_platform::{
+        ClosedProcessPipeEnd, ParentProcessPipeEnd, ProcessExit, ProcessPipeId, ProcessStdio,
+    };
 
     use super::{
         ExecutionDiagnosticCode, NativeCommandError, NativeCommandOutput, NativeCommandRunner,
-        NativeInvocation, NativePipelineInvocation, NativePipelineOutput, execute_source,
-        execute_source_with, execute_source_with_runner,
+        NativeInvocation, PipelineInvocation, PipelineOutput, PipelineStageInvocation,
+        execute_source, execute_source_with, execute_source_with_runner,
     };
     use crate::{HostPlatform, ShellState, ShellStatusKind, SourceSpan};
 
@@ -2055,6 +2693,31 @@ fn main() {
                     *byte = u8::try_from((offset + index) % 251).expect("bounded byte");
                 }
                 output.write_all(&buffer[..count]).expect("write payload");
+                offset += count;
+            }
+            output.flush().expect("flush payload");
+            eprintln!("producer-stderr");
+        }
+        Some("produce-soft") => {
+            let length = arguments
+                .next()
+                .expect("payload length")
+                .parse::<usize>()
+                .expect("numeric payload length");
+            let mut output = io::stdout().lock();
+            let mut buffer = vec![0_u8; 64 * 1024];
+            let mut offset = 0_usize;
+            while offset < length {
+                let count = (length - offset).min(buffer.len());
+                for (index, byte) in buffer[..count].iter_mut().enumerate() {
+                    *byte = u8::try_from((offset + index) % 251).expect("bounded byte");
+                }
+                if let Err(error) = output.write_all(&buffer[..count]) {
+                    if error.kind() == io::ErrorKind::BrokenPipe {
+                        process::exit(9);
+                    }
+                    panic!("write payload: {}", error);
+                }
                 offset += count;
             }
             output.flush().expect("flush payload");
@@ -2131,8 +2794,8 @@ fn main() {
 
         async fn run_pipeline(
             &self,
-            _invocation: NativePipelineInvocation,
-        ) -> Result<NativePipelineOutput, NativeCommandError> {
+            _invocation: PipelineInvocation,
+        ) -> Result<PipelineOutput, NativeCommandError> {
             panic!("single-command recording runner received a pipeline")
         }
     }
@@ -2157,8 +2820,8 @@ fn main() {
 
         async fn run_pipeline(
             &self,
-            invocation: NativePipelineInvocation,
-        ) -> Result<NativePipelineOutput, NativeCommandError> {
+            invocation: PipelineInvocation,
+        ) -> Result<PipelineOutput, NativeCommandError> {
             if self.capture_limit {
                 Err(NativeCommandError::CaptureLimit {
                     max: invocation.capture_limit,
@@ -2170,12 +2833,12 @@ fn main() {
     }
 
     struct RecordingPipelineRunner {
-        invocation: Mutex<Option<NativePipelineInvocation>>,
-        output: Mutex<Option<NativePipelineOutput>>,
+        invocation: Mutex<Option<PipelineInvocation>>,
+        output: Mutex<Option<PipelineOutput>>,
     }
 
     impl RecordingPipelineRunner {
-        fn new(output: NativePipelineOutput) -> Self {
+        fn new(output: PipelineOutput) -> Self {
             Self {
                 invocation: Mutex::new(None),
                 output: Mutex::new(Some(output)),
@@ -2193,8 +2856,8 @@ fn main() {
 
         async fn run_pipeline(
             &self,
-            invocation: NativePipelineInvocation,
-        ) -> Result<NativePipelineOutput, NativeCommandError> {
+            invocation: PipelineInvocation,
+        ) -> Result<PipelineOutput, NativeCommandError> {
             *self.invocation.lock().expect("invocation lock") = Some(invocation);
             Ok(self
                 .output
@@ -2202,6 +2865,23 @@ fn main() {
                 .expect("output lock")
                 .take()
                 .expect("one pipeline output"))
+        }
+    }
+
+    fn successful_pipeline_output(stage_count: usize) -> PipelineOutput {
+        PipelineOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exits: std::iter::repeat_n(
+                ProcessExit {
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                },
+                stage_count,
+            )
+            .collect(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -2652,7 +3332,7 @@ fn main() {
                     _ => None,
                 }
             };
-        let runner = RecordingPipelineRunner::new(NativePipelineOutput {
+        let runner = RecordingPipelineRunner::new(PipelineOutput {
             stdout: b"pipeline-stdout\n".to_vec(),
             stderr: b"first-stderr\nsecond-stderr\n".to_vec(),
             exits: vec![
@@ -2667,6 +3347,7 @@ fn main() {
                     signal: None,
                 },
             ],
+            diagnostics: Vec::new(),
         });
 
         let execution = execute_source_with_runner(
@@ -2688,30 +3369,158 @@ fn main() {
             .expect("invocation lock")
             .clone()
             .expect("pipeline invocation");
-        assert_eq!(invocation.stages.len(), 2);
-        assert_eq!(
-            invocation.stages[0].executable,
-            PathBuf::from("/fixture/bin/first")
-        );
-        assert_eq!(invocation.stages[0].arguments, [OsString::from("alpha")]);
-        assert_eq!(
-            invocation.stages[1].executable,
-            PathBuf::from("/fixture/bin/second")
-        );
-        assert_eq!(
-            invocation.stages[1].arguments,
-            [OsString::from("beta gamma")]
-        );
+        let [
+            PipelineStageInvocation::Native(first),
+            PipelineStageInvocation::Native(second),
+        ] = invocation.stages.as_slice()
+        else {
+            panic!("expected two native stages");
+        };
+        assert_eq!(first.executable, PathBuf::from("/fixture/bin/first"));
+        assert_eq!(first.arguments, [OsString::from("alpha")]);
+        assert_eq!(second.executable, PathBuf::from("/fixture/bin/second"));
+        assert_eq!(second.arguments, [OsString::from("beta gamma")]);
         assert_eq!(invocation.capture_limit, super::MAX_READ_FILE_BYTES);
         assert!(invocation.closed_pipe_ends.is_empty());
-        assert!(
-            invocation
-                .stages
-                .iter()
-                .all(|stage| stage.capture_limit == invocation.capture_limit)
+        assert!(invocation.parent_pipe_ends.is_empty());
+        assert_eq!(invocation.final_stdout_pipe, None);
+        assert_eq!(first.capture_limit, invocation.capture_limit);
+        assert_eq!(second.capture_limit, invocation.capture_limit);
+
+        let mixed_runner = RecordingPipelineRunner::new(successful_pipeline_output(2));
+        let mixed = execute_source_with_runner(
+            "echo hello | native:second",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &mixed_runner,
+        )
+        .await;
+        assert_eq!(mixed.status().code(), 0);
+        assert!(mixed.diagnostics().is_empty());
+        let mixed_invocation = mixed_runner
+            .invocation
+            .lock()
+            .expect("mixed invocation lock")
+            .clone()
+            .expect("mixed pipeline invocation");
+        let [
+            PipelineStageInvocation::Portable(portable),
+            PipelineStageInvocation::Native(native),
+        ] = mixed_invocation.stages.as_slice()
+        else {
+            panic!("expected portable-to-native stages");
+        };
+        assert_eq!(portable.command, crate::PortableCommand::Echo);
+        assert_eq!(portable.arguments, [OsString::from("hello")]);
+        assert_eq!(portable.stdin_pipe, None);
+        assert_eq!(portable.stdout_pipe, ProcessPipeId::new(0));
+        assert_eq!(native.stdin, ProcessStdio::Pipe(ProcessPipeId::new(0)));
+        assert_eq!(
+            mixed_invocation.parent_pipe_ends,
+            [ParentProcessPipeEnd::Writer(ProcessPipeId::new(0))]
+        );
+        assert!(mixed_invocation.closed_pipe_ends.is_empty());
+        assert_eq!(mixed_invocation.final_stdout_pipe, None);
+
+        let final_portable_runner = RecordingPipelineRunner::new(successful_pipeline_output(2));
+        let final_portable = execute_source_with_runner(
+            "native:first | pwd",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &final_portable_runner,
+        )
+        .await;
+        assert_eq!(final_portable.status().code(), 0);
+        assert!(final_portable.diagnostics().is_empty());
+        let final_portable_invocation = final_portable_runner
+            .invocation
+            .lock()
+            .expect("final portable invocation lock")
+            .clone()
+            .expect("final portable pipeline invocation");
+        let [
+            PipelineStageInvocation::Native(native),
+            PipelineStageInvocation::Portable(portable),
+        ] = final_portable_invocation.stages.as_slice()
+        else {
+            panic!("expected native-to-portable stages");
+        };
+        assert_eq!(native.stdout, ProcessStdio::Pipe(ProcessPipeId::new(0)));
+        assert_eq!(portable.command, crate::PortableCommand::Pwd);
+        assert_eq!(portable.stdin_pipe, None);
+        assert_eq!(portable.stdout_pipe, ProcessPipeId::new(1));
+        assert_eq!(
+            final_portable_invocation.closed_pipe_ends,
+            [ClosedProcessPipeEnd::Reader(ProcessPipeId::new(0))]
+        );
+        assert_eq!(
+            final_portable_invocation.parent_pipe_ends,
+            [
+                ParentProcessPipeEnd::Reader(ProcessPipeId::new(1)),
+                ParentProcessPipeEnd::Writer(ProcessPipeId::new(1)),
+            ]
+        );
+        assert_eq!(
+            final_portable_invocation.final_stdout_pipe,
+            Some(ProcessPipeId::new(1))
         );
 
-        let redirected_runner = RecordingPipelineRunner::new(NativePipelineOutput {
+        let portable_runner = RecordingPipelineRunner::new(successful_pipeline_output(2));
+        let portable_only = execute_source_with_runner(
+            "echo alpha | grep -Fn alpha -",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &portable_runner,
+        )
+        .await;
+        assert_eq!(portable_only.status().code(), 0);
+        assert!(portable_only.diagnostics().is_empty());
+        let portable_invocation = portable_runner
+            .invocation
+            .lock()
+            .expect("portable invocation lock")
+            .clone()
+            .expect("portable pipeline invocation");
+        let [
+            PipelineStageInvocation::Portable(echo),
+            PipelineStageInvocation::Portable(grep),
+        ] = portable_invocation.stages.as_slice()
+        else {
+            panic!("expected two portable stages");
+        };
+        assert_eq!(echo.command, crate::PortableCommand::Echo);
+        assert_eq!(echo.stdin_pipe, None);
+        assert_eq!(echo.stdout_pipe, ProcessPipeId::new(0));
+        assert_eq!(grep.command, crate::PortableCommand::Grep);
+        assert_eq!(
+            grep.arguments,
+            [
+                OsString::from("-Fn"),
+                OsString::from("alpha"),
+                OsString::from("-"),
+            ]
+        );
+        assert_eq!(grep.stdin_pipe, Some(ProcessPipeId::new(0)));
+        assert_eq!(grep.stdout_pipe, ProcessPipeId::new(1));
+        assert!(portable_invocation.closed_pipe_ends.is_empty());
+        assert_eq!(
+            portable_invocation.parent_pipe_ends,
+            [
+                ParentProcessPipeEnd::Writer(ProcessPipeId::new(0)),
+                ParentProcessPipeEnd::Reader(ProcessPipeId::new(0)),
+                ParentProcessPipeEnd::Reader(ProcessPipeId::new(1)),
+                ParentProcessPipeEnd::Writer(ProcessPipeId::new(1)),
+            ]
+        );
+        assert_eq!(
+            portable_invocation.final_stdout_pipe,
+            Some(ProcessPipeId::new(1))
+        );
+
+        let redirected_runner = RecordingPipelineRunner::new(PipelineOutput {
             stdout: Vec::new(),
             stderr: Vec::new(),
             exits: vec![
@@ -2726,6 +3535,7 @@ fn main() {
                     signal: None,
                 },
             ],
+            diagnostics: Vec::new(),
         });
         let redirected = execute_source_with_runner(
             "native:first >producer.log | native:second <consumer.log",
@@ -2751,7 +3561,7 @@ fn main() {
             ]
         );
 
-        let duplicated_runner = RecordingPipelineRunner::new(NativePipelineOutput {
+        let duplicated_runner = RecordingPipelineRunner::new(PipelineOutput {
             stdout: Vec::new(),
             stderr: Vec::new(),
             exits: vec![
@@ -2766,6 +3576,7 @@ fn main() {
                     signal: None,
                 },
             ],
+            diagnostics: Vec::new(),
         });
         let duplicated = execute_source_with_runner(
             "native:first 2>&1 >producer.log | native:second",
@@ -2785,8 +3596,66 @@ fn main() {
             .expect("duplicated pipeline invocation");
         assert!(duplicated_invocation.closed_pipe_ends.is_empty());
 
+        let redirected_consumer_runner =
+            RecordingPipelineRunner::new(successful_pipeline_output(2));
+        let redirected_consumer = execute_source_with_runner(
+            "echo hi | native:second <consumer.log",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &redirected_consumer_runner,
+        )
+        .await;
+        assert_eq!(redirected_consumer.status().code(), 0);
+        assert!(redirected_consumer.diagnostics().is_empty());
+        let redirected_consumer_invocation = redirected_consumer_runner
+            .invocation
+            .lock()
+            .expect("redirected consumer invocation lock")
+            .clone()
+            .expect("redirected consumer pipeline invocation");
+        assert_eq!(
+            redirected_consumer_invocation.closed_pipe_ends,
+            [ClosedProcessPipeEnd::Reader(ProcessPipeId::new(0))]
+        );
+        assert_eq!(
+            redirected_consumer_invocation.parent_pipe_ends,
+            [ParentProcessPipeEnd::Writer(ProcessPipeId::new(0))]
+        );
+
+        let redirected_producer_runner =
+            RecordingPipelineRunner::new(successful_pipeline_output(2));
+        let redirected_producer = execute_source_with_runner(
+            "native:first >producer.log | cat -",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &redirected_producer_runner,
+        )
+        .await;
+        assert_eq!(redirected_producer.status().code(), 0);
+        assert!(redirected_producer.diagnostics().is_empty());
+        let redirected_producer_invocation = redirected_producer_runner
+            .invocation
+            .lock()
+            .expect("redirected producer invocation lock")
+            .clone()
+            .expect("redirected producer pipeline invocation");
+        assert_eq!(
+            redirected_producer_invocation.closed_pipe_ends,
+            [ClosedProcessPipeEnd::Writer(ProcessPipeId::new(0))]
+        );
+        assert_eq!(
+            redirected_producer_invocation.parent_pipe_ends,
+            [
+                ParentProcessPipeEnd::Reader(ProcessPipeId::new(0)),
+                ParentProcessPipeEnd::Reader(ProcessPipeId::new(1)),
+                ParentProcessPipeEnd::Writer(ProcessPipeId::new(1)),
+            ]
+        );
+
         state.options_mut().set_pipefail(true);
-        let successful_runner = RecordingPipelineRunner::new(NativePipelineOutput {
+        let successful_runner = RecordingPipelineRunner::new(PipelineOutput {
             stdout: Vec::new(),
             stderr: Vec::new(),
             exits: vec![
@@ -2801,6 +3670,7 @@ fn main() {
                     signal: None,
                 },
             ],
+            diagnostics: Vec::new(),
         });
         let successful = execute_source_with_runner(
             "native:first | native:second",
@@ -2813,7 +3683,7 @@ fn main() {
         assert_eq!(successful.status().code(), 0);
         assert!(successful.diagnostics().is_empty());
 
-        let pipefail_runner = RecordingPipelineRunner::new(NativePipelineOutput {
+        let pipefail_runner = RecordingPipelineRunner::new(PipelineOutput {
             stdout: Vec::new(),
             stderr: Vec::new(),
             exits: vec![
@@ -2833,6 +3703,7 @@ fn main() {
                     signal: None,
                 },
             ],
+            diagnostics: Vec::new(),
         });
         let pipefail = execute_source_with_runner(
             "native:first | native:second | native:third; echo $?",
@@ -2846,7 +3717,7 @@ fn main() {
         assert!(pipefail.stderr().is_empty());
         assert!(pipefail.diagnostics().is_empty());
 
-        let signaled_runner = RecordingPipelineRunner::new(NativePipelineOutput {
+        let signaled_runner = RecordingPipelineRunner::new(PipelineOutput {
             stdout: Vec::new(),
             stderr: Vec::new(),
             exits: vec![
@@ -2866,6 +3737,7 @@ fn main() {
                     signal: None,
                 },
             ],
+            diagnostics: Vec::new(),
         });
         let signaled = execute_source_with_runner(
             "native:first | native:second | native:third",
@@ -2879,13 +3751,14 @@ fn main() {
         assert_eq!(signaled.status().kind(), ShellStatusKind::Interrupted);
         assert_eq!(signaled.status().signal(), Some(15));
 
-        let rejected_runner = RecordingPipelineRunner::new(NativePipelineOutput {
+        let rejected_runner = RecordingPipelineRunner::new(PipelineOutput {
             stdout: Vec::new(),
             stderr: Vec::new(),
             exits: vec![],
+            diagnostics: Vec::new(),
         });
         let unsupported = execute_source_with_runner(
-            "echo hi | native:second",
+            "cd child | native:second",
             &mut state,
             &lookup,
             HostPlatform::Linux,
@@ -2898,7 +3771,7 @@ fn main() {
             unsupported.diagnostics()[0].code(),
             ExecutionDiagnosticCode::Unsupported
         );
-        assert_eq!(unsupported.diagnostics()[0].span(), SourceSpan::new(0, 7));
+        assert_eq!(unsupported.diagnostics()[0].span(), SourceSpan::new(0, 8));
         assert!(
             rejected_runner
                 .invocation
@@ -2907,6 +3780,67 @@ fn main() {
                 .is_none(),
             "unsupported stages must fail before spawn"
         );
+
+        let preflight_directory = TestDirectory::new();
+        let mut preflight_state = ShellState::new(&preflight_directory.0);
+        preflight_state
+            .environment_mut()
+            .insert("PATH", "/fixture/bin");
+        let invalid_arguments_runner = RecordingPipelineRunner::new(successful_pipeline_output(2));
+        let invalid_arguments = execute_source_with_runner(
+            "native:first >should-not-exist | grep -E '[' -",
+            &mut preflight_state,
+            &lookup,
+            HostPlatform::Linux,
+            &invalid_arguments_runner,
+        )
+        .await;
+        assert_eq!(invalid_arguments.status().code(), 2);
+        assert_eq!(invalid_arguments.diagnostics().len(), 1);
+        assert_eq!(
+            invalid_arguments.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::InvalidArguments
+        );
+        assert!(
+            invalid_arguments.diagnostics()[0]
+                .message()
+                .contains("regular expression is invalid")
+        );
+        assert!(
+            invalid_arguments_runner
+                .invocation
+                .lock()
+                .expect("invalid arguments invocation lock")
+                .is_none(),
+            "invalid portable arguments must fail before spawn"
+        );
+        assert!(!preflight_directory.0.join("should-not-exist").exists());
+
+        let portable_redirection_runner =
+            RecordingPipelineRunner::new(successful_pipeline_output(2));
+        let portable_redirection = execute_source_with_runner(
+            "echo hi >portable.log | native:second",
+            &mut preflight_state,
+            &lookup,
+            HostPlatform::Linux,
+            &portable_redirection_runner,
+        )
+        .await;
+        assert_eq!(portable_redirection.status().code(), 2);
+        assert_eq!(portable_redirection.diagnostics().len(), 1);
+        assert_eq!(
+            portable_redirection.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Unsupported
+        );
+        assert!(
+            portable_redirection_runner
+                .invocation
+                .lock()
+                .expect("portable redirection invocation lock")
+                .is_none(),
+            "portable redirection must fail before spawn"
+        );
+        assert!(!preflight_directory.0.join("portable.log").exists());
 
         let too_many = std::iter::repeat_n("native:first", super::MAX_NATIVE_PIPELINE_STAGES + 1)
             .collect::<Vec<_>>()
@@ -2978,7 +3912,7 @@ fn main() {
     }
 
     #[tokio::test]
-    async fn native_pipeline_streams_eight_megabytes_through_multiple_processes() {
+    async fn native_and_portable_pipelines_stream_with_backpressure_and_pipefail() {
         const PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 
         let directory = TestDirectory::new();
@@ -2988,6 +3922,9 @@ fn main() {
         state
             .environment_mut()
             .insert("PATH", directory.0.join("bin").into_os_string());
+        let expected: Vec<u8> = (0..PAYLOAD_BYTES)
+            .map(|index| u8::try_from(index % 251).expect("bounded byte"))
+            .collect();
         let source = format!(
             "{executable} produce {PAYLOAD_BYTES} | {executable} copy middle | {executable} copy final"
         );
@@ -3005,11 +3942,130 @@ fn main() {
             execution.stderr(),
             b"producer-stderr\nmiddle-stderr\nfinal-stderr\n"
         );
-        let expected: Vec<u8> = (0..PAYLOAD_BYTES)
-            .map(|index| u8::try_from(index % 251).expect("bounded byte"))
-            .collect();
         assert_eq!(execution.stdout().len(), expected.len());
         assert!(execution.stdout() == expected, "pipeline payload changed");
+
+        let portable_producer = execute_source(
+            &format!("echo portable-stage | {executable} copy echo"),
+            &mut state,
+        )
+        .await;
+        assert_eq!(portable_producer.status().code(), 0);
+        assert!(portable_producer.diagnostics().is_empty());
+        assert_eq!(portable_producer.stdout(), b"portable-stage\n");
+        assert_eq!(portable_producer.stderr(), b"echo-stderr\n");
+
+        let mixed_source =
+            format!("{executable} produce {PAYLOAD_BYTES} | cat - | {executable} copy mixed");
+        let mixed = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            execute_source(&mixed_source, &mut state),
+        )
+        .await
+        .expect("mixed pipeline completes without deadlock");
+        assert_eq!(mixed.status().code(), 0);
+        assert!(mixed.diagnostics().is_empty());
+        assert_eq!(mixed.stderr(), b"producer-stderr\nmixed-stderr\n");
+        assert_eq!(mixed.stdout().len(), expected.len());
+        assert!(mixed.stdout() == expected, "mixed pipeline payload changed");
+
+        let final_portable_source = format!("{executable} produce {PAYLOAD_BYTES} | cat -");
+        let final_portable = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            execute_source(&final_portable_source, &mut state),
+        )
+        .await
+        .expect("final portable capture completes without deadlock");
+        assert_eq!(final_portable.status().code(), 0);
+        assert!(final_portable.diagnostics().is_empty());
+        assert_eq!(final_portable.stderr(), b"producer-stderr\n");
+        assert_eq!(final_portable.stdout().len(), expected.len());
+        assert!(
+            final_portable.stdout() == expected,
+            "final portable capture changed the payload"
+        );
+
+        fs::write(
+            directory.0.join("search.txt"),
+            b"zero\nneedle one\nneedle two\nlast\n",
+        )
+        .expect("write portable pipeline input");
+        let searched = execute_source(
+            &format!("cat search.txt | grep -Fn needle - | {executable} copy grep"),
+            &mut state,
+        )
+        .await;
+        assert_eq!(searched.status().code(), 0);
+        assert!(searched.diagnostics().is_empty());
+        assert_eq!(searched.stdout(), b"2:needle one\n3:needle two\n");
+        assert_eq!(searched.stderr(), b"grep-stderr\n");
+
+        let echo_and_grep = execute_source("echo alpha | grep -F alpha -", &mut state).await;
+        assert_eq!(echo_and_grep.status().code(), 0);
+        assert!(echo_and_grep.diagnostics().is_empty());
+        assert_eq!(echo_and_grep.stdout(), b"alpha\n");
+        assert!(echo_and_grep.stderr().is_empty());
+
+        let pwd_and_cat = execute_source("pwd | cat -", &mut state).await;
+        assert_eq!(pwd_and_cat.status().code(), 0);
+        assert!(pwd_and_cat.diagnostics().is_empty());
+        assert_eq!(
+            pwd_and_cat.stdout(),
+            format!("{}\n", state.cwd().display()).as_bytes()
+        );
+        assert!(pwd_and_cat.stderr().is_empty());
+
+        let ls_and_grep = execute_source("ls -1 | grep -F search.txt -", &mut state).await;
+        assert_eq!(ls_and_grep.status().code(), 0);
+        assert!(ls_and_grep.diagnostics().is_empty());
+        assert_eq!(ls_and_grep.stdout(), b"search.txt\n");
+        assert!(ls_and_grep.stderr().is_empty());
+
+        let missing_without_pipefail = execute_source(
+            &format!("cat missing-input | {executable} copy missing; echo $?"),
+            &mut state,
+        )
+        .await;
+        assert_eq!(missing_without_pipefail.status().code(), 0);
+        assert_eq!(missing_without_pipefail.stdout(), b"0\n");
+        assert_eq!(missing_without_pipefail.diagnostics().len(), 1);
+        assert_eq!(
+            missing_without_pipefail.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Filesystem
+        );
+        assert!(
+            missing_without_pipefail.diagnostics()[0]
+                .message()
+                .contains("missing-input")
+        );
+        assert!(
+            missing_without_pipefail
+                .stderr()
+                .starts_with(b"missing-stderr\nash: cannot read `missing-input`")
+        );
+
+        state.options_mut().set_pipefail(true);
+        let missing_with_pipefail = execute_source(
+            &format!("cat missing-input | {executable} copy missing; echo $?"),
+            &mut state,
+        )
+        .await;
+        assert_eq!(missing_with_pipefail.status().code(), 0);
+        assert_eq!(missing_with_pipefail.stdout(), b"1\n");
+        assert_eq!(missing_with_pipefail.diagnostics().len(), 1);
+
+        let broken_pipe = execute_source(
+            &format!("{executable} produce-soft {PAYLOAD_BYTES} | pwd; echo $?"),
+            &mut state,
+        )
+        .await;
+        assert_eq!(broken_pipe.status().code(), 0);
+        assert!(broken_pipe.diagnostics().is_empty());
+        assert_eq!(
+            broken_pipe.stdout(),
+            format!("{}\n9\n", state.cwd().display()).as_bytes()
+        );
+        assert!(broken_pipe.stderr().is_empty());
     }
 
     #[tokio::test]
@@ -3114,14 +4170,14 @@ fn main() {
                 126,
                 ShellStatusKind::SpawnError,
                 "cannot execute `/fixture/bin/tool`: the process did not expose its captured stdout",
-                "cannot execute native pipeline: the process did not expose its captured final stdout",
+                "cannot execute pipeline: the process did not expose its captured final stdout",
             ),
             (
                 true,
                 1,
                 ShellStatusKind::Exited,
                 "native command output exceeds the 134217728-byte synchronous shell capture ceiling",
-                "native pipeline output exceeds the 134217728-byte synchronous shell capture ceiling",
+                "pipeline output exceeds the 134217728-byte synchronous shell capture ceiling",
             ),
         ] {
             for (source, message) in [("tool", command_message), ("tool | tool", pipeline_message)]

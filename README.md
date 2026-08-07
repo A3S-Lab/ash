@@ -32,13 +32,14 @@ and `exit [STATUS]`. The same persistent state executes sequential `pwd`,
 and `grep`, plus native host executables with direct argument vectors. Inline
 source, native script files, and bounded stdin remain available without changing
 the machine contracts of `ash run` and `ash rpc`. H2 now provides explicit
-process-stdio modes, validated native OS pipe graphs, same-line native pipelines
-of two to 32 stages, configurable `pipefail`, and source-ordered native
-redirections. Every stage is preflighted before spawn and connected through
-direct OS handles. Redirections may replace internal pipeline endpoints: ash
-closes the unused parent end so downstream readers receive EOF or upstream
-writers receive the native broken-pipe behavior. Unredirected final stdout and
-stderr share the remaining bounded capture allowance.
+process-stdio modes, validated native OS pipe graphs, same-line pipelines of two
+to 32 native or portable stages, configurable `pipefail`, and source-ordered
+native redirections. Every stage is preflighted before execution. Native pairs
+remain directly connected; boundaries involving `pwd`, `echo`, `ls`, `cat`, or
+`grep` use explicit parent-owned asynchronous pipe ends and preserve OS
+backpressure. Replaced internal endpoints still deliver EOF or native
+broken-pipe behavior. Final stdout and native stderr share the remaining bounded
+capture allowance.
 
 ## What ash covers
 
@@ -52,7 +53,7 @@ stderr share the remaining bounded capture allowance.
 | Retained evidence    | `/ # ? - \| >`                        | Byte and line slices, search, release, ordered table projection, and capability-gated materialization                                                                  |
 | Model context        | ASON, `×N`, `×N#K`, `⋯N`              | Columnar records, path dictionaries, explicit reductions, stable merge, and references back to the full source                                                         |
 | Trust and delivery   | capabilities, permits, signed updates | Least-privilege negotiation, session/action/policy/expiry-bound one-time permits, replay rejection, transactional activation, recovery, rollback, SBOM, and provenance |
-| Human shell          | `ash shell`                           | H1 REPL lifecycle and commands plus H2 native pipelines, configurable `pipefail`, ordered native redirections, and internal endpoint replacement                       |
+| Human shell          | `ash shell`                           | H1 REPL lifecycle and commands plus H2 native/portable pipelines, configurable `pipefail`, ordered native redirections, and internal endpoint replacement              |
 
 The [complete capability map](https://a3s-lab.github.io/ash/guide/capabilities.html)
 documents guarantees, evidence, and deliberate non-goals for the full surface.
@@ -117,13 +118,16 @@ line, and supports `-a`/`--all`, `-d`/`--directory`, `-1`, combined short
 options, and `--`. Unsupported GNU options fail clearly.
 Portable `cat` requires one file path, writes its bytes without conversion or
 an added newline, accepts `--`, and shares the 128 MiB semantic read/capture
-ceiling. Options, multiple files, and the stdin operand `-` remain explicit
-errors until streaming stdio lands.
+ceiling. In a multi-stage pipeline, `cat -` consumes the incoming byte stream;
+the standalone stdin operand remains an explicit error. Options and multiple
+files are not implemented.
 Portable `grep` requires one valid-UTF-8 regular file and uses Rust regular
 expressions by default. It supports `-E`/`--extended-regexp`,
 `-F`/`--fixed-strings`, `-i`/`--ignore-case`, `-n`/`--line-number`, combined
 short options, and `--`. A search is limited to 64 MiB; no matches return status
-1 without a diagnostic. Directories, multiple files, stdin `-`, and unsupported
+1 without a diagnostic. In a multi-stage pipeline, `grep PATTERN -` consumes
+the incoming UTF-8 stream with the same search semantics and a 128 MiB output
+ceiling. Directories, multiple files, standalone stdin `-`, and unsupported
 options fail explicitly.
 
 `export NAME=VALUE` and `unset NAME` update both shell-variable and exported
@@ -164,28 +168,35 @@ order. Missing, ambiguous, or unopenable targets return status 1 with a
 redirection diagnostic. Redirections on stateful, portable, or WSL commands are
 rejected before side effects.
 
-A same-line `|` forms a foreground pipeline of two to 32 native host commands.
-Every stage is expanded, UTF-8 checked, resolved, and confirmed native before
-any child starts. Intermediate stdout travels directly through OS pipes;
-unredirected final stdout is returned, while unredirected stderr is captured
-concurrently and appended in stage order. Pipeline status defaults to the final
-stage. With
-`set -o pipefail`, it becomes the rightmost unsuccessful stage, including
-conventional `128 + signal` mapping; an all-success pipeline still uses its
-final stage. Stateful and portable commands, aliases, functions, and WSL stages
-fail explicitly before spawn because their streaming adapters do not exist yet.
-Any native stage may redirect stdin, stdout, or stderr or duplicate descriptors
-in source order. If a producer no longer writes an internal pipe, the downstream
-reader receives EOF. If a consumer replaces its pipe stdin, the upstream writer
-receives the platform's broken-pipe behavior; the usual final-stage or
-`pipefail` policy selects the visible pipeline status. A descriptor duplicated
-from the pipe remains connected even if the original descriptor is later
-redirected.
+A same-line `|` forms a foreground pipeline of two to 32 stages. Each stage may
+be a native host command or portable `pwd`, `echo`, `ls`, `cat`, or `grep`;
+stateful commands, aliases, functions, and WSL stages still fail during complete
+preflight. Native-to-native edges remain direct OS pipes. A portable boundary
+retains only the explicitly declared parent reader or writer and runs the
+portable operation as a concurrent bounded task. Native streams and portable
+`cat`/`grep` streams are not materialized as a whole before the next stage, and
+normal OS backpressure applies. Only
+`cat -` and `grep PATTERN -` consume incoming stdin. Other portable forms close
+that reader, allowing an upstream writer and `pipefail` to observe broken-pipe
+failure. A final portable stage is captured concurrently under the same 128 MiB
+aggregate allowance; native stderr is captured in stage order.
 
-User-visible terminal streaming, unified pipeline job supervision,
-builtin/portable/WSL redirection and pipeline adapters, foreground interactive
-programs and job control, broader expansion, mutations, and WSL execution are
-not implemented yet. A minimal machine-only binary can be built with
+Pipeline status defaults to the final stage. With `set -o pipefail`, it becomes
+the rightmost unsuccessful stage, including conventional `128 + signal`
+mapping; an all-success pipeline still uses its final stage. A missing portable
+file, no-match `grep`, or broken portable writer participates in that same exit
+vector. Any native stage may redirect stdin, stdout, or stderr or duplicate
+descriptors in source order. If a producer no longer writes an internal pipe,
+the downstream reader receives EOF. If a consumer replaces its pipe stdin, the
+upstream writer receives the platform's broken-pipe behavior. A descriptor
+duplicated from the pipe remains connected even if the original descriptor is
+later redirected. Portable-stage redirections remain unsupported and fail
+before runner or file side effects.
+
+User-visible terminal streaming, unified pipeline job supervision, stateful
+builtin and WSL pipeline adapters, portable/builtin/WSL redirection adapters,
+foreground interactive programs and job control, broader expansion, mutations,
+and WSL execution are not implemented yet. A minimal machine-only binary can be built with
 `--no-default-features`.
 
 ## First typed request

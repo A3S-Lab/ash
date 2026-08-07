@@ -1,6 +1,6 @@
 # Portable Human Shell Architecture
 
-- Status: accepted; H1 plus six native H2 checkpoints implemented
+- Status: accepted; H1 plus seven H2 checkpoints implemented
 - Target: post-ASH/1 version one
 - Last updated: 2026-08-08
 
@@ -24,14 +24,16 @@ stdin, and native script-file sources. One persistent state executes sequential
 `pwd`, `echo`, `cd`, `export`/`unset`, `set` pipefail control, portable `ls`,
 bounded raw-byte `cat` and text `grep`, source-spanned named and last-status
 expansion, and direct-argv native host commands. H2 adds explicit per-stream
-modes, validated direct OS pipe graphs, same-line native-only pipelines of two
-to 32 stages, configurable `pipefail`, and source-ordered native
-redirections. All stages are expanded and resolved before spawn; intermediate
-stdout uses direct pipes, while unredirected final stdout and stage-ordered
-stderr remain bounded captures. Native file output attaches directly to OS
-handles. Foreground interactive programs and jobs, terminal streaming, unified
-pipeline supervision, builtin/portable/WSL redirection and pipeline adapters,
-broader expansion, mutations, and WSL launch remain unimplemented.
+modes, validated direct OS pipe graphs, same-line pipelines of two to 32 native
+or implemented portable stages, configurable `pipefail`, and source-ordered
+native redirections. All stages are expanded and resolved before execution;
+native pairs use direct pipes, while portable boundaries retain explicit async
+parent ends and run as concurrent bounded tasks. Unredirected final stdout and
+stage-ordered native stderr remain bounded captures. Native file output attaches
+directly to OS handles. Foreground interactive programs and jobs, terminal
+streaming, unified job supervision, stateful-builtin and WSL pipeline adapters,
+non-native redirections, broader expansion, mutations, and WSL launch remain
+unimplemented.
 
 ## 1. Executive decision
 
@@ -402,8 +404,8 @@ The first portable command set reuses existing semantics where possible:
 | `pwd`, `cd` | shell state | Native paths; forward slashes accepted on Windows. |
 | `echo`, `printf` | shell builtin | Exact documented escaping, not host-shell delegation. |
 | `ls` | list service | Familiar common options; not all GNU options. |
-| `cat` | read service | Bounded raw bytes now; streaming and text modes later. |
-| `grep` | search service | Bounded single-file literal and Rust-regex modes now. |
+| `cat` | read service | Bounded raw bytes plus async pipeline streaming now; text modes later. |
+| `grep` | search service | Bounded single-file or pipeline-input literal and Rust-regex modes now. |
 | `cp`, `mv`, `rm`, `touch` | filesystem service | Preserve transactional conflict behavior. |
 | `mkdir`, `rmdir` | future directory service | Requires explicit recovery and capability design. |
 | `env`, `export`, `unset` | shell state | Literal single-name `export`/`unset` now; listing later. |
@@ -420,10 +422,11 @@ workspace confinement.
 The current executable `cat` contract requires exactly one native file path and
 accepts `--` for a leading-dash operand. It writes exact file bytes without text
 conversion or an added newline. The semantic per-file read ceiling and the
-aggregate synchronous shell capture ceiling are both 128 MiB. Options, multiple
-files, and the standard-input operand `-` fail explicitly. Generalized
-streaming, multi-file concatenation, and text modes remain tied to the H2 stdio
-plan rather than pretending that the current buffered executor is streaming.
+aggregate synchronous shell capture ceiling are both 128 MiB. In a multi-stage
+pipeline, `cat -` consumes the incoming stream asynchronously, while `cat PATH`
+streams that file and closes any incoming reader. The standalone standard-input
+operand still fails explicitly because standalone stdin remains null. Options,
+multi-file concatenation, and text modes remain later work.
 
 The current executable `grep` contract requires one pattern and one native
 regular-file path. Rust regular expressions are the default; `-E`/
@@ -435,7 +438,11 @@ MiB, and the rendered result cannot take synchronous shell capture above 128
 MiB. No matches return status 1 without a diagnostic. Invalid regular
 expressions and argument errors return status 2; missing files, directories,
 non-UTF-8 input, and work-limit failures return status 1. Recursive search,
-multiple files, filename prefixes, stdin `-`, and streaming remain later work.
+multiple files, and filename prefixes remain later work. In a multi-stage
+pipeline, `grep PATTERN -` consumes incoming UTF-8 asynchronously; a path operand
+streams that file and closes any incoming reader. Both preserve the same CRLF,
+matching, 64 MiB input, 128 MiB output, and no-match status contracts. The
+standalone stdin operand remains an explicit error.
 
 The current stateful environment contract accepts exactly one expanded
 `NAME=VALUE` argument for `export` and exactly one expanded `NAME` for `unset`.
@@ -590,6 +597,35 @@ writer. Any native stage may now replace stdin, stdout, or stderr. The existing
 final-stage and `pipefail` status policies expose downstream success or an
 upstream broken-pipe failure without adding a special shell status.
 
+The seventh H2 checkpoint adds
+`spawn_native_graph_with_parent_pipe_ends`,
+`ParentProcessPipeEnd::{Reader, Writer}`, and `NativeProcessGraph`. For every
+pipe, each end must now be selected exactly once as child-owned, explicitly
+closed, or parent-owned. Duplicate or conflicting ownership and remaining gaps
+still fail before file opens or process side effects. The graph wrapper exposes
+only declared parent readers and writers through take methods, while native
+child-to-child edges stay direct and process handles remain in specification
+order. A parent-to-parent 8 MiB regression locks asynchronous backpressure even
+when a graph contains no native child.
+
+Shell lowering uses those retained ends for portable `pwd`, `echo`, `ls`,
+`cat`, and `grep` stages. All portable arguments and `grep` regular expressions
+are validated before the runner or native file-open effects begin, and portable
+redirections remain rejected at that boundary. `cat -` and
+`grep PATTERN -` consume the incoming pipe. `pwd`, `echo`, `ls`, and the path
+forms of `cat` and `grep` deliberately do not; their reader is closed so a large
+upstream native producer receives normal broken-pipe behavior. Every portable
+stage writes to the next pipe, while a final portable stage writes to a separate
+parent-to-parent pipe captured concurrently with native stderr. `cat` copies
+bytes asynchronously under its 128 MiB ceiling. Streaming `grep` preserves
+UTF-8, CRLF, regex/fixed-string, case, line-number, 64 MiB input, 128 MiB output,
+and no-match status semantics. The runner polls portable tasks, native captures,
+and native waits together, merges portable diagnostics in stage order, and
+feeds every stage exit into the existing final-stage or `pipefail` selection.
+Mixed and portable-only regressions lock exact bytes across an 8 MiB
+native-to-portable-to-native path, final portable capture, early EOF,
+broken-pipe status, and CLI execution.
+
 ## 12. Streaming pipelines
 
 Add a dedicated platform-neutral I/O model:
@@ -618,22 +654,23 @@ Pipeline construction follows this lifecycle:
 9. reap every child and release all handles.
 
 The current checkpoint implements native graph validation, pipe creation,
-consumer-first spawn, parent-handle closure, the bounded native-only shell
-lowering, default final-stage status, and configurable rightmost-failure
-selection. It also implements ordered native file and descriptor redirections,
-whole-plan validation before file opens, shared OS file/capture resources, and
-explicit parent-closed internal endpoints that preserve OS EOF and broken-pipe
-semantics. Capacity reservation, unified job supervision, and
-builtin/portable/WSL streaming and redirection adapters remain open.
+consumer-first spawn, explicit closed or retained parent ends, bounded
+native/portable shell lowering, default final-stage status, and configurable
+rightmost-failure selection. It also implements ordered native file and
+descriptor redirections, whole-plan validation before file opens, shared OS
+file/capture resources, and endpoint ownership that preserves OS EOF,
+broken-pipe, and backpressure semantics across native and portable boundaries.
+Capacity reservation, unified job supervision, stateful-builtin and WSL
+streaming, and non-native redirection adapters remain open.
 
 Data flows directly through OS pipes. It does not pass through ASON or the
 result store, and it is not materialized in memory before the next command
 starts. This preserves backpressure and permits unbounded streams within normal
 OS and job limits.
 
-Portable in-process builtins in a pipeline run as bounded asynchronous tasks
-connected to the same stream abstraction. A stateful builtin in a pipeline uses
-subshell state.
+The five implemented portable commands run in a pipeline as bounded
+asynchronous tasks connected to retained OS pipe ends. Stateful builtins in
+subshell state remain a later adapter.
 
 Mixed native/WSL pipelines may exchange byte streams, but they do not share a
 filesystem namespace or process group. Their job metadata must expose the
@@ -754,12 +791,12 @@ native exit are distinct diagnostic categories. Human diagnostics carry source
 spans and remediation where known. Machine errors remain stable numeric ASH/1
 records.
 
-The current native-only pipeline slice defaults to last-command status.
-`set -o pipefail` persistently selects the rightmost unsuccessful status;
-`set +o pipefail` restores the default, and all-success pipelines still use the
-last command. Signals map to `128 + signal`. Backend-specific native codes remain
-available through job inspection once unified supervision exists, even when the
-language exposes a normalized status.
+The current native/portable pipeline slice defaults to last-command status.
+`set -o pipefail` persistently selects the rightmost unsuccessful native or
+portable status; `set +o pipefail` restores the default, and all-success
+pipelines still use the last command. Signals map to `128 + signal`.
+Backend-specific native codes remain available through job inspection once
+unified supervision exists, even when the language exposes a normalized status.
 
 ## 18. Configuration and startup
 
@@ -888,29 +925,33 @@ and external-command operands retain native representation. `ls`, `cat`, and
 native provider and the option contracts in section 10. Native programs resolve
 from the persistent environment, launch through the owned `ash-platform`
 process boundary with exact argv/cwd/environment, and use the bounded capture
-contract in section 11. A same-line native-only pipeline connects two to 32
-fully preflighted stages with direct OS pipes. Status defaults to the final
-stage; `set -o pipefail` selects the rightmost unsuccessful stage and
-`set +o pipefail` restores the default. Native stages accept the ordered
-redirection subset in section 11; files resolve against persistent cwd and
-attach directly to child handles. A simple native command and an unredirected
-first pipeline stage still receive null stdin, so foreground terminal programs
-and Ctrl+C job-tree delivery remain H4 rather than being claimed by this REPL
-checkpoint. The `human-shell` feature is enabled for the normal binary and can
-be disabled for a minimal machine-only build. Broader expansion, terminal
-streaming, unified pipeline supervision, mutations, builtin/portable/WSL
-pipeline and redirection adapters, job control, and WSL launch remain for later
-increments.
+contract in section 11. A same-line pipeline connects two to 32 fully
+preflighted native or implemented portable stages. Native pairs use direct OS
+pipes; portable boundaries use retained asynchronous ends without removing
+backpressure. Status defaults to the final stage; `set -o pipefail` selects the
+rightmost unsuccessful stage and `set +o pipefail` restores the default. Native
+stages accept the ordered redirection subset in section 11; files resolve
+against persistent cwd and attach directly to child handles. A simple native
+command and an unredirected first pipeline stage still receive null stdin, so
+foreground terminal programs and Ctrl+C job-tree delivery remain H4 rather
+than being claimed by this REPL checkpoint. The `human-shell` feature is enabled
+for the normal binary and can be disabled for a minimal machine-only build.
+Broader expansion, terminal streaming, unified job supervision, mutations,
+stateful-builtin and WSL pipeline adapters, non-native redirections, job control,
+and WSL launch remain for later increments.
 
 ### H2: streaming execution
 
 - generalized stdio endpoints and validated direct OS pipes are implemented;
-- native-only foreground pipeline lowering, final-stage status, and configurable
-  rightmost-failure `pipefail` are implemented;
+- native/portable foreground pipeline lowering, final-stage status, and
+  configurable rightmost-failure `pipefail` are implemented;
 - ordered native file and descriptor redirections are implemented;
 - internal native pipeline endpoint replacement with explicit parent-closed
   ends is implemented;
-- builtin/portable/WSL streaming and redirection adapters remain open;
+- explicit parent-owned endpoints plus `pwd`/`echo`/`ls`/`cat`/`grep` streaming
+  adapters are implemented;
+- stateful-builtin and WSL streaming plus non-native redirection adapters remain
+  open;
 - unified multi-process supervision remains open.
 
 Current checkpoint: the shared platform process boundary requires explicit
@@ -918,18 +959,23 @@ selection for every standard stream. Machine callers preserve their behavior
 through `Null`, `Piped`, and `Inherit`; graph-only `Pipe(ProcessPipeId)` connects
 validated acyclic native graphs directly through OS pipes. `File(ProcessFileId)`
 and `Capture(ProcessCaptureId)` provide source-ordered native opens and shared
-parent-facing captures. The shell lowers same-line, two-to-32-stage native-only
-pipelines after complete preflight, applies the persistent
-`set -o pipefail`/`set +o pipefail` policy to the ordered exit vector, and lowers
-the seven supported redirection forms left to right. Explicit parent-closed
-reader/writer markers let any native stage replace an internal endpoint while
-preserving EOF, broken-pipe, descriptor-duplication, and `pipefail` behavior.
-Four 8 MiB regressions lock parent-facing, child-to-child, shell-level, and
-closed-reader exact bytes, EOF, backpressure, deterministic stderr order, and
-cross-platform completion; additional regressions lock superseded-file effects,
-descriptor sharing, relative input, append behavior, closed-end validation, and
-preflight rejection. Unified shell supervision and builtin/portable/WSL
-streaming and redirection adapters remain open.
+parent-facing captures. Explicit `ParentProcessPipeEnd` ownership exposes only
+validated async readers and writers from `NativeProcessGraph`. The shell lowers
+same-line, two-to-32-stage native/portable pipelines after complete preflight,
+applies the persistent `set -o pipefail`/`set +o pipefail` policy to the ordered
+exit vector, and lowers the seven supported native redirection forms left to
+right. Explicit parent-closed reader/writer markers let any native stage replace
+an internal endpoint while preserving EOF, broken-pipe,
+descriptor-duplication, and `pipefail` behavior. Portable `pwd`, `echo`, `ls`,
+`cat`, and `grep` tasks stream on retained ends; `cat -` and `grep PATTERN -`
+consume incoming stdin, and final portable output joins bounded capture. The
+8 MiB regressions lock parent-facing, parent-to-parent, child-to-child, native,
+mixed, and closed-reader exact bytes, EOF, backpressure, deterministic stderr
+order, and cross-platform completion; additional regressions lock portable-only
+execution, superseded-file effects, descriptor sharing, relative input, append
+behavior, endpoint validation, and preflight rejection. Unified job
+supervision, stateful-builtin and WSL streaming, and non-native redirection
+adapters remain open.
 
 ### H3: mutations and command language
 

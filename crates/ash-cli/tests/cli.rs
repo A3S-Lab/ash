@@ -761,6 +761,22 @@ fn shell_command_launches_native_argv_with_persistent_cwd_and_environment() {
     assert_eq!(pipeline.stdout, b"pipeline-data\n");
     assert!(pipeline.stderr.is_empty());
 
+    let mixed_pipeline_source = format!(
+        "export PATH=bin; echo cli-portable | {executable} --copy | grep -F cli-portable -"
+    );
+    let mixed_pipeline = run_in(
+        &directory,
+        &["shell", "--no-profile", "-c", &mixed_pipeline_source],
+        b"",
+    );
+    assert!(
+        mixed_pipeline.status.success(),
+        "stderr={:?}",
+        mixed_pipeline.stderr
+    );
+    assert_eq!(mixed_pipeline.stdout, b"cli-portable\n");
+    assert!(mixed_pipeline.stderr.is_empty());
+
     let pipefail_source = format!(
         "export PATH=bin; {executable} --exit 9 | {executable} --exit 7 | {executable} --copy; echo $?; set -o pipefail; {executable} --exit 9 | {executable} --exit 7 | {executable} --copy; echo $?; set +o pipefail; {executable} --exit 9 | {executable} --exit 7 | {executable} --copy; echo $?"
     );
