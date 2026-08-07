@@ -4,6 +4,10 @@ set	builtin:set
 ll	alias:ll:ls -la
 deploy	function:deploy
 cat	portable:cat
+cp	portable:cp
+mv	portable:mv
+rm	portable:rm
+touch	portable:touch
 cargo	native:/fixture/bin/cargo:implicit
 native:cargo	native:/fixture/bin/cargo:explicit
 linux:make	wsl:Ubuntu:make

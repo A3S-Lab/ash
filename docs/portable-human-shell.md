@@ -1,6 +1,6 @@
 # Portable Human Shell Architecture
 
-- Status: accepted; H1 plus eleven H2 checkpoints implemented
+- Status: accepted; H1, eleven H2 checkpoints, and the first H3 checkpoint implemented
 - Target: post-ASH/1 version one
 - Last updated: 2026-08-08
 
@@ -15,14 +15,15 @@ weakening their machine-facing semantics.
 The current source checkpoint has completed H0 with the independent
 `a3s-ash-shell` crate, a source-spanned simple-command parser, AST, diagnostics,
 persistent state types, deterministic command classification, locked parser and
-resolution fixtures, and provider-neutral raw read/list/search semantic
-services. Existing ASH/1 adapters reuse those services while retaining permit,
+resolution fixtures, provider-neutral raw read/list/search semantic services,
+and a shared raw mutation transaction service. Existing ASH/1 adapters reuse those services while retaining permit,
 deadline, budget, projection, retention, and ASON ownership. H1 now provides a
 feature-gated, line-edited `ash shell` REPL with configurable prompt, private
 persistent history, opt-in Profile startup, and `exit`, plus inline, bounded
 stdin, and native script-file sources. One persistent state executes sequential
 `pwd`, `echo`, `cd`, `export`/`unset`, `set` pipefail control, portable `ls`,
-bounded raw-byte `cat` and text `grep`, source-spanned named and last-status
+bounded raw-byte `cat` and text `grep`, journaled regular-file `cp`/`mv`/`rm`
+and create-only `touch`, source-spanned named and last-status
 expansion, and direct-argv native host commands. H2 adds explicit per-stream
 modes, validated direct OS pipe graphs, same-line pipelines of two to 32 native,
 explicit WSL, implemented portable, or implemented stateful-builtin stages,
@@ -39,8 +40,10 @@ failure while the shell polls in-process stages and captures under the same
 completion boundary.
 The explicit Windows adapter discovers `wsl.exe`, constructs exact
 `--distribution`/`--cd`/`--exec` argv, and reuses that graph for WSL streaming
-and host-file redirection. Foreground interactive programs and jobs, terminal
-streaming, broader expansion, mutations, and the remaining WSL policy, general
+and host-file redirection. The first H3 checkpoint binds portable file
+mutations to the persistent cwd and reuses the ASH/1 journaled transaction
+boundary. Foreground interactive programs and jobs, terminal streaming,
+broader expansion and command language, and the remaining WSL policy, general
 path/environment mapping, and interruption contracts remain unimplemented.
 
 ## 1. Executive decision
@@ -452,6 +455,28 @@ streams that file and closes any incoming reader. Both preserve the same CRLF,
 matching, 64 MiB input, 128 MiB output, and no-match status contracts. The
 standalone stdin operand remains an explicit error.
 
+The first executable mutation contract accepts `cp SOURCE DESTINATION`,
+`mv SOURCE DESTINATION`, `rm PATH`, and `touch PATH`, with `--` as the only
+option delimiter. All operands must identify journal-representable paths below
+the persistent cwd, which becomes the durable transaction workspace. Absolute
+paths inside that root and native Windows separators are normalized; parent
+traversal, escape, symbolic-link/reparse traversal, directories, empty paths,
+and non-UTF-8 journal components fail explicitly. Sources are regular files no
+larger than 128 MiB. Copy, move, and touch never overwrite. `touch` creates one
+new empty file and deliberately does not update an existing file's timestamp in
+this checkpoint. Copy, move, and remove derive the current BLAKE3 source
+identity immediately before execution, then the shared transaction revalidates
+the preimage. A conflict is surfaced without retry and leaves the external
+change or existing destination untouched. The root's reserved `.ash` state
+directory owns cross-process serialization, rollback, and restart recovery.
+
+Mutation arguments preflight with the rest of a pipeline. The stage closes
+incoming stdin, emits no stdout, and reports its transaction status through the
+ordinary final-stage/`pipefail` vector. All selected redirection files open in
+global source order before the transaction begins; a failed open blocks the
+mutation, while a later conflict retains normal create/truncate side effects
+from those already-opened files.
+
 The current stateful environment contract accepts exactly one expanded
 `NAME=VALUE` argument for `export` and exactly one expanded `NAME` for `unset`.
 Both accept `--`. Names are non-empty ASCII identifiers beginning with a letter
@@ -740,6 +765,21 @@ preflight, redirection, mixed endpoints, and backend selection. A Windows-only
 test streams an 8 MiB host fixture between two real WSL processes when
 `ASH_TEST_WSL_DISTRIBUTION` names a prepared distribution.
 
+The first H3 checkpoint adds `SemanticMutationServices` below both ASH/1 `fs`
+and the human shell. Machine callers continue to supply protocol-owned
+preimages and receive byte-identical responses. Interactive `cp`, `mv`, and
+`rm` derive their source preimage immediately before entering the same
+transaction, while create-only `touch` prepares an empty no-overwrite create.
+Every action is revalidated beneath the transaction lock, so a race becomes a
+typed conflict rather than a retry or overwrite. The shell runs that bounded
+synchronous transaction on Tokio's blocking plane after argument and
+redirection preflight. Simple commands and pipeline stages share the same
+implementation; stages close stdin, produce EOF on stdout, and retain ordinary
+ordered status selection. Service regressions lock multi-action commit,
+destination preservation, and stale-preimage conflict, while shell regressions
+lock all four commands, path/option rejection, redirection-before-mutation, and
+`pipefail` participation.
+
 ## 12. Streaming pipelines
 
 Add a dedicated platform-neutral I/O model:
@@ -986,6 +1026,12 @@ and leaves the line editor and in-memory session usable.
 - conflict and rollback tests for interactive mutations;
 - exact-byte tests for binary `cat` and pipeline transport.
 
+Current mutation coverage locks shared multi-action commit, destination
+preservation, stale-preimage conflict without retry, all four shell commands,
+option/arity/path rejection, redirection-before-mutation ordering, and pipeline
+`pipefail` participation. Platform transaction tests continue to own the full
+rollback and restart-recovery cutpoint matrix.
+
 ### 19.3 Pipelines and jobs
 
 - producer/consumer concurrency and backpressure;
@@ -1034,8 +1080,8 @@ H5 probe contract.
 
 Current checkpoint: every H0 item is implemented. Semantic paths use
 provider-owned `PathBuf` values plus collision-free stable ordering keys, and
-byte-exact regression fixtures prove that the ASH/1 read/list/search responses
-remain unchanged. H1 began with the non-interactive CLI route and portable
+byte-exact regression fixtures prove that the ASH/1 read/list/search and `fs`
+responses remain unchanged. H1 began with the non-interactive CLI route and portable
 builtin adapters, then added the terminal lifecycle without changing ASH/1.
 
 ### H1: native shell foundation
@@ -1053,7 +1099,8 @@ or one native script path. Opt-in `--profile FILE`/`ASH_PROFILE` startup uses
 the same dialect and input ceiling, while `--no-profile` remains the recovery
 route. Every source parses the current subset and executes `pwd`, `echo`,
 `cd`, expanded `export`/`unset`, `set` pipefail control, portable `ls`, bounded
-raw-byte `cat`, bounded text `grep`, and native host executables against one native `ShellState`, with
+raw-byte `cat`, bounded text `grep`, journaled `cp`/`mv`/`rm`, create-only
+`touch`, and native host executables against one native `ShellState`, with
 source-spanned human diagnostics and conventional status propagation. Named
 `$NAME`/`${NAME}` parameters and `$?` expand in a distinct, quote-aware stage
 with native-string preservation and the fixed field contract in section 7.1.
@@ -1076,9 +1123,9 @@ command and an unredirected first pipeline stage still receive null stdin, so
 foreground terminal programs and Ctrl+C job-tree delivery remain H4 rather
 than being claimed by this REPL checkpoint. The `human-shell` feature is enabled
 for the normal binary and can be disabled for a minimal machine-only build.
-Broader expansion, terminal streaming, mutations, job control, and the remaining
-WSL detection, policy, path, environment, and interruption contracts remain for
-later increments.
+Broader expansion and command language, terminal streaming, job control, and
+the remaining WSL detection, policy, path, environment, and interruption
+contracts remain for later increments.
 
 ### H2: streaming execution
 
@@ -1137,10 +1184,19 @@ ordered host-file redirection, and backend-aware `pipefail` status.
 
 ### H3: mutations and command language
 
-- add portable `cp`, `mv`, `rm`, and `touch` adapters;
+- portable `cp`, `mv`, `rm`, and create-only `touch` adapters are implemented;
 - add conditional lists, command substitution, globbing, aliases, functions,
   and subshell state;
 - complete the first stable `ash` dialect specification.
+
+Current checkpoint: mutation resolution precedes native lookup, exact-arity
+arguments and redirections preflight before effects, and the persistent cwd is
+the transaction root. Copy, move, and remove derive a bounded BLAKE3 preimage;
+touch prepares an empty create. All four enter the shared journaled,
+no-overwrite transaction on the blocking plane, reject traversal and
+non-regular targets, emit no stdout, and participate in final-stage/`pipefail`
+selection. Conditional lists, substitutions, globbing, aliases, functions,
+subshell state, and the stable dialect specification remain open.
 
 ### H4: interactive jobs
 
@@ -1165,8 +1221,8 @@ The architecture is fully implemented only when all of the following are true:
 
 - `ash shell` can replace the default interactive profile in Windows Terminal;
 - `cd` and environment changes persist across commands;
-- portable `ls`, `cat`, and `grep` operate directly on Windows files without
-  WSL;
+- portable `ls`, `cat`, `grep`, `cp`, `mv`, `rm`, and `touch` operate directly
+  on Windows files without WSL;
 - native external programs receive an exact argument vector;
 - an eight-megabyte producer/consumer pipeline completes without materializing
   the entire stream or deadlocking;

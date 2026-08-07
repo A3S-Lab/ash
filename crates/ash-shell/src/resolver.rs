@@ -171,6 +171,10 @@ pub enum PortableCommand {
     List,
     Cat,
     Grep,
+    Copy,
+    Move,
+    Remove,
+    Touch,
 }
 
 impl PortableCommand {
@@ -182,6 +186,10 @@ impl PortableCommand {
             Self::List => "ls",
             Self::Cat => "cat",
             Self::Grep => "grep",
+            Self::Copy => "cp",
+            Self::Move => "mv",
+            Self::Remove => "rm",
+            Self::Touch => "touch",
         }
     }
 }
@@ -349,6 +357,10 @@ fn portable_command(command: &str) -> Option<PortableCommand> {
         "ls" => Some(PortableCommand::List),
         "cat" => Some(PortableCommand::Cat),
         "grep" => Some(PortableCommand::Grep),
+        "cp" => Some(PortableCommand::Copy),
+        "mv" => Some(PortableCommand::Move),
+        "rm" => Some(PortableCommand::Remove),
+        "touch" => Some(PortableCommand::Touch),
         _ => None,
     }
 }

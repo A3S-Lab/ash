@@ -108,7 +108,7 @@ ARM64, with checksums, SBOMs, and provenance.
 
 ## Evidence behind the claims
 
-- 302 Rust workspace tests cover typed schemas, RPC, operations, store,
+- 309 Rust workspace tests cover typed schemas, RPC, operations, store,
   transactions, recovery, cancellation, updates, deterministic scheduling, and
   the human shell.
 - The schema-14 runtime harness contains 22 scenarios across worker matrices,
@@ -135,7 +135,7 @@ The separate, feature-gated `ash shell` H1 checkpoint adds a line-edited REPL,
 configurable prompt, safety-checked persistent history, opt-in Profile startup,
 and `exit`, and can execute sequential `pwd`, `echo`, `cd`, expanded
 `export`/`unset`, `set` pipefail control, portable `ls`, bounded raw-byte `cat`,
-bounded text `grep`, and direct-argv native host commands from terminal, inline source, or bounded
+bounded text `grep`, journaled `cp`/`mv`/`rm`, create-only `touch`, and direct-argv native host commands from terminal, inline source, or bounded
 stdin/native script files. Source-spanned `$NAME`, `${NAME}`, and `$?` nodes
 expand in a quote-aware native-string stage with fixed unquoted field splitting
 before resolution. Stateful and portable commands use ordinary user authority,
@@ -149,7 +149,7 @@ confinement claim.
 H2 now provides explicit per-stream modes, validated native OS pipe graphs, and
 native/WSL/portable/stateful pipeline lowering. A same-line `|` connects two to
 32 native host or explicit Windows WSL stages, implemented portable `pwd`,
-`echo`, `ls`, `cat`, and `grep`,
+`echo`, `ls`, `cat`, `grep`, `cp`, `mv`, `rm`, and `touch`,
 or implemented stateful `cd`, `export`, `unset`, `set`, and `exit` only after
 complete preflight. Native pairs use direct OS pipes; in-process boundaries
 retain explicit asynchronous parent ends and remain concurrent, bounded, and
@@ -183,8 +183,15 @@ boundary. WSL resolution locates `wsl.exe`, then exact
 `--distribution`/`--cd`/`--exec` argv lowers the wrapper into the same stream and
 host-file graph; missing launchers fail during preflight, and selected status
 retains backend/distribution metadata. An `ASH_TEST_WSL_DISTRIBUTION`-gated
-Windows regression streams an 8 MiB fixture through a prepared distro. Visible
-terminal streaming, installed-distribution probing, backend policy, general WSL
+Windows regression streams an 8 MiB fixture through a prepared distro.
+The first H3 checkpoint binds portable mutations to the persistent cwd and the
+same BLAKE3-preimage, journaled, no-overwrite transaction service as ASH/1
+`fs`. Copy, move, and remove revalidate an immediately derived source identity;
+touch creates only a new empty file. Traversal, symlink/reparse traversal,
+directories, oversized files, overwrite, and non-journalable paths fail
+explicitly. Redirection files open before the transaction, mutation stages emit
+no output, and conflicts participate in final-stage/`pipefail` selection.
+Visible terminal streaming, installed-distribution probing, backend policy, general WSL
 argument path/environment mapping, Linux-side ownership, and interruption
 normalization remain later slices.
 

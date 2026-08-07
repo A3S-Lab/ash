@@ -8,13 +8,14 @@ The current source checkpoint implements the Rust workspace, ASON and framed ASH
 The accepted post-ASH/1 human frontend has completed H0 with an independent
 `a3s-ash-shell` crate, source-spanned simple-command parsing, persistent state
 types, deterministic command classification, locked parser/resolution fixtures,
-and provider-neutral raw read/list/search semantic services reused by the ASH/1
-adapters. H1 now includes a feature-gated, line-edited `ash shell` REPL with
+and provider-neutral raw read/list/search semantic services plus a shared raw
+mutation transaction service reused by the ASH/1 adapters. H1 now includes a feature-gated, line-edited `ash shell` REPL with
 configurable prompt, safety-checked persistent history, opt-in Profile startup,
 prompt Ctrl+C/EOF handling, and `exit [STATUS]`, alongside inline plus bounded
 stdin/native-file sources. One persistent state executes expanded
 `export`/`unset`, `set -o pipefail`/`set +o pipefail`, sequential `pwd`, `echo`,
-`cd`, portable `ls`, bounded raw-byte `cat`, bounded text `grep`, source-spanned
+`cd`, portable `ls`, bounded raw-byte `cat`, bounded text `grep`, journaled
+regular-file `cp`/`mv`/`rm` and create-only `touch`, source-spanned
 `$NAME`/`${NAME}`/`$?` expansion with quote-aware fixed field splitting and
 native-string preservation, and native host executables launched through
 `ash-platform` with exact argument vectors, persistent cwd/environment, owned
@@ -73,12 +74,22 @@ the WSL backend and distribution. Cross-platform lowering tests lock launcher
 absence, exact argv, mixed endpoints, redirection order, and `pipefail`; a
 Windows-only test can stream an 8 MiB host fixture through a configured distro
 when `ASH_TEST_WSL_DISTRIBUTION` is set.
+The first H3 checkpoint adds portable `cp`, `mv`, `rm`, and create-only `touch`.
+Their exact-arity argument plans preflight before redirection files open; the
+in-process stage then binds the persistent cwd as a workspace, derives source
+BLAKE3 preimages immediately before execution, and enters the same durable,
+no-overwrite transaction service used by ASH/1 `fs`. Parent traversal,
+symlink/reparse traversal, directories, oversized files, overwrite, and
+non-journalable paths fail explicitly. Mutation stages close incoming stdin,
+emit no stdout, and contribute conflict or filesystem status to ordinary final-stage
+and `pipefail` selection. Failed redirection opens block mutation, while a
+post-open transaction failure preserves the normal file-open side effects.
 Eight-megabyte parent-facing,
 child-to-child, native, mixed, and closed-reader regressions lock exact bytes,
 EOF, backpressure, and completion; ordered-output regressions lock child and
 parent file resources, capture, surviving-pipe sharing, and global file-open
 side effects. User-visible terminal streaming, foreground interactive programs
-and job control, broader expansion and mutations, plus installed-distribution
+and job control, broader expansion and command language, plus installed-distribution
 probing, general WSL argument path mapping, environment forwarding, backend
 policy, and interruption normalization remain open.
 Release-key and platform-signing credential provisioning, the first published release, enough accumulated fuzz duration to claim a soak gate, captured real multi-model Coding Agent runs, medium/large task families, and published hardware-labelled runtime measurements remain open.

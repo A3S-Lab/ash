@@ -1,21 +1,21 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ash_ops::{
     ListQuery, MAX_READ_FILE_BYTES, MAX_SEARCH_FILE_BYTES, NativeFileSystem, ReadQuery,
     SearchQuery, SemanticEntryKind, SemanticError, SemanticFileSystem, SemanticListFilter,
-    SemanticReadMode, SemanticSearchPattern, SemanticServices,
+    SemanticMutationServices, SemanticReadMode, SemanticSearchPattern, SemanticServices,
 };
 use ash_platform::{
-    ClosedProcessPipeEnd, EnvironmentChange, NativeProcessFile, NativeProcessFileMode,
-    NativeProcessGraph, NativeProcessSpec, ParentProcessFile, ParentProcessFileId,
-    ParentProcessPipeEnd, PlatformError, ProcessCaptureId, ProcessExit, ProcessFileId,
-    ProcessGraphFile, ProcessPipeId, ProcessStdio, WslLaunchPlan, spawn_native,
-    spawn_native_graph_with_parent_io,
+    ClosedProcessPipeEnd, EnvironmentChange, FileActionState, FileTransactionFailure,
+    NativeProcessFile, NativeProcessFileMode, NativeProcessGraph, NativeProcessSpec,
+    ParentProcessFile, ParentProcessFileId, ParentProcessPipeEnd, PlatformError, ProcessCaptureId,
+    ProcessExit, ProcessFileId, ProcessGraphFile, ProcessPipeId, ProcessStdio, TransactionControl,
+    Workspace, WslLaunchPlan, spawn_native, spawn_native_graph_with_parent_io,
 };
 use futures::future::{join_all, try_join_all};
 use regex::{Regex, RegexBuilder};
@@ -407,6 +407,15 @@ where
             &mut output.stdout,
             &mut output.diagnostics,
         ),
+        ResolvedCommand::Portable(
+            command @ (PortableCommand::Copy
+            | PortableCommand::Move
+            | PortableCommand::Remove
+            | PortableCommand::Touch),
+        ) => {
+            execute_portable_mutation(state, command, arguments, span, &mut output.diagnostics)
+                .await
+        }
         ResolvedCommand::StatefulBuiltin(command) => unsupported(
             format!("builtin `{}` is not implemented yet", command.name()),
             span,
@@ -991,6 +1000,19 @@ async fn execute_portable_pipeline_stage(
                     &mut stdout,
                     &mut diagnostics,
                 ),
+                command @ (PortableCommand::Copy
+                | PortableCommand::Move
+                | PortableCommand::Remove
+                | PortableCommand::Touch) => {
+                    execute_portable_mutation(
+                        &invocation.state,
+                        command,
+                        &invocation.arguments,
+                        invocation.span,
+                        &mut diagnostics,
+                    )
+                    .await
+                }
                 PortableCommand::Cat | PortableCommand::Grep => unreachable!(),
             };
             if let Err(error) = write_portable_pipeline_output(output, &stdout).await
@@ -2613,6 +2635,13 @@ fn portable_pipeline_reads_stdin(
                 .map_err(|error| format!("grep regular expression is invalid: {error}"))?;
             Ok(options.path == "-")
         }
+        PortableCommand::Copy
+        | PortableCommand::Move
+        | PortableCommand::Remove
+        | PortableCommand::Touch => {
+            parse_portable_mutation(command, arguments)?;
+            Ok(false)
+        }
     }
 }
 
@@ -2666,6 +2695,262 @@ fn parse_echo_arguments(arguments: &[OsString]) -> Result<(&[OsString], bool), S
         Err("echo supports only the `-n` option".to_owned())
     } else {
         Ok((arguments, true))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PortableMutation {
+    Copy {
+        source: OsString,
+        destination: OsString,
+    },
+    Move {
+        source: OsString,
+        destination: OsString,
+    },
+    Remove {
+        source: OsString,
+    },
+    Touch {
+        destination: OsString,
+    },
+}
+
+impl PortableMutation {
+    const fn command_name(&self) -> &'static str {
+        match self {
+            Self::Copy { .. } => "cp",
+            Self::Move { .. } => "mv",
+            Self::Remove { .. } => "rm",
+            Self::Touch { .. } => "touch",
+        }
+    }
+}
+
+async fn execute_portable_mutation(
+    state: &ShellState,
+    command: PortableCommand,
+    arguments: &[OsString],
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    let mutation = match parse_portable_mutation(command, arguments) {
+        Ok(mutation) => mutation,
+        Err(message) => return invalid_arguments(&message, span, diagnostics),
+    };
+    let command_name = mutation.command_name();
+    let cwd = state.cwd().to_owned();
+    match tokio::task::spawn_blocking(move || perform_portable_mutation(&cwd, mutation)).await {
+        Ok(Ok(())) => ShellStatus::success(),
+        Ok(Err(error)) => filesystem_failure(
+            format!("cannot execute portable `{command_name}`: {error}"),
+            span,
+            diagnostics,
+        ),
+        Err(error) => filesystem_failure(
+            format!("portable `{command_name}` mutation task failed: {error}"),
+            span,
+            diagnostics,
+        ),
+    }
+}
+
+fn parse_portable_mutation(
+    command: PortableCommand,
+    arguments: &[OsString],
+) -> Result<PortableMutation, String> {
+    let name = command.name();
+    let operands = parse_mutation_operands(name, arguments)?;
+    if operands.iter().any(|operand| operand.is_empty()) {
+        return Err(format!("{name} paths cannot be empty"));
+    }
+    match command {
+        PortableCommand::Copy | PortableCommand::Move => {
+            if operands.len() < 2 {
+                return Err(format!("{name} requires one source and one destination"));
+            }
+            if operands.len() > 2 {
+                return Err(format!(
+                    "{name} accepts exactly one source and one destination"
+                ));
+            }
+            let mut operands = operands.into_iter();
+            let source = operands.next().expect("two mutation operands");
+            let destination = operands.next().expect("two mutation operands");
+            if command == PortableCommand::Copy {
+                Ok(PortableMutation::Copy {
+                    source,
+                    destination,
+                })
+            } else {
+                Ok(PortableMutation::Move {
+                    source,
+                    destination,
+                })
+            }
+        }
+        PortableCommand::Remove | PortableCommand::Touch => {
+            if operands.is_empty() {
+                return Err(format!("{name} requires exactly one path"));
+            }
+            if operands.len() > 1 {
+                return Err(format!("{name} accepts exactly one path"));
+            }
+            let operand = operands.into_iter().next().expect("one mutation operand");
+            if command == PortableCommand::Remove {
+                Ok(PortableMutation::Remove { source: operand })
+            } else {
+                Ok(PortableMutation::Touch {
+                    destination: operand,
+                })
+            }
+        }
+        PortableCommand::Pwd
+        | PortableCommand::Echo
+        | PortableCommand::List
+        | PortableCommand::Cat
+        | PortableCommand::Grep => {
+            unreachable!("only portable mutation commands reach mutation parsing")
+        }
+    }
+}
+
+fn parse_mutation_operands(
+    command_name: &str,
+    arguments: &[OsString],
+) -> Result<Vec<OsString>, String> {
+    let mut operands = Vec::with_capacity(arguments.len());
+    let mut options_ended = false;
+    for argument in arguments {
+        if !options_ended && argument == "--" {
+            options_ended = true;
+            continue;
+        }
+        if !options_ended
+            && argument
+                .to_str()
+                .is_some_and(|value| value.starts_with('-') && value != "-")
+        {
+            return Err(format!(
+                "{command_name} does not support option `{}`",
+                display_os_string(argument)
+            ));
+        }
+        operands.push(argument.clone());
+    }
+    Ok(operands)
+}
+
+fn perform_portable_mutation(cwd: &Path, mutation: PortableMutation) -> Result<(), String> {
+    let workspace = Workspace::new(cwd)
+        .map_err(|error| format!("cannot open the current transaction root: {error}"))?;
+    let root = workspace.native_root().to_owned();
+    let services = SemanticMutationServices::new(workspace);
+    let action = match mutation {
+        PortableMutation::Copy {
+            source,
+            destination,
+        } => services
+            .prepare_copy(
+                portable_mutation_logical_path(&root, &source)?,
+                portable_mutation_logical_path(&root, &destination)?,
+            )
+            .map_err(|error| error.to_string())?,
+        PortableMutation::Move {
+            source,
+            destination,
+        } => services
+            .prepare_move(
+                portable_mutation_logical_path(&root, &source)?,
+                portable_mutation_logical_path(&root, &destination)?,
+            )
+            .map_err(|error| error.to_string())?,
+        PortableMutation::Remove { source } => services
+            .prepare_remove(portable_mutation_logical_path(&root, &source)?)
+            .map_err(|error| error.to_string())?,
+        PortableMutation::Touch { destination } => {
+            services.prepare_touch(portable_mutation_logical_path(&root, &destination)?)
+        }
+    };
+    let outcome = services
+        .execute(vec![action], || TransactionControl::Continue)
+        .map_err(|error| error.to_string())?;
+    if let Some(failure) = outcome.failure {
+        return Err(mutation_failure_message(failure).to_owned());
+    }
+    if outcome.actions.len() != 1 || outcome.actions[0].state != FileActionState::Committed {
+        return Err("transaction returned an incomplete action state".to_owned());
+    }
+    Ok(())
+}
+
+fn portable_mutation_logical_path(root: &Path, operand: &OsStr) -> Result<String, String> {
+    if operand.is_empty() {
+        return Err("path is empty".to_owned());
+    }
+    let operand_path = Path::new(operand);
+    let relative = if operand_path.is_absolute() {
+        operand_path.strip_prefix(root).map_err(|_| {
+            format!(
+                "path `{}` is outside the current transaction root `{}`",
+                display_os_string(operand),
+                root.display()
+            )
+        })?
+    } else {
+        operand_path
+    };
+    let mut components = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(component) => {
+                let component = component.to_str().ok_or_else(|| {
+                    format!(
+                        "path `{}` is not valid UTF-8 for a durable transaction",
+                        display_os_string(operand)
+                    )
+                })?;
+                if component.contains(['\\', ':']) {
+                    return Err(format!(
+                        "path `{}` cannot be represented as a portable transaction path",
+                        display_os_string(operand)
+                    ));
+                }
+                components.push(component);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(format!(
+                    "path `{}` contains unsupported parent traversal",
+                    display_os_string(operand)
+                ));
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(format!(
+                    "path `{}` cannot be represented relative to the current transaction root",
+                    display_os_string(operand)
+                ));
+            }
+        }
+    }
+    if components.is_empty() {
+        return Err(format!(
+            "path `{}` does not name a regular file below the current transaction root",
+            display_os_string(operand)
+        ));
+    }
+    Ok(components.join("/"))
+}
+
+const fn mutation_failure_message(failure: FileTransactionFailure) -> &'static str {
+    match failure {
+        FileTransactionFailure::Conflict => {
+            "filesystem changed or a no-overwrite destination already exists"
+        }
+        FileTransactionFailure::Cancelled => "transaction was cancelled",
+        FileTransactionFailure::TimedOut => "transaction timed out",
+        FileTransactionFailure::Filesystem => "transaction failed during filesystem I/O",
+        FileTransactionFailure::RecoveryRequired => "transaction requires explicit recovery",
     }
 }
 
@@ -6386,6 +6671,154 @@ fn main() {
             );
             assert_eq!(failure.status().code(), 1, "source={source}");
         }
+    }
+
+    #[tokio::test]
+    async fn portable_mutations_commit_copy_move_remove_and_create_without_output() {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("source file.txt"), b"payload\n").expect("write source");
+        let mut state = ShellState::new(&directory.0);
+
+        let execution = execute_source(
+            "touch '雪 empty.txt'; cp 'source file.txt' 'copy file.txt'; mv 'copy file.txt' moved.txt; rm 'source file.txt'",
+            &mut state,
+        )
+        .await;
+
+        assert!(execution.stdout().is_empty());
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(execution.status().code(), 0);
+        assert_eq!(
+            fs::read(directory.0.join("雪 empty.txt")).expect("created empty file"),
+            b""
+        );
+        assert_eq!(
+            fs::read(directory.0.join("moved.txt")).expect("moved copy"),
+            b"payload\n"
+        );
+        assert!(!directory.0.join("source file.txt").exists());
+        assert!(!directory.0.join("copy file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn portable_mutations_reject_options_escape_directories_and_overwrite() {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("source"), b"source\n").expect("write source");
+        fs::write(directory.0.join("existing"), b"keep\n").expect("write existing");
+        fs::create_dir(directory.0.join("child")).expect("create child");
+        let escaped_name = format!(
+            "{}-escaped",
+            directory
+                .0
+                .file_name()
+                .expect("test directory name")
+                .to_string_lossy()
+        );
+        let escaped_path = directory
+            .0
+            .parent()
+            .expect("test directory parent")
+            .join(&escaped_name);
+        let mut state = ShellState::new(&directory.0);
+
+        let dash = execute_source("touch -- -dash", &mut state).await;
+        assert_eq!(dash.status().code(), 0);
+        assert!(directory.0.join("-dash").is_file());
+
+        let option = execute_source("rm -f existing", &mut state).await;
+        assert_eq!(option.status().code(), 2);
+        assert_eq!(
+            option.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::InvalidArguments
+        );
+        assert_eq!(
+            option.diagnostics()[0].message(),
+            "rm does not support option `-f`"
+        );
+
+        let arity = execute_source("cp source", &mut state).await;
+        assert_eq!(arity.status().code(), 2);
+        assert_eq!(
+            arity.diagnostics()[0].message(),
+            "cp requires one source and one destination"
+        );
+
+        let overwrite = execute_source("cp source existing", &mut state).await;
+        assert_eq!(overwrite.status().code(), 1);
+        assert_eq!(
+            overwrite.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Filesystem
+        );
+        assert!(
+            overwrite.diagnostics()[0]
+                .message()
+                .contains("no-overwrite destination already exists")
+        );
+        assert_eq!(
+            fs::read(directory.0.join("existing")).expect("existing remains"),
+            b"keep\n"
+        );
+
+        let directory_remove = execute_source("rm child", &mut state).await;
+        assert_eq!(directory_remove.status().code(), 1);
+        assert!(directory.0.join("child").is_dir());
+
+        let escape = execute_source(&format!("touch ../{escaped_name}"), &mut state).await;
+        assert_eq!(escape.status().code(), 1);
+        assert_eq!(
+            escape.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Filesystem
+        );
+        assert!(
+            escape.diagnostics()[0]
+                .message()
+                .contains("unsupported parent traversal")
+        );
+        assert!(!escaped_path.exists());
+    }
+
+    #[tokio::test]
+    async fn portable_mutations_open_redirections_first_and_participate_in_pipefail() {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("existing"), b"keep\n").expect("write existing");
+        let mut state = ShellState::new(&directory.0);
+
+        let blocked = execute_source("touch blocked >missing/out", &mut state).await;
+        assert_eq!(blocked.status().kind(), ShellStatusKind::RedirectionError);
+        assert!(!directory.0.join("blocked").exists());
+
+        let redirected = execute_source("touch redirected >opened-first", &mut state).await;
+        assert_eq!(redirected.status().code(), 0);
+        assert!(redirected.diagnostics().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("redirected")).expect("mutation target"),
+            b""
+        );
+        assert_eq!(
+            fs::read(directory.0.join("opened-first")).expect("redirection target"),
+            b""
+        );
+
+        let pipeline = execute_source("touch piped | echo done", &mut state).await;
+        assert_eq!(pipeline.stdout(), b"done\n");
+        assert!(pipeline.diagnostics().is_empty());
+        assert_eq!(pipeline.status().code(), 0);
+        assert!(directory.0.join("piped").is_file());
+
+        let default = execute_source("touch existing | echo final", &mut state).await;
+        assert_eq!(default.stdout(), b"final\n");
+        assert_eq!(default.status().code(), 0);
+        assert_eq!(default.diagnostics().len(), 1);
+
+        let strict =
+            execute_source("set -o pipefail; touch existing | echo strict", &mut state).await;
+        assert_eq!(strict.stdout(), b"strict\n");
+        assert_eq!(strict.status().code(), 1);
+        assert_eq!(strict.diagnostics().len(), 1);
+        assert_eq!(
+            fs::read(directory.0.join("existing")).expect("existing remains"),
+            b"keep\n"
+        );
     }
 
     #[tokio::test]
