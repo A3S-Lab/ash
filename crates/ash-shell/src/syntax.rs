@@ -139,6 +139,8 @@ pub enum WordPart {
         quote: QuoteMode,
         span: SourceSpan,
     },
+    /// One backslash-escaped unquoted character protected from pathname expansion.
+    EscapedLiteral { value: String, span: SourceSpan },
     Parameter {
         parameter: Parameter,
         quote: QuoteMode,
@@ -155,7 +157,7 @@ impl WordPart {
     #[must_use]
     pub fn value(&self) -> &str {
         match self {
-            Self::Literal { value, .. } => value,
+            Self::Literal { value, .. } | Self::EscapedLiteral { value, .. } => value,
             Self::Parameter { parameter, .. } => parameter.name().unwrap_or("?"),
             Self::CommandSubstitution { substitution, .. } => substitution.script().source(),
         }
@@ -165,7 +167,9 @@ impl WordPart {
     #[must_use]
     pub const fn parameter(&self) -> Option<&Parameter> {
         match self {
-            Self::Literal { .. } | Self::CommandSubstitution { .. } => None,
+            Self::Literal { .. }
+            | Self::EscapedLiteral { .. }
+            | Self::CommandSubstitution { .. } => None,
             Self::Parameter { parameter, .. } => Some(parameter),
         }
     }
@@ -175,14 +179,21 @@ impl WordPart {
     pub const fn command_substitution(&self) -> Option<&CommandSubstitution> {
         match self {
             Self::CommandSubstitution { substitution, .. } => Some(substitution),
-            Self::Literal { .. } | Self::Parameter { .. } => None,
+            Self::Literal { .. } | Self::EscapedLiteral { .. } | Self::Parameter { .. } => None,
         }
+    }
+
+    /// Reports whether this segment came from an unquoted backslash escape.
+    #[must_use]
+    pub const fn is_escaped_literal(&self) -> bool {
+        matches!(self, Self::EscapedLiteral { .. })
     }
 
     #[must_use]
     pub const fn quote(&self) -> QuoteMode {
         match self {
             Self::Literal { quote, .. } => *quote,
+            Self::EscapedLiteral { .. } => QuoteMode::Unquoted,
             Self::Parameter { quote, .. } => *quote,
             Self::CommandSubstitution { quote, .. } => *quote,
         }
@@ -192,6 +203,7 @@ impl WordPart {
     pub const fn span(&self) -> SourceSpan {
         match self {
             Self::Literal { span, .. } => *span,
+            Self::EscapedLiteral { span, .. } => *span,
             Self::Parameter { span, .. } => *span,
             Self::CommandSubstitution { substitution, .. } => substitution.span(),
         }
@@ -199,7 +211,9 @@ impl WordPart {
 
     fn shift_for_execution(&mut self, offset: usize) {
         match self {
-            Self::Literal { span, .. } | Self::Parameter { span, .. } => {
+            Self::Literal { span, .. }
+            | Self::EscapedLiteral { span, .. }
+            | Self::Parameter { span, .. } => {
                 *span = span.shifted(offset);
             }
             Self::CommandSubstitution { substitution, .. } => {
@@ -238,7 +252,8 @@ impl Word {
         let mut value = String::new();
         for part in &self.parts {
             match part {
-                WordPart::Literal { value: literal, .. } => value.push_str(literal),
+                WordPart::Literal { value: literal, .. }
+                | WordPart::EscapedLiteral { value: literal, .. } => value.push_str(literal),
                 WordPart::Parameter {
                     parameter: Parameter::Variable { name, braced },
                     ..

@@ -10,6 +10,7 @@
 mod diagnostic;
 mod execution;
 mod expand;
+mod glob;
 mod interactive;
 mod parser;
 mod resolver;
@@ -20,6 +21,9 @@ pub use diagnostic::{Diagnostic, DiagnosticCode};
 pub use execution::{
     ExecutionDiagnostic, ExecutionDiagnosticCode, MAX_NATIVE_PIPELINE_STAGES, ShellExecution,
     execute_source, execute_source_with,
+};
+pub use glob::{
+    MAX_PATHNAME_EXPANSION_ENTRIES, MAX_PATHNAME_EXPANSION_MATCHES, MAX_PATHNAME_PATTERN_UNITS,
 };
 pub use interactive::{
     DEFAULT_INTERACTIVE_PROMPT, InteractiveConfig, InteractiveEditor, InteractiveError,

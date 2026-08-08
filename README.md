@@ -198,6 +198,20 @@ capture allowance, and a capture failure prevents the outer command from
 running. Substitutions across command words and file-redirection targets execute
 in source order; a short-circuited pipeline executes none of them.
 
+After unquoted parameter and command-substitution field splitting, pathname
+expansion applies `*`, `?`, `[abc]`, ascending `[a-z]`, and negated `[!abc]` or
+`[^abc]` patterns to command fields and file-redirection targets. Single quotes,
+double quotes, and a backslash protect pattern characters; unquoted parameter
+or substitution output remains pattern-active. Relative patterns enumerate
+from the persistent cwd, absolute patterns stay absolute, matches are sorted by
+lossless native path units, and Unix non-UTF-8 names remain representable. A
+wildcard never selects a leading-dot name unless that component begins with a
+literal dot. Matching is case-sensitive, `**` has no recursive meaning, and an
+unterminated, empty, or descending class or a pattern with no matches fails
+before the outer command runs. One command and its redirections share limits of
+32,768 active pattern units, 65,536 inspected directory entries, and 4,096
+matches. Short-circuited pipelines perform no directory scan.
+
 Native commands resolve through the shell state's `PATH` or an explicit
 `native:` prefix, then launch the resolved executable directly with the parsed
 argument vector, current directory, and exported environment. No `sh -c`,
@@ -222,8 +236,8 @@ Native, WSL, and portable commands plus implemented stateful builtins accept
 `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
 Redirections are applied from left to right, so `command >out 2>&1` merges both
 streams into `out`, while `command 2>&1 >out` leaves stderr on the original
-stdout capture. File targets, including `$(...)`, expand to exactly one native
-field, resolve from
+stdout capture. File targets, including `$(...)` and pathname patterns, must
+finish as exactly one native field, resolve from
 the persistent cwd, and connect directly to child or parent-task OS handles
 without buffering file output in shell memory. One graph order interleaves
 native, portable, and stateful resources by stage and redirection source order;
@@ -291,7 +305,7 @@ still parses before any command runs, so a malformed trailing branch prevents
 all prefix effects. An admitted `exit` stops the source; a skipped one does not.
 
 User-visible terminal streaming, foreground interactive programs and job
-control, globbing, aliases, functions, subshell state, the remaining command
+control, aliases, functions, subshell state, the remaining command
 language, and the remaining H5 WSL
 policy, path, environment, and interruption contracts are not implemented yet. A minimal
 machine-only binary can be built with `--no-default-features`.
@@ -353,7 +367,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **318 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **327 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, signed updates, and
   the human shell.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB

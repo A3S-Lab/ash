@@ -450,7 +450,12 @@ impl<'a> Parser<'a> {
                     }
                 }
                 '\\' => {
-                    unquoted_start.get_or_insert(self.position);
+                    push_unquoted(
+                        &mut parts,
+                        &mut unquoted,
+                        &mut unquoted_start,
+                        self.position,
+                    );
                     let escape_start = self.position;
                     self.bump();
                     let Some(escaped) = self.bump() else {
@@ -461,7 +466,10 @@ impl<'a> Parser<'a> {
                         ));
                     };
                     if escaped != '\n' {
-                        unquoted.push(escaped);
+                        parts.push(WordPart::EscapedLiteral {
+                            value: escaped.to_string(),
+                            span: SourceSpan::new(escape_start, self.position),
+                        });
                     }
                 }
                 _ => {
@@ -985,11 +993,13 @@ mod tests {
         assert_eq!(first.words().len(), 2);
         assert_eq!(first.words()[0].literal(), "echo");
         assert_eq!(first.words()[1].literal(), "premidpost value");
-        assert_eq!(first.words()[1].parts().len(), 4);
+        assert_eq!(first.words()[1].parts().len(), 5);
         assert_eq!(first.words()[1].parts()[0].quote(), QuoteMode::Unquoted);
         assert_eq!(first.words()[1].parts()[1].quote(), QuoteMode::Double);
         assert_eq!(first.words()[1].parts()[2].quote(), QuoteMode::Single);
-        assert_eq!(first.words()[1].parts()[3].quote(), QuoteMode::Unquoted);
+        assert!(first.words()[1].parts()[3].is_escaped_literal());
+        assert_eq!(first.words()[1].parts()[3].value(), " ");
+        assert_eq!(first.words()[1].parts()[4].quote(), QuoteMode::Unquoted);
         assert_eq!(script.commands()[1].words()[0].literal(), "pwd");
     }
 
@@ -1045,6 +1055,8 @@ mod tests {
         assert!(words[3].parts()[0].parameter().is_none());
         assert_eq!(words[4].literal(), "$NAME");
         assert!(words[4].parts()[0].parameter().is_none());
+        assert!(words[4].parts()[0].is_escaped_literal());
+        assert_eq!(words[4].parts()[0].span(), SourceSpan::new(32, 34));
         assert_eq!(words[5].literal(), "$");
         assert!(words[5].parts()[0].parameter().is_none());
     }

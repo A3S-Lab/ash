@@ -19,7 +19,8 @@ stdin/native-file sources. One persistent state executes expanded
 regular-file `cp`/`mv`/`rm` and create-only `touch`, source-spanned
 `$NAME`/`${NAME}`/`$?` expansion plus recursively parsed nested `$(...)`
 command substitution with quote-aware fixed field splitting and native-string
-preservation, and native host executables launched through
+preservation, followed by bounded deterministic pathname expansion for
+unquoted `*`, `?`, and bracket classes, and native host executables launched through
 `ash-platform` with exact argument vectors, persistent cwd/environment, owned
 process trees, bounded capture, and native status propagation.
 
@@ -108,12 +109,27 @@ a capture failure blocks the outer command. Short-circuited pipelines perform
 no substitution, and full-source parsing still precedes every effect. If a
 later outer-pipeline stage fails preflight, external effects from substitutions
 already executed in earlier source positions remain.
+The fourth H3 checkpoint adds pathname expansion after fixed field splitting
+and before command resolution or redirection planning. The expansion stage now
+retains whether each native-string segment was unquoted, quoted, or backslash
+escaped, so only active `*`, `?`, and bracket-class operators participate;
+unquoted parameter and command-substitution output can introduce operators.
+Relative patterns enumerate from persistent cwd, absolute patterns remain
+absolute, components match case-sensitively over lossless native units, and
+results sort by native path representation. A leading dot requires a literal
+leading dot, `**` is not recursive, and malformed or unmatched patterns fail
+closed before the outer command launches. Each command and its redirections
+share ceilings of 32,768 active pattern units, 65,536 inspected directory
+entries, and 4,096 matches. Redirection patterns must yield exactly one path,
+short-circuited pipelines do no directory work, and ordinary filesystem reads
+retain the shell process's user authority rather than adding a confinement
+claim.
 Eight-megabyte parent-facing,
 child-to-child, native, mixed, and closed-reader regressions lock exact bytes,
 EOF, backpressure, and completion; ordered-output regressions lock child and
 parent file resources, capture, surviving-pipe sharing, and global file-open
 side effects. User-visible terminal streaming, foreground interactive programs
-and job control, globbing, aliases, functions, subshell state, the remaining
+and job control, aliases, functions, subshell state, the remaining
 command language, plus installed-distribution
 probing, general WSL argument path mapping, environment forwarding, backend
 policy, and interruption normalization remain open.
