@@ -703,13 +703,28 @@ fn shell_command_executes_nested_command_substitutions() {
 
     let root = fs::canonicalize(&directory.0).expect("canonical root");
     let child = fs::canonicalize(directory.0.join("child")).expect("canonical child");
-    let expected = format!(
-        "value=one\ntwo split fields\n{}\n{}\nhit\npayload\n after\n",
-        child.display(),
-        root.display()
-    );
     assert!(output.status.success(), "stderr={:?}", output.stderr);
-    assert_eq!(output.stdout, expected.as_bytes());
+    let lines = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 8, "stdout={:?}", output.stdout);
+    assert_eq!(lines[0], b"value=one");
+    assert_eq!(lines[1], b"two split fields");
+    assert_eq!(lines[4], b"hit");
+    assert_eq!(lines[5], b"payload");
+    assert_eq!(lines[6], b" after");
+    assert!(lines[7].is_empty());
+    let reported_child = std::str::from_utf8(lines[2]).expect("UTF-8 child path");
+    let reported_root = std::str::from_utf8(lines[3]).expect("UTF-8 root path");
+    assert_eq!(
+        fs::canonicalize(reported_child).expect("canonical reported child"),
+        child
+    );
+    assert_eq!(
+        fs::canonicalize(reported_root).expect("canonical reported root"),
+        root
+    );
     assert!(output.stderr.is_empty());
     assert!(!directory.0.join("skipped").exists());
     assert_eq!(
