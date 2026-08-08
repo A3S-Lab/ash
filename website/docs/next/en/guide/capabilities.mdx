@@ -108,7 +108,7 @@ ARM64, with checksums, SBOMs, and provenance.
 
 ## Evidence behind the claims
 
-- 309 Rust workspace tests cover typed schemas, RPC, operations, store,
+- 313 Rust workspace tests cover typed schemas, RPC, operations, store,
   transactions, recovery, cancellation, updates, deterministic scheduling, and
   the human shell.
 - The schema-14 runtime harness contains 22 scenarios across worker matrices,
@@ -191,6 +191,12 @@ touch creates only a new empty file. Traversal, symlink/reparse traversal,
 directories, oversized files, overwrite, and non-journalable paths fail
 explicitly. Redirection files open before the transaction, mutation stages emit
 no output, and conflicts participate in final-stage/`pipefail` selection.
+The second H3 checkpoint adds source-spanned `&&`/`||` lists over complete
+pipelines. Both operators have equal precedence and evaluate left to right
+against visible final-stage or `pipefail` status. A short-circuited pipeline
+keeps that status and performs no expansion, resolution, preflight,
+redirection open, launch, state change, or filesystem transaction; only an
+admitted `exit` stops the source. Full-source parsing still precedes effects.
 Visible terminal streaming, installed-distribution probing, backend policy, general WSL
 argument path/environment mapping, Linux-side ownership, and interruption
 normalization remain later slices.

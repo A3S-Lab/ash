@@ -53,7 +53,8 @@ The detailed accepted contract is defined in
 
 The current source checkpoint has completed H0 and implemented H1. The
 independent `a3s-ash-shell` crate now owns source-spanned parsing, persistent
-state, deterministic command resolution, a cross-platform line editor, private
+state, left-associative `&&`/`||` pipeline lists, deterministic command
+resolution, a cross-platform line editor, private
 file history, and a sequential executor for `pwd`, `echo`, `cd`, expanded
 `export`/`unset` environment updates, `set` pipefail control, `exit`, portable
 `ls`, bounded raw-byte `cat`, bounded text `grep`, journaled `cp`/`mv`/`rm`,
@@ -85,7 +86,11 @@ and backpressured; `cat -` and `grep PATTERN -` consume the incoming stream.
 Final stdout and native stderr use bounded named captures. Status defaults to
 the final stage, while persistent `set -o pipefail` selects the rightmost
 unsuccessful native, portable, or stateful stage and `set +o pipefail` restores
-the default. Stateful stages run concurrently on independent state clones,
+the default. Source-spanned `&&`/`||` links consume that visible status with
+equal precedence and left associativity. A short-circuited pipeline performs no
+expansion, resolution, preflight, redirection open, process launch, state
+change, or filesystem transaction; only an admitted `exit` stops the source.
+Stateful stages run concurrently on independent state clones,
 close non-consumed input and empty output ends, cannot mutate the parent shell,
 and let pipeline `exit` contribute a status without stopping the parent source.
 Native and portable commands plus implemented stateful builtins also accept
@@ -132,7 +137,7 @@ native, mixed, portable-only,
 stateful, closed-reader, and ordered-redirection regressions lock backpressure,
 exact bytes, EOF, handle closure, cloned-state isolation, descriptor sharing,
 global file-open order, transaction conflicts, and mutation/open ordering.
-Visible terminal streaming, broader expansion and command language,
+Visible terminal streaming, broader expansion and the remaining command language,
 foreground interactive programs and jobs, plus installed-distribution
 probing, general WSL path/environment mapping, backend policy, Linux-side
 ownership, and interruption normalization remain staged work.

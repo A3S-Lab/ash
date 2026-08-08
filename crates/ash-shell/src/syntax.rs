@@ -292,14 +292,49 @@ impl SimpleCommand {
     }
 }
 
+/// One operator in a left-associative conditional pipeline list.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ConditionalOperator {
+    /// Execute the following pipeline only when the preceding status is zero.
+    AndIf,
+    /// Execute the following pipeline only when the preceding status is nonzero.
+    OrIf,
+}
+
+/// The source-spanned conditional operator that gates one following pipeline.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PipelineCondition {
+    operator: ConditionalOperator,
+    span: SourceSpan,
+}
+
+impl PipelineCondition {
+    pub(crate) const fn new(operator: ConditionalOperator, span: SourceSpan) -> Self {
+        Self { operator, span }
+    }
+
+    #[must_use]
+    pub const fn operator(self) -> ConditionalOperator {
+        self.operator
+    }
+
+    #[must_use]
+    pub const fn span(self) -> SourceSpan {
+        self.span
+    }
+}
+
 /// One foreground pipeline over a contiguous range of parsed commands.
 ///
 /// A single command is represented as a one-stage pipeline. Pipe operator spans
 /// are retained in source order and therefore number one fewer than the stages.
+/// A conditional link, when present, gates this pipeline with the status of the
+/// preceding pipeline in the same left-associative AND-OR list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pipeline {
     command_range: Range<usize>,
     pipe_spans: Vec<SourceSpan>,
+    condition: Option<PipelineCondition>,
     span: SourceSpan,
 }
 
@@ -307,6 +342,7 @@ impl Pipeline {
     pub(crate) fn new(
         command_range: Range<usize>,
         pipe_spans: Vec<SourceSpan>,
+        condition: Option<PipelineCondition>,
         span: SourceSpan,
     ) -> Self {
         debug_assert!(!command_range.is_empty());
@@ -314,6 +350,7 @@ impl Pipeline {
         Self {
             command_range,
             pipe_spans,
+            condition,
             span,
         }
     }
@@ -327,6 +364,12 @@ impl Pipeline {
     #[must_use]
     pub fn pipe_spans(&self) -> &[SourceSpan] {
         &self.pipe_spans
+    }
+
+    /// Returns the conditional operator that must admit this pipeline.
+    #[must_use]
+    pub const fn condition(&self) -> Option<PipelineCondition> {
+        self.condition
     }
 
     #[must_use]

@@ -1,16 +1,17 @@
 use crate::{
-    Diagnostic, DiagnosticCode, Parameter, Pipeline, QuoteMode, Redirection, RedirectionDescriptor,
-    RedirectionFileMode, RedirectionTarget, Script, SimpleCommand, SourceSpan, Word, WordPart,
+    ConditionalOperator, Diagnostic, DiagnosticCode, Parameter, Pipeline, PipelineCondition,
+    QuoteMode, Redirection, RedirectionDescriptor, RedirectionFileMode, RedirectionTarget, Script,
+    SimpleCommand, SourceSpan, Word, WordPart,
 };
 
-/// Parses the H0 shell syntax subset.
+/// Parses the currently implemented human-shell syntax subset.
 ///
 /// The current subset accepts foreground native-pipeline syntax with `|`,
-/// source-ordered file and descriptor redirections, simple commands separated by
-/// a newline or `;`, shell comments, single and double quotes, backslash
-/// escaping, named parameters, and `$?`. Syntax reserved for later milestones is
-/// rejected with a source span instead of being reinterpreted as a literal
-/// argument.
+/// left-associative `&&`/`||` conditional lists, source-ordered file and
+/// descriptor redirections, simple commands separated by a newline or `;`,
+/// shell comments, single and double quotes, backslash escaping, named
+/// parameters, and `$?`. Syntax reserved for later milestones is rejected with
+/// a source span instead of being reinterpreted as a literal argument.
 pub fn parse(source: &str) -> Result<Script, Diagnostic> {
     Parser::new(source).parse()
 }
@@ -31,9 +32,15 @@ impl<'a> Parser<'a> {
     fn parse(mut self) -> Result<Script, Diagnostic> {
         let mut commands = Vec::new();
         let mut pipelines = Vec::new();
+        let mut condition = None;
         self.skip_command_layout();
 
         while !self.is_eof() {
+            if self.starts_conditional_operator() {
+                return Err(self.conditional_separator_diagnostic(
+                    "a conditional operator must follow a pipeline",
+                ));
+            }
             if self.peek() == Some(';') {
                 return Err(self.diagnostic_here(
                     DiagnosticCode::UnexpectedSeparator,
@@ -61,6 +68,7 @@ impl<'a> Parser<'a> {
                     let separated = self.skip_horizontal();
                     match self.peek() {
                         None | Some('\n' | ';' | '|') => break,
+                        Some('&') if self.starts_conditional_operator() => break,
                         Some('#') if separated => break,
                         Some(_) if self.starts_redirection() => {
                             let redirection = self.parse_redirection()?;
@@ -94,20 +102,23 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 match self.peek() {
+                    Some('|') if self.starts_conditional_operator() => {
+                        pipeline_end = command_end;
+                        break;
+                    }
+                    Some('&') if self.starts_conditional_operator() => {
+                        pipeline_end = command_end;
+                        break;
+                    }
                     Some('|') => {
                         let pipe_start = self.position;
                         self.bump();
-                        if self.peek() == Some('|') {
-                            return Err(Diagnostic::new(
-                                DiagnosticCode::UnsupportedSyntax,
-                                "conditional OR lists are reserved for a later milestone",
-                                SourceSpan::new(pipe_start, self.position + 1),
-                            ));
-                        }
                         let pipe_span = SourceSpan::new(pipe_start, self.position);
                         pipe_spans.push(pipe_span);
                         self.skip_horizontal();
-                        if matches!(self.peek(), None | Some('\n' | ';' | '|' | '#')) {
+                        if matches!(self.peek(), None | Some('\n' | ';' | '|' | '#'))
+                            || self.starts_conditional_operator()
+                        {
                             return Err(Diagnostic::new(
                                 DiagnosticCode::UnexpectedSeparator,
                                 "a pipeline operator must be followed by a command on the same line",
@@ -131,13 +142,42 @@ impl<'a> Parser<'a> {
             pipelines.push(Pipeline::new(
                 first_command..commands.len(),
                 pipe_spans,
+                condition.take(),
                 SourceSpan::new(pipeline_start, pipeline_end),
             ));
+
+            self.skip_horizontal();
+            if self.starts_conditional_operator() {
+                let operator_start = self.position;
+                let operator = if self.source[self.position..].starts_with("&&") {
+                    ConditionalOperator::AndIf
+                } else {
+                    ConditionalOperator::OrIf
+                };
+                self.bump();
+                self.bump();
+                let operator_span = SourceSpan::new(operator_start, self.position);
+                condition = Some(PipelineCondition::new(operator, operator_span));
+                self.skip_conditional_layout();
+                if self.is_eof()
+                    || self.peek() == Some(';')
+                    || self.starts_conditional_operator()
+                    || self.peek() == Some('|')
+                {
+                    return Err(Diagnostic::new(
+                        DiagnosticCode::UnexpectedSeparator,
+                        "a conditional operator must be followed by a pipeline",
+                        operator_span,
+                    ));
+                }
+                continue;
+            }
 
             match self.peek() {
                 None => break,
                 Some('\n' | ';') => {
                     self.bump();
+                    condition = None;
                     self.skip_command_layout();
                 }
                 Some(_) => {
@@ -280,6 +320,7 @@ impl<'a> Parser<'a> {
     ) -> Result<Redirection, Diagnostic> {
         let separated = self.skip_horizontal();
         if matches!(self.peek(), None | Some('\n' | ';' | '|' | '<' | '>'))
+            || self.starts_conditional_operator()
             || (separated && self.peek() == Some('#'))
         {
             return Err(Diagnostic::new(
@@ -315,7 +356,10 @@ impl<'a> Parser<'a> {
             }
         };
         if self.peek().is_some_and(|character| {
-            !matches!(character, ' ' | '\t' | '\r' | '\n' | ';' | '|' | '<' | '>')
+            !matches!(
+                character,
+                ' ' | '\t' | '\r' | '\n' | ';' | '|' | '&' | '<' | '>'
+            )
         }) {
             return Err(Diagnostic::new(
                 DiagnosticCode::InvalidRedirection,
@@ -343,6 +387,9 @@ impl<'a> Parser<'a> {
                 break;
             }
             if matches!(character, '|' | '<' | '>') {
+                break;
+            }
+            if self.starts_conditional_operator() {
                 break;
             }
             if is_reserved_operator(character) {
@@ -618,6 +665,21 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn skip_conditional_layout(&mut self) {
+        loop {
+            self.skip_horizontal();
+            if self.peek() == Some('#') {
+                self.skip_comment();
+            }
+            if self.peek() == Some('\n') {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        self.skip_horizontal();
+    }
+
     fn skip_horizontal(&mut self) -> bool {
         let start = self.position;
         while matches!(self.peek(), Some(' ' | '\t' | '\r')) {
@@ -637,6 +699,19 @@ impl<'a> Parser<'a> {
             self.position + character.len_utf8()
         });
         Diagnostic::new(code, message, SourceSpan::new(self.position, end))
+    }
+
+    fn conditional_separator_diagnostic(&self, message: &'static str) -> Diagnostic {
+        Diagnostic::new(
+            DiagnosticCode::UnexpectedSeparator,
+            message,
+            SourceSpan::new(self.position, self.position + 2),
+        )
+    }
+
+    fn starts_conditional_operator(&self) -> bool {
+        self.source[self.position..].starts_with("&&")
+            || self.source[self.position..].starts_with("||")
     }
 
     fn peek(&self) -> Option<char> {
@@ -689,8 +764,8 @@ const fn is_unsupported_special_parameter(character: char) -> bool {
 mod tests {
     use super::parse;
     use crate::{
-        DiagnosticCode, Parameter, QuoteMode, RedirectionDescriptor, RedirectionFileMode,
-        RedirectionTarget, SourceSpan,
+        ConditionalOperator, DiagnosticCode, Parameter, QuoteMode, RedirectionDescriptor,
+        RedirectionFileMode, RedirectionTarget, SourceSpan,
     };
 
     #[test]
@@ -845,6 +920,89 @@ mod tests {
     }
 
     #[test]
+    fn parses_left_associative_conditional_lists_with_continuation_layout() {
+        let source = "echo first>out&& # continue the list\n echo second||echo third; echo fourth";
+        let script = parse(source).expect("parse conditional list");
+
+        assert_eq!(script.commands().len(), 4);
+        assert_eq!(script.pipelines().len(), 4);
+        assert_eq!(script.pipelines()[0].condition(), None);
+        let RedirectionTarget::File { path, .. } = script.commands()[0].redirections()[0].target()
+        else {
+            panic!("first pipeline retains its adjacent file redirection");
+        };
+        assert_eq!(path.literal(), "out");
+        assert_eq!(
+            script.pipelines()[1]
+                .condition()
+                .expect("AND condition")
+                .operator(),
+            ConditionalOperator::AndIf
+        );
+        assert_eq!(
+            script.pipelines()[1]
+                .condition()
+                .expect("AND condition")
+                .span()
+                .source_text(source),
+            Some("&&")
+        );
+        assert_eq!(
+            script.pipelines()[2]
+                .condition()
+                .expect("OR condition")
+                .operator(),
+            ConditionalOperator::OrIf
+        );
+        assert_eq!(
+            script.pipelines()[2]
+                .condition()
+                .expect("OR condition")
+                .span()
+                .source_text(source),
+            Some("||")
+        );
+        assert_eq!(script.pipelines()[3].condition(), None);
+        assert_eq!(
+            script.pipelines()[1].span().source_text(source),
+            Some("echo second")
+        );
+
+        let adjacent = parse("echo&&next; echo 2>&1||next").expect("parse adjacent operators");
+        assert_eq!(adjacent.pipelines().len(), 4);
+        assert_eq!(
+            adjacent.pipelines()[1]
+                .condition()
+                .expect("adjacent AND condition")
+                .operator(),
+            ConditionalOperator::AndIf
+        );
+        assert_eq!(adjacent.pipelines()[2].condition(), None);
+        assert_eq!(
+            adjacent.pipelines()[3]
+                .condition()
+                .expect("descriptor-adjacent OR condition")
+                .operator(),
+            ConditionalOperator::OrIf
+        );
+        assert_eq!(
+            adjacent.commands()[2].redirections()[0].target(),
+            &RedirectionTarget::Descriptor(RedirectionDescriptor::Stdout)
+        );
+
+        let literal = parse(r#"echo '&&' "||" \&\&"#).expect("parse literal operator bytes");
+        assert_eq!(literal.pipelines().len(), 1);
+        assert_eq!(
+            literal.commands()[0]
+                .words()
+                .iter()
+                .map(crate::Word::literal)
+                .collect::<Vec<_>>(),
+            ["echo", "&&", "||", "&&"]
+        );
+    }
+
+    #[test]
     fn parses_source_ordered_file_and_descriptor_redirections() {
         let source = "tool<input >out 2>>errors 2>&1 1>&2";
         let script = parse(source).expect("parse redirections");
@@ -960,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_pipeline_stages_and_reserved_conditional_or() {
+    fn rejects_missing_pipeline_and_conditional_operands() {
         for (source, code, span) in [
             (
                 "| echo",
@@ -978,9 +1136,34 @@ mod tests {
                 SourceSpan::new(5, 6),
             ),
             (
-                "echo || grep",
-                DiagnosticCode::UnsupportedSyntax,
+                "&& echo",
+                DiagnosticCode::UnexpectedSeparator,
+                SourceSpan::new(0, 2),
+            ),
+            (
+                "echo &&",
+                DiagnosticCode::UnexpectedSeparator,
                 SourceSpan::new(5, 7),
+            ),
+            (
+                "echo || ; grep",
+                DiagnosticCode::UnexpectedSeparator,
+                SourceSpan::new(5, 7),
+            ),
+            (
+                "echo && || grep",
+                DiagnosticCode::UnexpectedSeparator,
+                SourceSpan::new(5, 7),
+            ),
+            (
+                "echo ||| grep",
+                DiagnosticCode::UnexpectedSeparator,
+                SourceSpan::new(5, 7),
+            ),
+            (
+                "echo & grep",
+                DiagnosticCode::UnsupportedSyntax,
+                SourceSpan::new(5, 6),
             ),
         ] {
             let error = parse(source).expect_err("invalid pipeline");

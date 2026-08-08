@@ -32,7 +32,8 @@ ash 的主要 CLI 是机器接口：成功输出和错误诊断都使用稳定�
 `export`/`unset`、`set` pipefail 控制、`exit`、可移植 `ls`、原始字节 `cat`、文本
 `grep`、可移植 `cp`/`mv`/`rm`、只创建空文件的 `touch`、命名参数与上一状态展开、
 宿主原生命令、Windows 上显式 WSL 命令，以及同一行
-原生/WSL/可移植/状态管道和有序的原生、WSL、可移植与状态重定向；源码也可以来自
+原生/WSL/可移植/状态管道、左结合的 `&&`/`||` 条件列表，以及有序的原生、WSL、
+可移植与状态重定向；源码也可以来自
 `-c SOURCE`、原生
 脚本文件路径或 stdin：
 
@@ -45,6 +46,7 @@ ash shell -c "linux:uname -a" # Windows + WSL
 ash shell -c 'native:rustc --version >version.txt 2>&1'
 ash shell -c 'cat - <input.bin >copy.bin'
 ash shell -c 'cp input.bin backup.bin; mv backup.bin archive.bin'
+ash shell -c 'grep -F ready status.txt && echo complete || echo pending'
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ash shell --profile ./profile.ash
@@ -160,7 +162,15 @@ WSL 阶段复用同一份经过校验的管道与文件图，不增加 relay 缓
 的进程树。可移植/状态 future 与捕获 drain 完成后，监督器才进入不会被中途取消的有序
 等待；两阶段共用同一完成边界。
 
-更广的展开与命令语言（包括条件列表、命令替换、glob、别名、函数与 subshell 状态）、
+`&&` 与 `||` 以相同优先级连接完整管道，并从左到右求值。`&&` 只在上一可见状态为
+0 时执行下一管道，`||` 只在其非零时执行；输入状态已经过最终阶段或 `pipefail`
+选择。被短路的分支会为下一链接与 `$?` 保留该状态，不输出诊断，也不进行参数展开、
+命令解析、参数预检、重定向打开、进程启动、状态修改或可移植文件事务。只有实际执行的
+`exit` 才会停止源码。整份提交源码仍在任何副作用前完整解析，因此被跳过分支中的语法
+错误也会阻止全部前缀命令。操作符后可用空白、注释与换行在同一源码中续写；未连接的
+换行或 `;` 会开始新的无条件列表。
+
+更广的展开与剩余命令语言（包括命令替换、glob、别名、函数与 subshell 状态）、
 终端流式输出、前台交互程序与作业控制，以及 WSL 已安装发行版探测、backend
 策略/配置、通用参数路径映射、环境转发、
 Linux 侧所有权与中断归一化尚未实现。

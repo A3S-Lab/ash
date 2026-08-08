@@ -642,6 +642,49 @@ fn shell_command_executes_journaled_portable_mutations() {
 
 #[cfg(feature = "human-shell")]
 #[test]
+fn shell_command_executes_short_circuit_conditional_lists() {
+    let directory = TestDirectory::new();
+    fs::write(directory.0.join("input.txt"), b"hit\n").expect("conditional input");
+
+    let output = run_in(
+        &directory,
+        &[
+            "shell",
+            "--no-profile",
+            "-c",
+            "grep -F missing input.txt && touch skipped >opened || echo fallback &&\n echo continued; grep -F hit input.txt && echo matched",
+        ],
+        b"",
+    );
+
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert_eq!(output.stdout, b"fallback\ncontinued\nhit\nmatched\n");
+    assert!(output.stderr.is_empty());
+    assert!(!directory.0.join("skipped").exists());
+    assert!(!directory.0.join("opened").exists());
+
+    let malformed = run_in(
+        &directory,
+        &[
+            "shell",
+            "--no-profile",
+            "-c",
+            "touch parse-blocked; echo done &&",
+        ],
+        b"",
+    );
+    assert_eq!(malformed.status.code(), Some(2));
+    assert!(malformed.stdout.is_empty());
+    assert!(
+        std::str::from_utf8(&malformed.stderr)
+            .expect("human parse diagnostic")
+            .contains("a conditional operator must be followed by a pipeline")
+    );
+    assert!(!directory.0.join("parse-blocked").exists());
+}
+
+#[cfg(feature = "human-shell")]
+#[test]
 fn shell_profiles_are_opt_in_share_state_and_keep_cli_paths_anchored() {
     let directory = TestDirectory::new();
     fs::create_dir(directory.0.join("child")).expect("child directory");
