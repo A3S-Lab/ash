@@ -7,7 +7,8 @@ This document defines the intended architecture of `ash` and is normative for co
 The current source checkpoint implements the Rust workspace, ASON and framed ASH/1 session, capability negotiation, session/action-bound one-time approval permits, dual Tokio/Rayon runtime, hierarchical governor, direct process execution with quota-bound disk-backed lossless retained output and conservative crash-orphan cleanup, deterministic byte-saving repeated-line, repeated-block, and failure-diagnostic projection, bounded read/list/search, durable compare-and-swap patching and file-only filesystem transactions with restart recovery, algebraic retained-result slicing/search/projection/release and safe artifact materialization, workspace snapshot/delta, cancellation, bounded batch DAGs with stable retained child evidence, strict signed-release verification/download/activation/recovery/rollback, deterministic format evidence, a locked seven-task cross-platform ASH/native-shell tool-plan corpus, a strict provider-neutral paired Agent trace validator/replayer, a stateless OpenAI Responses capture adapter with canonical raw audit binding, a twenty-two-scenario host-local runtime harness with three dual-stream capture profiles and paired disk I/O under idle versus fully occupied compute, four twice-weekly ASON/frame/update-metadata fuzz targets with bounded evolving corpora and source-bound evidence artifacts, deterministic six-target packaging, and a fail-closed native release workflow.
 The accepted post-ASH/1 human frontend has completed H0 with an independent
 `a3s-ash-shell` crate, source-spanned simple-command parsing, persistent state
-types, deterministic command classification, locked parser/resolution fixtures,
+types, source-spanned left-associative `&&`/`||` pipeline lists, deterministic
+command classification, locked parser/resolution fixtures,
 and provider-neutral raw read/list/search semantic services plus a shared raw
 mutation transaction service reused by the ASH/1 adapters. H1 now includes a feature-gated, line-edited `ash shell` REPL with
 configurable prompt, safety-checked persistent history, opt-in Profile startup,
@@ -84,12 +85,19 @@ non-journalable paths fail explicitly. Mutation stages close incoming stdin,
 emit no stdout, and contribute conflict or filesystem status to ordinary final-stage
 and `pipefail` selection. Failed redirection opens block mutation, while a
 post-open transaction failure preserves the normal file-open side effects.
+The second H3 checkpoint adds conditional pipeline lists. `&&` and `||` have
+equal precedence and evaluate left to right against each preceding pipeline's
+visible final-stage or `pipefail` status. Skipped pipelines retain that status
+and perform no expansion, resolution, preflight, redirection open, process
+launch, parent-state change, or filesystem transaction. The full submitted
+source still parses before effects, operator spans remain in the AST, and only
+an admitted `exit` can stop the source.
 Eight-megabyte parent-facing,
 child-to-child, native, mixed, and closed-reader regressions lock exact bytes,
 EOF, backpressure, and completion; ordered-output regressions lock child and
 parent file resources, capture, surviving-pipe sharing, and global file-open
 side effects. User-visible terminal streaming, foreground interactive programs
-and job control, broader expansion and command language, plus installed-distribution
+and job control, broader expansion and the remaining command language, plus installed-distribution
 probing, general WSL argument path mapping, environment forwarding, backend
 policy, and interruption normalization remain open.
 Release-key and platform-signing credential provisioning, the first published release, enough accumulated fuzz duration to claim a soak gate, captured real multi-model Coding Agent runs, medium/large task families, and published hardware-labelled runtime measurements remain open.
@@ -503,6 +511,12 @@ stage writes to a parent-to-parent pipe whose reader joins the same aggregate
 Status defaults to the final stage; persistent `set -o pipefail` instead selects
 the rightmost unsuccessful native, WSL, portable, or stateful exit, while
 `set +o pipefail` restores the default.
+Source-spanned `&&` and `||` then consume that visible pipeline status with
+equal precedence and left associativity. A rejected right-hand pipeline is not
+expanded, resolved, preflighted, or lowered, so it opens no files and starts no
+tasks or processes; its skipped status remains the preceding status. An
+unlinked newline or `;` starts a new unconditional list, while layout and
+comments after an operator may continue the current submitted source.
 
 Native, explicit WSL, and portable shell commands plus implemented stateful
 builtins lower `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2` from left to right after

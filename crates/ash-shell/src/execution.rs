@@ -24,10 +24,10 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use crate::expand::expand_words;
 use crate::state::validate_identifier;
 use crate::{
-    CommandResolver, DiagnosticCode, ExecutionBackend, HostPlatform, NativeCommandLookup,
-    PathCommandLookup, PortableCommand, Redirection, RedirectionDescriptor, RedirectionFileMode,
-    RedirectionTarget, ResolutionError, ResolvedCommand, ShellState, ShellStatus, ShellStatusKind,
-    SimpleCommand, SourceSpan, StatefulBuiltin, parse,
+    CommandResolver, ConditionalOperator, DiagnosticCode, ExecutionBackend, HostPlatform,
+    NativeCommandLookup, PathCommandLookup, PortableCommand, Redirection, RedirectionDescriptor,
+    RedirectionFileMode, RedirectionTarget, ResolutionError, ResolvedCommand, ShellState,
+    ShellStatus, ShellStatusKind, SimpleCommand, SourceSpan, StatefulBuiltin, parse,
 };
 
 /// Maximum stages accepted by one foreground human-shell pipeline.
@@ -137,6 +137,9 @@ struct ExecutionOutput {
 /// Parses and executes the currently implemented foreground shell subset.
 ///
 /// Commands and pipelines run sequentially against one mutable `ShellState`.
+/// `&&` and `||` form left-associative pipeline lists and skip the following
+/// pipeline without expansion, resolution, redirection opens, or other effects
+/// when the preceding visible status does not admit it.
 /// The current human-shell slice performs quote-aware native-string parameter expansion
 /// before resolution, implements stateful environment updates and the portable
 /// command set, provides bounded direct-argv native and explicit WSL execution,
@@ -208,6 +211,15 @@ where
     let mut final_status = state.last_status().clone();
     let mut exit_requested = None;
     for pipeline in script.pipelines() {
+        if pipeline.condition().is_some_and(|condition| {
+            let preceding_succeeded = final_status.code() == 0;
+            match condition.operator() {
+                ConditionalOperator::AndIf => !preceding_succeeded,
+                ConditionalOperator::OrIf => preceding_succeeded,
+            }
+        }) {
+            continue;
+        }
         let commands = &script.commands()[pipeline.command_range()];
         let diagnostic_start = output.diagnostics.len();
         final_status = if commands.len() == 1 {
@@ -3849,7 +3861,9 @@ mod tests {
         STDOUT_CAPTURE, execute_source, execute_source_with, execute_source_with_runner,
         run_pipeline,
     };
-    use crate::{ExecutionBackend, HostPlatform, ShellState, ShellStatusKind, SourceSpan};
+    use crate::{
+        DiagnosticCode, ExecutionBackend, HostPlatform, ShellState, ShellStatusKind, SourceSpan,
+    };
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -4155,6 +4169,84 @@ fn main() {
         assert!(execution.diagnostics().is_empty());
         assert_eq!(execution.status().code(), 0);
         assert_eq!(state.cwd(), child);
+    }
+
+    #[tokio::test]
+    async fn conditional_lists_short_circuit_effects_preserve_status_and_gate_exit() {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("input"), b"hit\n").expect("conditional input");
+        let mut state = ShellState::new(&directory.0);
+
+        let execution = execute_source(
+            "grep -F missing input && touch skipped >opened || echo fallback &&\n echo \"$?\"; grep -F hit input || touch wrong && echo tail",
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(execution.stdout(), b"fallback\n0\nhit\ntail\n");
+        assert!(execution.stderr().is_empty());
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(execution.status().code(), 0);
+        for path in ["skipped", "opened", "wrong", ".ash"] {
+            assert!(
+                !directory.0.join(path).exists(),
+                "skipped branch created {path}"
+            );
+        }
+
+        let malformed = execute_source("touch parse-blocked; echo done &&", &mut state).await;
+        assert!(malformed.stdout().is_empty());
+        assert_eq!(malformed.status().kind(), ShellStatusKind::ParseError);
+        assert_eq!(malformed.status().code(), 2);
+        assert_eq!(malformed.diagnostics().len(), 1);
+        assert_eq!(
+            malformed.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Parse(DiagnosticCode::UnexpectedSeparator)
+        );
+        assert!(!directory.0.join("parse-blocked").exists());
+
+        let skipped_exit =
+            execute_source("grep -F missing input && exit 7; echo after", &mut state).await;
+        assert_eq!(skipped_exit.stdout(), b"after\n");
+        assert_eq!(skipped_exit.status().code(), 0);
+        assert_eq!(skipped_exit.exit_requested(), None);
+
+        let admitted_exit =
+            execute_source("grep -F hit input && exit 23; echo after", &mut state).await;
+        assert_eq!(admitted_exit.stdout(), b"hit\n");
+        assert_eq!(admitted_exit.status().code(), 23);
+        assert_eq!(admitted_exit.exit_requested(), Some(23));
+        assert_eq!(state.last_status().code(), 23);
+    }
+
+    #[tokio::test]
+    async fn conditional_lists_consume_visible_pipeline_and_pipefail_status() {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("existing"), b"keep\n").expect("existing file");
+        let mut state = ShellState::new(&directory.0);
+
+        let default = execute_source(
+            "touch existing | echo final && echo admitted || echo rejected",
+            &mut state,
+        )
+        .await;
+        assert_eq!(default.stdout(), b"final\nadmitted\n");
+        assert_eq!(default.status().code(), 0);
+        assert_eq!(default.diagnostics().len(), 1);
+
+        let strict = execute_source(
+            "set -o pipefail; touch existing | echo strict && echo skipped || echo recovered && echo \"$?\"",
+            &mut state,
+        )
+        .await;
+        assert_eq!(strict.stdout(), b"strict\nrecovered\n0\n");
+        assert_eq!(strict.status().code(), 0);
+        assert_eq!(strict.diagnostics().len(), 1);
+        assert!(state.options().pipefail());
+        assert_eq!(
+            fs::read(directory.0.join("existing")).expect("existing remains"),
+            b"keep\n"
+        );
     }
 
     #[tokio::test]

@@ -36,7 +36,8 @@ against one persistent native state. It implements `pwd`, `echo` (with `-n`),
 raw-byte `cat`, text `grep`, portable `cp`, `mv`, `rm`, create-only `touch`,
 named and last-status parameter expansion, native host executables, explicit
 WSL commands on Windows, plus same-line native/WSL/portable/stateful
-pipelines with ordered native, WSL, portable, and stateful redirections. Source
+pipelines, left-associative `&&`/`||` conditional lists, and ordered native,
+WSL, portable, and stateful redirections. Source
 may also come from `-c SOURCE`, a native
 script-file path, or stdin:
 
@@ -49,6 +50,7 @@ ash shell -c "linux:uname -a" # Windows with WSL
 ash shell -c 'native:rustc --version >version.txt 2>&1'
 ash shell -c 'cat - <input.bin >copy.bin'
 ash shell -c 'cp input.bin backup.bin; mv backup.bin archive.bin'
+ash shell -c 'grep -F ready status.txt && echo complete || echo pending'
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ash shell --profile ./profile.ash
@@ -202,7 +204,18 @@ process tree before the pipeline returns. Portable/stateful futures and capture
 drains settle before the supervisor enters a non-cancelled ordered wait under
 that same completion boundary.
 
-Broader expansion and command language (including conditional lists, command
+`&&` and `||` link complete pipelines with equal precedence and evaluate left
+to right. `&&` admits the next pipeline only after status 0; `||` admits it only
+after a nonzero status. The input is the visible final-stage or `pipefail`
+pipeline status. A skipped branch leaves that status unchanged for the next
+link and `$?`, emits no diagnostic, and performs no expansion, resolution,
+argument preflight, redirection open, process launch, state change, or portable
+filesystem transaction. Only an admitted `exit` stops the source. The complete
+submitted source still parses before effects, so malformed skipped syntax blocks
+every prefix command. Layout, comments, and newlines may continue a source after
+an operator; an unlinked newline or `;` starts a new unconditional list.
+
+Broader expansion and the remaining command language (including command
 substitution, globbing, aliases, functions, and subshell state), terminal
 streaming, foreground interactive programs and jobs, plus installed
 WSL distribution probing, backend policy/configuration, general argument path

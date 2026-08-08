@@ -30,13 +30,15 @@ with a configurable prompt, private persistent history, opt-in startup Profile,
 and `exit [STATUS]`. The same persistent state executes sequential `pwd`,
 `echo`, `cd`, `export`, `unset`, `set` pipefail control, portable `ls`, `cat`,
 and `grep`, portable `cp`, `mv`, `rm`, and create-only `touch`, plus native host
-executables with direct argument vectors. Inline
+executables with direct argument vectors. Pipelines compose into
+left-associative `&&`/`||` conditional lists. Inline
 source, native script files, and bounded stdin remain available without changing
 the machine contracts of `ash run` and `ash rpc`. H2 now provides explicit
 process-stdio modes, validated native OS pipe graphs, same-line pipelines of two
 to 32 native, portable, or implemented stateful-builtin stages, configurable
-`pipefail`, and source-ordered native, portable, or stateful redirections. Every stage is
-preflighted before execution. Native pairs remain directly connected;
+`pipefail`, and source-ordered native, portable, or stateful redirections. Every
+admitted pipeline is fully preflighted before execution; a short-circuited
+conditional branch is not expanded, resolved, or opened. Native pairs remain directly connected;
 in-process boundaries use explicit parent-owned asynchronous pipe and file
 handles and preserve OS backpressure. Mixed-stage files open in global source
 order before spawn. Replaced or non-consuming internal endpoints still deliver
@@ -47,6 +49,8 @@ and any post-spawn setup, capture, or wait failure terminates and reaps every
 native member's owned process tree before returning.
 The first H3 checkpoint routes those four portable mutations through the same
 BLAKE3-preimage, journaled, no-overwrite transaction service as ASH/1 `fs`.
+The second adds source-spanned, left-associative `&&`/`||` lists over complete
+pipeline statuses without introducing an implicit host shell.
 
 ## What ash covers
 
@@ -60,7 +64,7 @@ BLAKE3-preimage, journaled, no-overwrite transaction service as ASH/1 `fs`.
 | Retained evidence    | `/ # ? - \| >`                        | Byte and line slices, search, release, ordered table projection, and capability-gated materialization                                                                  |
 | Model context        | ASON, `×N`, `×N#K`, `⋯N`              | Columnar records, path dictionaries, explicit reductions, stable merge, and references back to the full source                                                         |
 | Trust and delivery   | capabilities, permits, signed updates | Least-privilege negotiation, session/action/policy/expiry-bound one-time permits, replay rejection, transactional activation, recovery, rollback, SBOM, and provenance |
-| Human shell          | `ash shell`                           | H1 REPL lifecycle, H2 supervised streaming/redirection, and H3 journaled portable `cp`/`mv`/`rm`/`touch` mutations                                                     |
+| Human shell          | `ash shell`                           | H1 REPL lifecycle, H2 supervised streaming/redirection, and H3 journaled mutations plus `&&`/`||` pipeline lists                                                    |
 
 The [complete capability map](https://a3s-lab.github.io/ash/guide/capabilities.html)
 documents guarantees, evidence, and deliberate non-goals for the full surface.
@@ -253,8 +257,18 @@ later redirected. Stateful files join the same global open order; replacing
 their empty stdout closes an outgoing pipe normally. A WSL stage reuses the
 same pipe and file graph without an intermediate relay or full-stream buffer.
 
+`&&` and `||` link complete pipelines with equal precedence and left
+associativity. `&&` admits the next pipeline only after status 0; `||` admits it
+only after a nonzero status. A skipped pipeline performs no expansion,
+resolution, argument validation, redirection open, process launch, state change,
+or filesystem transaction, and leaves the preceding status available to the
+next link and `$?`. A newline or comment may continue a list after the operator;
+`;` or an unlinked newline starts a new unconditional list. The complete source
+still parses before any command runs, so a malformed trailing branch prevents
+all prefix effects. An admitted `exit` stops the source; a skipped one does not.
+
 User-visible terminal streaming, foreground interactive programs and job
-control, broader expansion and command language, and the remaining H5 WSL
+control, broader expansion and the remaining command language, and the remaining H5 WSL
 policy, path, environment, and interruption contracts are not implemented yet. A minimal
 machine-only binary can be built with `--no-default-features`.
 
@@ -315,7 +329,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **309 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **313 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, signed updates, and
   the human shell.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB

@@ -1,4 +1,4 @@
-script 0..63
+script 0..103
 pipeline 0..29
   command 0..29
     word 0..4
@@ -22,3 +22,23 @@ pipeline 30..62
     redirection stdout write 53..57 operator 53..54
       target 54..57 "out"
     redirection stderr duplicate-stdout 58..62 operator 58..62
+pipeline 63..73
+  command 63..73
+    word 63..67
+      literal unquoted 63..67 "echo"
+    word 68..73
+      literal unquoted 68..73 "first"
+condition and-if 74..76
+pipeline 77..88
+  command 77..88
+    word 77..81
+      literal unquoted 77..81 "echo"
+    word 82..88
+      literal unquoted 82..88 "second"
+condition or-if 89..91
+pipeline 92..102
+  command 92..102
+    word 92..96
+      literal unquoted 92..96 "echo"
+    word 97..102
+      literal unquoted 97..102 "third"

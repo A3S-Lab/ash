@@ -1,6 +1,6 @@
 # Portable Human Shell Architecture
 
-- Status: accepted; H1, eleven H2 checkpoints, and the first H3 checkpoint implemented
+- Status: accepted; H1, twelve H2 checkpoints, and the first two H3 checkpoints implemented
 - Target: post-ASH/1 version one
 - Last updated: 2026-08-08
 
@@ -13,7 +13,8 @@ that reuses the portable execution and filesystem foundations without
 weakening their machine-facing semantics.
 
 The current source checkpoint has completed H0 with the independent
-`a3s-ash-shell` crate, a source-spanned simple-command parser, AST, diagnostics,
+`a3s-ash-shell` crate, a source-spanned simple-command and conditional-list
+parser, AST, diagnostics,
 persistent state types, deterministic command classification, locked parser and
 resolution fixtures, provider-neutral raw read/list/search semantic services,
 and a shared raw mutation transaction service. Existing ASH/1 adapters reuse those services while retaining permit,
@@ -24,12 +25,14 @@ stdin, and native script-file sources. One persistent state executes sequential
 `pwd`, `echo`, `cd`, `export`/`unset`, `set` pipefail control, portable `ls`,
 bounded raw-byte `cat` and text `grep`, journaled regular-file `cp`/`mv`/`rm`
 and create-only `touch`, source-spanned named and last-status
-expansion, and direct-argv native host commands. H2 adds explicit per-stream
+expansion, direct-argv native host commands, and left-associative `&&`/`||`
+pipeline lists. H2 adds explicit per-stream
 modes, validated direct OS pipe graphs, same-line pipelines of two to 32 native,
 explicit WSL, implemented portable, or implemented stateful-builtin stages,
 configurable `pipefail`, and source-ordered native, WSL, portable, or stateful
-redirections. All stages are
-expanded and resolved before execution; native pairs use direct pipes, while
+redirections. Every admitted pipeline is fully expanded and resolved before
+execution, while a short-circuited conditional branch performs neither step;
+native pairs use direct pipes, while
 in-process boundaries retain explicit async parent pipe/file handles and run as
 concurrent bounded tasks. Unredirected final stdout and stage-ordered native
 stderr remain bounded captures. Mixed native/portable/stateful file resources
@@ -42,8 +45,9 @@ The explicit Windows adapter discovers `wsl.exe`, constructs exact
 `--distribution`/`--cd`/`--exec` argv, and reuses that graph for WSL streaming
 and host-file redirection. The first H3 checkpoint binds portable file
 mutations to the persistent cwd and reuses the ASH/1 journaled transaction
-boundary. Foreground interactive programs and jobs, terminal streaming,
-broader expansion and command language, and the remaining WSL policy, general
+boundary. The second adds source-spanned `&&`/`||` lists over visible pipeline
+status without changing ASH/1. Foreground interactive programs and jobs,
+terminal streaming, broader expansion and the remaining command language, and the remaining WSL policy, general
 path/environment mapping, and interruption contracts remain unimplemented.
 
 ## 1. Executive decision
@@ -347,6 +351,35 @@ direct argv launch. Only a command name must be UTF-8 because command
 classification is textual; an unrepresentable expanded name fails explicitly
 with status 127. Tilde, command, arithmetic, and glob expansion remain staged
 work and do not run implicitly.
+
+### 7.2 Current conditional-list contract
+
+The current command language accepts `pipeline && pipeline` and
+`pipeline || pipeline`. Both operators have equal precedence and evaluate left
+to right. `&&` admits its following pipeline only when the preceding visible
+status is zero; `||` admits it only when that status is nonzero. The visible
+status is already the pipeline's final-stage result or, when enabled, its
+rightmost `pipefail` failure. A skipped pipeline leaves that status unchanged,
+so a later link and `$?` observe the same value. This gives the conventional
+left-associative result for combinations such as `a && b || c && d` without
+constructing an implicit host-shell string.
+
+Short-circuiting skips the entire pipeline before parameter expansion, command
+resolution, argument or regular-expression validation, redirection planning or
+file opens, process launch, parent-state mutation, and portable filesystem
+transactions. It emits no diagnostic from the skipped branch. An admitted
+`exit` stops the submitted source normally; a skipped `exit` has no effect.
+The complete source, including every skipped branch, is still parsed before any
+command runs, so a malformed trailing operator or pipeline prevents all prefix
+effects.
+
+Operators may be adjacent to their neighboring tokens. Horizontal layout,
+comments, and one or more newlines may follow an operator within one submitted
+`-c`, stdin, Profile, or script source. An unlinked newline or `;` ends the
+current conditional list and starts a new unconditional one. Leading, trailing,
+or repeated conditional operators are source-spanned parse errors. Quoted or
+backslash-escaped operator bytes remain ordinary word content, and a lone `&`
+remains reserved for H4 background jobs.
 
 ## 8. Persistent shell state
 
@@ -780,6 +813,17 @@ destination preservation, and stale-preimage conflict, while shell regressions
 lock all four commands, path/option rejection, redirection-before-mutation, and
 `pipefail` participation.
 
+The second H3 checkpoint adds a `PipelineCondition` to the AST for every
+right-hand `&&` or `||` pipeline, retaining the operator's exact byte span.
+Separators reset the link, while post-operator horizontal layout, comments, and
+newlines continue it. Execution compares each link with the prior visible
+`ShellStatus`; a rejected link advances no execution phase and does not replace
+that status. An admitted link uses the existing simple-command or fully
+preflighted pipeline path unchanged. Parser fixtures lock adjacency,
+continuation, operator spans, and missing operands; executor and CLI regressions
+lock left associativity, `$?`, side-effect suppression, pipeline/`pipefail`
+selection, and `exit` gating.
+
 ## 12. Streaming pipelines
 
 Add a dedicated platform-neutral I/O model:
@@ -820,6 +864,11 @@ all member trees on a setup, capture, or wait failure. The shell finishes
 in-process stages and capture drains before entering its non-cancelled wait.
 WSL wrapper stages now use the same graph and redirection resources. Capacity
 reservation remains open.
+
+Conditional lists sit above this lifecycle: only an admitted pipeline enters
+validation and resource reservation, and a skipped pipeline leaves the prior
+visible status untouched. The complete submitted AST is still parsed before
+the first lifecycle begins.
 
 Data flows directly through OS pipes. It does not pass through ASON or the
 result store, and it is not materialized in memory before the next command
@@ -1015,6 +1064,8 @@ and leaves the line editor and in-memory session usable.
 - fuzzing for malformed quotes, nesting, substitutions, and redirections;
 - exact parameter AST spans plus explicit expansion-order, native-value, empty,
   field-boundary, quoting, and previous-status fixtures;
+- exact conditional-operator spans, continuation layout, missing-operand, and
+  adjacent-redirection fixtures;
 - rejection tests for unsupported Bash syntax.
 
 ### 19.2 Portable commands
@@ -1031,6 +1082,10 @@ preservation, stale-preimage conflict without retry, all four shell commands,
 option/arity/path rejection, redirection-before-mutation ordering, and pipeline
 `pipefail` participation. Platform transaction tests continue to own the full
 rollback and restart-recovery cutpoint matrix.
+Conditional-list coverage locks equal-precedence left associativity, unchanged
+status across skipped branches, `$?`, parse-before-effect behavior, skipped
+redirection and mutation side effects, admitted/skipped `exit`, and visible
+final-stage versus `pipefail` pipeline status through a real CLI process.
 
 ### 19.3 Pipelines and jobs
 
@@ -1123,7 +1178,7 @@ command and an unredirected first pipeline stage still receive null stdin, so
 foreground terminal programs and Ctrl+C job-tree delivery remain H4 rather
 than being claimed by this REPL checkpoint. The `human-shell` feature is enabled
 for the normal binary and can be disabled for a minimal machine-only build.
-Broader expansion and command language, terminal streaming, job control, and
+Broader expansion and the remaining command language, terminal streaming, job control, and
 the remaining WSL detection, policy, path, environment, and interruption
 contracts remain for later increments.
 
@@ -1185,8 +1240,8 @@ ordered host-file redirection, and backend-aware `pipefail` status.
 ### H3: mutations and command language
 
 - portable `cp`, `mv`, `rm`, and create-only `touch` adapters are implemented;
-- add conditional lists, command substitution, globbing, aliases, functions,
-  and subshell state;
+- left-associative `&&` and `||` conditional pipeline lists are implemented;
+- add command substitution, globbing, aliases, functions, and subshell state;
 - complete the first stable `ash` dialect specification.
 
 Current checkpoint: mutation resolution precedes native lookup, exact-arity
@@ -1195,8 +1250,12 @@ the transaction root. Copy, move, and remove derive a bounded BLAKE3 preimage;
 touch prepares an empty create. All four enter the shared journaled,
 no-overwrite transaction on the blocking plane, reject traversal and
 non-regular targets, emit no stdout, and participate in final-stage/`pipefail`
-selection. Conditional lists, substitutions, globbing, aliases, functions,
-subshell state, and the stable dialect specification remain open.
+selection. Source-spanned `&&`/`||` links consume that selected pipeline status
+with equal precedence and left associativity. Rejected branches preserve the
+preceding status and perform no expansion, resolution, preflight, file open,
+process launch, state change, or transaction; only an admitted `exit` stops the
+source. Command substitution, globbing, aliases, functions, subshell state, and
+the stable dialect specification remain open.
 
 ### H4: interactive jobs
 

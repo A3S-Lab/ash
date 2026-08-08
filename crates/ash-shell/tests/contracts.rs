@@ -2,9 +2,10 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use a3s_ash_shell::{
-    CommandResolver, Diagnostic, HostPlatform, NativeCommandLookup, Parameter, PlatformEnvironment,
-    PortableCommand, QuoteMode, RedirectionDescriptor, RedirectionFileMode, RedirectionTarget,
-    ResolutionError, ResolvedCommand, Script, ShellFunction, ShellState, StatefulBuiltin, parse,
+    CommandResolver, ConditionalOperator, Diagnostic, HostPlatform, NativeCommandLookup, Parameter,
+    PlatformEnvironment, PortableCommand, QuoteMode, RedirectionDescriptor, RedirectionFileMode,
+    RedirectionTarget, ResolutionError, ResolvedCommand, Script, ShellFunction, ShellState,
+    StatefulBuiltin, parse,
 };
 
 #[test]
@@ -75,6 +76,16 @@ fn render_script(script: &Script) -> String {
     )
     .expect("string write");
     for pipeline in script.pipelines() {
+        if let Some(condition) = pipeline.condition() {
+            writeln!(
+                output,
+                "condition {} {}..{}",
+                conditional_name(condition.operator()),
+                condition.span().start(),
+                condition.span().end()
+            )
+            .expect("string write");
+        }
         writeln!(
             output,
             "pipeline {}..{}",
@@ -172,6 +183,13 @@ fn render_script(script: &Script) -> String {
         }
     }
     output
+}
+
+const fn conditional_name(operator: ConditionalOperator) -> &'static str {
+    match operator {
+        ConditionalOperator::AndIf => "and-if",
+        ConditionalOperator::OrIf => "or-if",
+    }
 }
 
 const fn descriptor_name(descriptor: RedirectionDescriptor) -> &'static str {
