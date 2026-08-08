@@ -738,7 +738,7 @@ mod tests {
         );
         assert_eq!(
             expanded("echo **/*.txt", &state).expect("double-star expansion"),
-            [PathBuf::from("one/top.txt").into_os_string()]
+            [PathBuf::from("one").join("top.txt").into_os_string()]
         );
         assert_eq!(
             expanded("echo $ABSOLUTE_PATTERN", &state).expect("absolute expansion"),
