@@ -1,1 +1,1 @@
-echo $NAME "${NAME}:$?" '$NAME' \$NAME
+echo $NAME "${NAME}:$?" '$NAME' \$NAME "$(echo nested $(echo value))"

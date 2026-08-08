@@ -59,9 +59,16 @@ file history, and a sequential executor for `pwd`, `echo`, `cd`, expanded
 `export`/`unset` environment updates, `set` pipefail control, `exit`, portable
 `ls`, bounded raw-byte `cat`, bounded text `grep`, journaled `cp`/`mv`/`rm`,
 create-only `touch`, named and last-status
-parameter expansion, and native host executables. Parameter nodes retain exact quote and source-span
-metadata; a separate native-string expansion stage performs the documented
-fixed field splitting before resolution. Shared provider-neutral semantic
+parameter expansion, nested `$(...)` command substitution, and native host
+executables. Parameter and substitution nodes retain exact quote and
+source-span metadata; substitutions recursively own a typed `Script` up to 32
+levels deep, execute in source order against a full state clone, trim trailing
+LF from bounded stdout, and preserve external effects without writing cwd,
+variables, environment, options, status, or `exit` back to the parent. Nested
+stderr and diagnostics propagate once, and substitution values share the
+128 MiB synchronous capture allowance with command stdout/stderr. A separate
+native-string expansion stage performs the documented fixed field splitting
+before resolution. Shared provider-neutral semantic
 services live below the ASH/1 adapters in `a3s-ash-ops`; portable discovery
 commands reuse bounded list/read/search semantics through an ordinary-authority
 native provider, while portable mutations and ASH/1 `fs` share the raw durable
@@ -137,7 +144,8 @@ native, mixed, portable-only,
 stateful, closed-reader, and ordered-redirection regressions lock backpressure,
 exact bytes, EOF, handle closure, cloned-state isolation, descriptor sharing,
 global file-open order, transaction conflicts, and mutation/open ordering.
-Visible terminal streaming, broader expansion and the remaining command language,
+Visible terminal streaming, globbing, aliases, functions, subshell state, and
+the remaining command language,
 foreground interactive programs and jobs, plus installed-distribution
 probing, general WSL path/environment mapping, backend policy, Linux-side
 ownership, and interruption normalization remain staged work.

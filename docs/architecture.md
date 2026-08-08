@@ -17,8 +17,9 @@ stdin/native-file sources. One persistent state executes expanded
 `export`/`unset`, `set -o pipefail`/`set +o pipefail`, sequential `pwd`, `echo`,
 `cd`, portable `ls`, bounded raw-byte `cat`, bounded text `grep`, journaled
 regular-file `cp`/`mv`/`rm` and create-only `touch`, source-spanned
-`$NAME`/`${NAME}`/`$?` expansion with quote-aware fixed field splitting and
-native-string preservation, and native host executables launched through
+`$NAME`/`${NAME}`/`$?` expansion plus recursively parsed nested `$(...)`
+command substitution with quote-aware fixed field splitting and native-string
+preservation, and native host executables launched through
 `ash-platform` with exact argument vectors, persistent cwd/environment, owned
 process trees, bounded capture, and native status propagation.
 
@@ -92,12 +93,28 @@ and perform no expansion, resolution, preflight, redirection open, process
 launch, parent-state change, or filesystem transaction. The full submitted
 source still parses before effects, operator spans remain in the AST, and only
 an admitted `exit` can stop the source.
+The third H3 checkpoint adds nested `$(...)` command substitution to command
+words and file-redirection targets. The parser recursively retains a complete
+typed `Script` with exact outer-source spans and a 32-level depth limit. Each
+substitution runs in source order against a full shell-state clone, so cwd,
+variables, environment, options, status, and `exit` do not write back, while
+ordinary external process and filesystem effects remain visible. Captured
+stdout loses every trailing LF, stays one field when double-quoted, and uses
+the fixed ASCII split when unquoted. Nested stderr and diagnostics propagate
+once; nonzero nested status does not replace parent `$?`. NUL is rejected,
+Unix preserves non-UTF-8 bytes, and Windows requires UTF-8. Substitution values
+share the remaining 128 MiB synchronous capture allowance with stdout/stderr;
+a capture failure blocks the outer command. Short-circuited pipelines perform
+no substitution, and full-source parsing still precedes every effect. If a
+later outer-pipeline stage fails preflight, external effects from substitutions
+already executed in earlier source positions remain.
 Eight-megabyte parent-facing,
 child-to-child, native, mixed, and closed-reader regressions lock exact bytes,
 EOF, backpressure, and completion; ordered-output regressions lock child and
 parent file resources, capture, surviving-pipe sharing, and global file-open
 side effects. User-visible terminal streaming, foreground interactive programs
-and job control, broader expansion and the remaining command language, plus installed-distribution
+and job control, globbing, aliases, functions, subshell state, the remaining
+command language, plus installed-distribution
 probing, general WSL argument path mapping, environment forwarding, backend
 policy, and interruption normalization remain open.
 Release-key and platform-signing credential provisioning, the first published release, enough accumulated fuzz duration to claim a soak gate, captured real multi-model Coding Agent runs, medium/large task families, and published hardware-labelled runtime measurements remain open.

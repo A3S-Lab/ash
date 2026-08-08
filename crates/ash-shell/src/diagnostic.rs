@@ -13,6 +13,8 @@ pub enum DiagnosticCode {
     UnterminatedDoubleQuote,
     UnterminatedParameterExpansion,
     InvalidParameterExpansion,
+    UnterminatedCommandSubstitution,
+    CommandSubstitutionDepthExceeded,
     TrailingEscape,
 }
 
@@ -46,6 +48,11 @@ impl Diagnostic {
     #[must_use]
     pub const fn span(&self) -> SourceSpan {
         self.span
+    }
+
+    pub(crate) fn shifted(mut self, offset: usize) -> Self {
+        self.span = self.span.shifted(offset);
+        self
     }
 }
 

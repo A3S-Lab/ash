@@ -685,6 +685,55 @@ fn shell_command_executes_short_circuit_conditional_lists() {
 
 #[cfg(feature = "human-shell")]
 #[test]
+fn shell_command_executes_nested_command_substitutions() {
+    let directory = TestDirectory::new();
+    fs::create_dir(directory.0.join("child")).expect("child directory");
+    fs::write(directory.0.join("input.txt"), b"hit\n").expect("substitution input");
+
+    let output = run_in(
+        &directory,
+        &[
+            "shell",
+            "--no-profile",
+            "-c",
+            "export TOKEN=parent; echo \"value=$(echo one; echo two)\" $(echo \"split fields\"); echo \"$(cd child; pwd)\"; pwd; grep -F hit input.txt || echo \"$(touch skipped)\"; echo payload >$(echo output.txt); echo \"$(cat output.txt)\"; echo \"$(exit 7)\" after",
+        ],
+        b"",
+    );
+
+    let root = fs::canonicalize(&directory.0).expect("canonical root");
+    let child = fs::canonicalize(directory.0.join("child")).expect("canonical child");
+    let expected = format!(
+        "value=one\ntwo split fields\n{}\n{}\nhit\npayload\n after\n",
+        child.display(),
+        root.display()
+    );
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert_eq!(output.stdout, expected.as_bytes());
+    assert!(output.stderr.is_empty());
+    assert!(!directory.0.join("skipped").exists());
+    assert_eq!(
+        fs::read(directory.0.join("output.txt")).expect("expanded redirection target"),
+        b"payload\n"
+    );
+
+    let malformed = run_in(
+        &directory,
+        &[
+            "shell",
+            "--no-profile",
+            "-c",
+            "touch parse-blocked; echo \"$(echo",
+        ],
+        b"",
+    );
+    assert_eq!(malformed.status.code(), Some(2));
+    assert!(malformed.stdout.is_empty());
+    assert!(!directory.0.join("parse-blocked").exists());
+}
+
+#[cfg(feature = "human-shell")]
+#[test]
 fn shell_profiles_are_opt_in_share_state_and_keep_cli_paths_anchored() {
     let directory = TestDirectory::new();
     fs::create_dir(directory.0.join("child")).expect("child directory");

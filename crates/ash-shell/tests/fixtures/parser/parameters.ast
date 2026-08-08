@@ -1,6 +1,6 @@
-script 0..39
-pipeline 0..38
-  command 0..38
+script 0..70
+pipeline 0..69
+  command 0..69
     word 0..4
       literal unquoted 0..4 "echo"
     word 5..10
@@ -13,3 +13,21 @@ pipeline 0..38
       literal single 24..31 "$NAME"
     word 32..38
       literal unquoted 32..38 "$NAME"
+    word 39..69
+      command-substitution double 40..68 body 42..67
+        script 0..25
+        pipeline 0..25
+          command 0..25
+            word 0..4
+              literal unquoted 0..4 "echo"
+            word 5..11
+              literal unquoted 5..11 "nested"
+            word 12..25
+              command-substitution unquoted 12..25 body 14..24
+                script 0..10
+                pipeline 0..10
+                  command 0..10
+                    word 0..4
+                      literal unquoted 0..4 "echo"
+                    word 5..10
+                      literal unquoted 5..10 "value"

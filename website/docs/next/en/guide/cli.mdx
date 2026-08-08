@@ -129,6 +129,22 @@ space, tab, and LF separators, and an unquoted empty expansion can remove its
 word. `IFS` does not configure splitting in this checkpoint. Native string units
 remain lossless through expansion and direct argv launch.
 
+Nested `$(SOURCE)` command substitutions are parsed into the same typed script
+plan, with exact outer-source diagnostics and a 32-level depth limit. They run
+in source order in command words and file-redirection targets. Each receives a
+full `ShellState` clone, so cwd, variables, environment, options, status, and
+`exit` remain local; ordinary external process and filesystem effects remain
+visible, including when a later pipeline stage fails outer preflight. Ash
+captures stdout, removes every trailing LF, preserves one field and
+internal newlines inside double quotes, and applies the fixed ASCII split only
+when unquoted. A nonzero nested status does not replace parent `$?` or block the
+outer command; stderr and diagnostics propagate once. NUL output is rejected.
+Unix preserves non-UTF-8 bytes, while Windows requires valid UTF-8. Substitution
+values, stdout, and stderr share the remaining 128 MiB synchronous allowance;
+a capture failure prevents the outer command from running. Short-circuited
+pipelines execute no substitutions, and full-source parsing still precedes all
+effects.
+
 Native programs resolve through the persistent `PATH` or an explicit `native:`
 prefix. The resolved host executable receives the parsed argument vector,
 current directory, and exported environment directly; ash never inserts a host
@@ -151,7 +167,8 @@ Native, WSL, and portable commands plus implemented stateful builtins accept
 `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
 Assignments apply from left to right: `command >out 2>&1` merges both streams
 into `out`, while `command 2>&1 >out` leaves stderr on the original stdout
-capture. Every file target must expand to exactly one native field; relative
+capture. Every file target, including `$(...)`, must expand to exactly one
+native field; relative
 paths resolve against persistent cwd. Files connect directly to child or
 parent-task OS handles, so redirected output does not consume the synchronous
 capture allowance. One validated graph order interleaves native, portable, and
@@ -215,8 +232,8 @@ submitted source still parses before effects, so malformed skipped syntax blocks
 every prefix command. Layout, comments, and newlines may continue a source after
 an operator; an unlinked newline or `;` starts a new unconditional list.
 
-Broader expansion and the remaining command language (including command
-substitution, globbing, aliases, functions, and subshell state), terminal
+The remaining command language (including globbing, aliases, functions, and
+subshell state), terminal
 streaming, foreground interactive programs and jobs, plus installed
 WSL distribution probing, backend policy/configuration, general argument path
 mapping, environment forwarding, Linux-side ownership, and interruption

@@ -21,20 +21,26 @@ impl ExpandedWord {
 
 /// Expands syntax words without losing native environment-string values.
 ///
-/// Only unquoted parameter values participate in the current fixed field
-/// splitting contract. Literal source characters and quoted values remain in
-/// the field in which they appeared.
-pub(crate) fn expand_words(words: &[Word], state: &ShellState) -> Vec<ExpandedWord> {
+/// Only unquoted parameter and command-substitution values participate in the
+/// current fixed field splitting contract. Literal source characters and
+/// quoted values remain in the field in which they appeared.
+#[cfg(test)]
+fn expand_words(words: &[Word], state: &ShellState) -> Vec<ExpandedWord> {
     words
         .iter()
-        .flat_map(|word| expand_word(word, state))
+        .flat_map(|word| expand_word_with_substitutions(word, state, std::iter::empty()))
         .collect()
 }
 
-fn expand_word(word: &Word, state: &ShellState) -> Vec<ExpandedWord> {
+pub(crate) fn expand_word_with_substitutions(
+    word: &Word,
+    state: &ShellState,
+    substitution_values: impl IntoIterator<Item = OsString>,
+) -> Vec<ExpandedWord> {
     let mut fields = Vec::new();
     let mut current = OsString::new();
     let mut present = false;
+    let mut substitution_values = substitution_values.into_iter();
 
     for part in word.parts() {
         match part {
@@ -55,8 +61,23 @@ fn expand_word(word: &Word, state: &ShellState) -> Vec<ExpandedWord> {
                     present = true;
                 }
             }
+            WordPart::CommandSubstitution { quote, .. } => {
+                let value = substitution_values
+                    .next()
+                    .expect("every command substitution has one execution value");
+                if *quote == QuoteMode::Unquoted {
+                    append_split_value(&value, &mut fields, &mut current, &mut present);
+                } else {
+                    current.push(&value);
+                    present = true;
+                }
+            }
         }
     }
+    debug_assert!(
+        substitution_values.next().is_none(),
+        "command substitution values align with word parts"
+    );
 
     finish_field(&mut fields, &mut current, &mut present);
     fields

@@ -21,13 +21,14 @@ use futures::future::{join_all, try_join_all};
 use regex::{Regex, RegexBuilder};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::expand::expand_words;
+use crate::expand::{ExpandedWord, expand_word_with_substitutions};
 use crate::state::validate_identifier;
 use crate::{
-    CommandResolver, ConditionalOperator, DiagnosticCode, ExecutionBackend, HostPlatform,
-    NativeCommandLookup, PathCommandLookup, PortableCommand, Redirection, RedirectionDescriptor,
-    RedirectionFileMode, RedirectionTarget, ResolutionError, ResolvedCommand, ShellState,
-    ShellStatus, ShellStatusKind, SimpleCommand, SourceSpan, StatefulBuiltin, parse,
+    CommandResolver, CommandSubstitution, ConditionalOperator, DiagnosticCode, ExecutionBackend,
+    HostPlatform, NativeCommandLookup, PathCommandLookup, PortableCommand, Redirection,
+    RedirectionDescriptor, RedirectionFileMode, RedirectionTarget, ResolutionError,
+    ResolvedCommand, Script, ShellState, ShellStatus, ShellStatusKind, SimpleCommand, SourceSpan,
+    StatefulBuiltin, Word, WordPart, parse,
 };
 
 /// Maximum stages accepted by one foreground human-shell pipeline.
@@ -92,6 +93,7 @@ pub struct ShellExecution {
     diagnostics: Vec<ExecutionDiagnostic>,
     status: ShellStatus,
     exit_requested: Option<i64>,
+    capture_failed: bool,
 }
 
 impl ShellExecution {
@@ -127,11 +129,32 @@ impl ShellExecution {
     }
 }
 
-#[derive(Default)]
 struct ExecutionOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     diagnostics: Vec<ExecutionDiagnostic>,
+    capture_limit: u64,
+    retained_expansion_bytes: u64,
+    capture_failed: bool,
+}
+
+impl ExecutionOutput {
+    const fn with_capture_limit(capture_limit: u64) -> Self {
+        Self {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            diagnostics: Vec::new(),
+            capture_limit,
+            retained_expansion_bytes: 0,
+            capture_failed: false,
+        }
+    }
+}
+
+impl Default for ExecutionOutput {
+    fn default() -> Self {
+        Self::with_capture_limit(MAX_READ_FILE_BYTES)
+    }
 }
 
 /// Parses and executes the currently implemented foreground shell subset.
@@ -140,8 +163,8 @@ struct ExecutionOutput {
 /// `&&` and `||` form left-associative pipeline lists and skip the following
 /// pipeline without expansion, resolution, redirection opens, or other effects
 /// when the preceding visible status does not admit it.
-/// The current human-shell slice performs quote-aware native-string parameter expansion
-/// before resolution, implements stateful environment updates and the portable
+/// The current human-shell slice performs quote-aware native-string parameter
+/// and command-substitution expansion before resolution, implements stateful environment updates and the portable
 /// command set, provides bounded direct-argv native and explicit WSL execution,
 /// and connects two-to-32-stage native, WSL, portable, and stateful-builtin
 /// foreground pipelines with direct operating-system pipes or explicitly
@@ -203,11 +226,37 @@ where
                 diagnostics: vec![diagnostic],
                 status,
                 exit_requested: None,
+                capture_failed: false,
             };
         }
     };
 
-    let mut output = ExecutionOutput::default();
+    execute_script_with_runner(
+        &script,
+        state,
+        lookup,
+        host,
+        runner,
+        MAX_READ_FILE_BYTES,
+        true,
+    )
+    .await
+}
+
+async fn execute_script_with_runner<L, R>(
+    script: &Script,
+    state: &mut ShellState,
+    lookup: &L,
+    host: HostPlatform,
+    runner: &R,
+    capture_limit: u64,
+    render_diagnostics: bool,
+) -> ShellExecution
+where
+    L: NativeCommandLookup + ?Sized,
+    R: NativeCommandRunner + ?Sized,
+{
+    let mut output = ExecutionOutput::with_capture_limit(capture_limit);
     let mut final_status = state.last_status().clone();
     let mut exit_requested = None;
     for pipeline in script.pipelines() {
@@ -222,6 +271,9 @@ where
         }
         let commands = &script.commands()[pipeline.command_range()];
         let diagnostic_start = output.diagnostics.len();
+        let stdout_start = output.stdout.len();
+        let stderr_start = output.stderr.len();
+        let retained_expansion_start = output.retained_expansion_bytes;
         final_status = if commands.len() == 1 {
             execute_simple_command(
                 &commands[0],
@@ -245,10 +297,27 @@ where
             )
             .await
         };
-        for diagnostic in &output.diagnostics[diagnostic_start..] {
-            output
-                .stderr
-                .extend_from_slice(diagnostic.render().as_bytes());
+        if captured_output_size(&output) > output.capture_limit {
+            output.stdout.truncate(stdout_start);
+            output.stderr.truncate(stderr_start);
+            output.retained_expansion_bytes = retained_expansion_start;
+            output.capture_failed = true;
+            final_status = process_failure(
+                format!(
+                    "shell output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous capture ceiling"
+                ),
+                pipeline.span(),
+                &mut output.diagnostics,
+                ShellStatusKind::Exited,
+                1,
+            );
+        }
+        if render_diagnostics {
+            for diagnostic in &output.diagnostics[diagnostic_start..] {
+                output
+                    .stderr
+                    .extend_from_slice(diagnostic.render().as_bytes());
+            }
         }
         state.set_last_status(final_status.clone());
         if exit_requested.is_some() {
@@ -261,7 +330,259 @@ where
         diagnostics: output.diagnostics,
         status: final_status,
         exit_requested,
+        capture_failed: output.capture_failed,
     }
+}
+
+struct CommandSubstitutionValues {
+    words: Vec<Vec<OsString>>,
+    redirections: Vec<Vec<OsString>>,
+}
+
+#[derive(Clone, Copy)]
+enum CommandSubstitutionOwner {
+    Word(usize),
+    Redirection(usize),
+}
+
+async fn execute_command_substitutions_for_command<L, R>(
+    command: &SimpleCommand,
+    state: &ShellState,
+    lookup: &L,
+    host: HostPlatform,
+    output: &mut ExecutionOutput,
+    runner: &R,
+) -> Result<CommandSubstitutionValues, ShellStatus>
+where
+    L: NativeCommandLookup + ?Sized,
+    R: NativeCommandRunner + ?Sized,
+{
+    let mut pending = Vec::new();
+    for (word_index, word) in command.words().iter().enumerate() {
+        for part in word.parts() {
+            if let WordPart::CommandSubstitution { substitution, .. } = part {
+                pending.push((
+                    substitution.span().start(),
+                    CommandSubstitutionOwner::Word(word_index),
+                    substitution,
+                ));
+            }
+        }
+    }
+    for (redirection_index, redirection) in command.redirections().iter().enumerate() {
+        if let RedirectionTarget::File { path, .. } = redirection.target() {
+            for part in path.parts() {
+                if let WordPart::CommandSubstitution { substitution, .. } = part {
+                    pending.push((
+                        substitution.span().start(),
+                        CommandSubstitutionOwner::Redirection(redirection_index),
+                        substitution,
+                    ));
+                }
+            }
+        }
+    }
+    pending.sort_by_key(|(start, _, _)| *start);
+
+    let mut values = CommandSubstitutionValues {
+        words: vec![Vec::new(); command.words().len()],
+        redirections: vec![Vec::new(); command.redirections().len()],
+    };
+    for (_, owner, substitution) in pending {
+        let value =
+            execute_command_substitution(substitution, state, lookup, host, output, runner).await?;
+        match owner {
+            CommandSubstitutionOwner::Word(index) => values.words[index].push(value),
+            CommandSubstitutionOwner::Redirection(index) => {
+                values.redirections[index].push(value);
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn expand_words_with_substitutions(
+    words: &[Word],
+    state: &ShellState,
+    substitution_values: Vec<Vec<OsString>>,
+) -> Vec<ExpandedWord> {
+    debug_assert_eq!(words.len(), substitution_values.len());
+    words
+        .iter()
+        .zip(substitution_values)
+        .flat_map(|(word, values)| expand_word_with_substitutions(word, state, values))
+        .collect()
+}
+
+async fn execute_command_substitution<L, R>(
+    substitution: &CommandSubstitution,
+    state: &ShellState,
+    lookup: &L,
+    host: HostPlatform,
+    output: &mut ExecutionOutput,
+    runner: &R,
+) -> Result<OsString, ShellStatus>
+where
+    L: NativeCommandLookup + ?Sized,
+    R: NativeCommandRunner + ?Sized,
+{
+    let script = substitution
+        .script()
+        .shifted_for_execution(substitution.body_span().start());
+    let mut nested_state = state.clone();
+    let nested = Box::pin(execute_script_with_runner(
+        &script,
+        &mut nested_state,
+        lookup,
+        host,
+        runner,
+        remaining_capture(output),
+        false,
+    ))
+    .await;
+
+    output.stderr.extend_from_slice(&nested.stderr);
+    output.diagnostics.extend(nested.diagnostics);
+    if nested.capture_failed {
+        output.capture_failed = true;
+        return Err(shell_status(1, ShellStatusKind::Exited));
+    }
+    let mut stdout = nested.stdout;
+    while stdout.last() == Some(&b'\n') {
+        stdout.pop();
+    }
+    let stdout_len =
+        u64::try_from(stdout.len()).expect("command substitution output length fits u64");
+    if stdout_len > remaining_capture(output) {
+        output.capture_failed = true;
+        return Err(process_failure(
+            format!(
+                "command substitution output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous capture ceiling"
+            ),
+            substitution.span(),
+            &mut output.diagnostics,
+            ShellStatusKind::Exited,
+            1,
+        ));
+    }
+    output.retained_expansion_bytes = output.retained_expansion_bytes.saturating_add(stdout_len);
+    command_substitution_output(stdout, substitution.span(), &mut output.diagnostics)
+}
+
+fn command_substitution_output(
+    stdout: Vec<u8>,
+    span: SourceSpan,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> Result<OsString, ShellStatus> {
+    if stdout.contains(&0) {
+        return Err(invalid_arguments(
+            "command substitution output cannot contain a NUL byte",
+            span,
+            diagnostics,
+        ));
+    }
+    command_substitution_native_string(stdout)
+        .map_err(|message| invalid_arguments(message, span, diagnostics))
+}
+
+#[cfg(unix)]
+fn command_substitution_native_string(stdout: Vec<u8>) -> Result<OsString, &'static str> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    Ok(OsString::from_vec(stdout))
+}
+
+#[cfg(windows)]
+fn command_substitution_native_string(stdout: Vec<u8>) -> Result<OsString, &'static str> {
+    String::from_utf8(stdout)
+        .map(OsString::from)
+        .map_err(|_| "command substitution output must be valid UTF-8 on Windows")
+}
+
+#[cfg(not(any(unix, windows)))]
+fn command_substitution_native_string(stdout: Vec<u8>) -> Result<OsString, &'static str> {
+    String::from_utf8(stdout)
+        .map(OsString::from)
+        .map_err(|_| "command substitution output must be valid UTF-8 on this platform")
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ExpandedRedirectionTarget {
+    File {
+        path: OsString,
+        mode: RedirectionFileMode,
+    },
+    Descriptor(RedirectionDescriptor),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExpandedRedirection {
+    descriptor: RedirectionDescriptor,
+    target: ExpandedRedirectionTarget,
+    operator_span: SourceSpan,
+    span: SourceSpan,
+}
+
+impl ExpandedRedirection {
+    const fn descriptor(&self) -> RedirectionDescriptor {
+        self.descriptor
+    }
+
+    const fn target(&self) -> &ExpandedRedirectionTarget {
+        &self.target
+    }
+
+    const fn operator_span(&self) -> SourceSpan {
+        self.operator_span
+    }
+
+    const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+fn expand_redirections_for_execution(
+    redirections: &[Redirection],
+    state: &ShellState,
+    substitution_values: Vec<Vec<OsString>>,
+) -> Result<Vec<ExpandedRedirection>, RedirectionPlanError> {
+    debug_assert_eq!(redirections.len(), substitution_values.len());
+    let mut expanded_redirections = Vec::with_capacity(redirections.len());
+    for (redirection, substitutions) in redirections.iter().zip(substitution_values) {
+        let target = match redirection.target() {
+            RedirectionTarget::File { path, mode } => {
+                let mut expanded =
+                    expand_word_with_substitutions(path, state, substitutions).into_iter();
+                let Some(target) = expanded.next() else {
+                    return Err(RedirectionPlanError {
+                        message: "redirection target expands to no path".to_owned(),
+                        span: path.span(),
+                    });
+                };
+                if expanded.next().is_some() {
+                    return Err(RedirectionPlanError {
+                        message: "redirection target expands to multiple paths".to_owned(),
+                        span: path.span(),
+                    });
+                }
+                ExpandedRedirectionTarget::File {
+                    path: target.into_value(),
+                    mode: *mode,
+                }
+            }
+            RedirectionTarget::Descriptor(descriptor) => {
+                debug_assert!(substitutions.is_empty());
+                ExpandedRedirectionTarget::Descriptor(*descriptor)
+            }
+        };
+        expanded_redirections.push(ExpandedRedirection {
+            descriptor: redirection.descriptor(),
+            target,
+            operator_span: redirection.operator_span(),
+            span: redirection.span(),
+        });
+    }
+    Ok(expanded_redirections)
 }
 
 async fn execute_simple_command<L, R>(
@@ -277,7 +598,19 @@ where
     L: NativeCommandLookup + ?Sized,
     R: NativeCommandRunner + ?Sized,
 {
-    let expanded = expand_words(command.words(), state);
+    let substitutions = match execute_command_substitutions_for_command(
+        command, state, lookup, host, output, runner,
+    )
+    .await
+    {
+        Ok(substitutions) => substitutions,
+        Err(status) => return status,
+    };
+    let CommandSubstitutionValues {
+        words: word_substitutions,
+        redirections: redirection_substitutions,
+    } = substitutions;
+    let expanded = expand_words_with_substitutions(command.words(), state, word_substitutions);
     let name_span = expanded.first().map(|word| word.span());
     let words: Vec<OsString> = expanded
         .into_iter()
@@ -309,6 +642,7 @@ where
                 resolved,
                 &words[1..],
                 command,
+                redirection_substitutions,
                 output,
                 exit_requested,
                 runner,
@@ -323,11 +657,13 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_command<R>(
     state: &mut ShellState,
     resolved: ResolvedCommand,
     arguments: &[OsString],
     command: &SimpleCommand,
+    redirection_substitutions: Vec<Vec<OsString>>,
     output: &mut ExecutionOutput,
     exit_requested: &mut Option<i64>,
     runner: &R,
@@ -336,8 +672,8 @@ where
     R: NativeCommandRunner + ?Sized,
 {
     let span = command.span();
-    let redirections = command.redirections();
-    if !redirections.is_empty()
+    let syntax_redirections = command.redirections();
+    if !syntax_redirections.is_empty()
         && !matches!(
             &resolved,
             ResolvedCommand::Native { .. }
@@ -359,6 +695,31 @@ where
             2,
         );
     }
+    let redirections = if syntax_redirections.is_empty() {
+        Vec::new()
+    } else {
+        match expand_redirections_for_execution(
+            syntax_redirections,
+            state,
+            redirection_substitutions,
+        ) {
+            Ok(redirections) => redirections,
+            Err(error) => {
+                return if let ResolvedCommand::Wsl { distribution, .. } = &resolved {
+                    redirection_failure_with_backend(
+                        error.message,
+                        error.span,
+                        &mut output.diagnostics,
+                        ExecutionBackend::Wsl {
+                            distribution: distribution.clone(),
+                        },
+                    )
+                } else {
+                    redirection_failure(error.message, error.span, &mut output.diagnostics)
+                };
+            }
+        }
+    };
     match resolved {
         ResolvedCommand::StatefulBuiltin(command) if stateful_builtin_is_implemented(command) => {
             let (status, requested) = if redirections.is_empty() {
@@ -368,7 +729,7 @@ where
                     state,
                     command,
                     arguments,
-                    redirections,
+                    &redirections,
                     span,
                     &mut output.diagnostics,
                 )
@@ -381,7 +742,7 @@ where
                 state,
                 command,
                 arguments,
-                redirections,
+                &redirections,
                 span,
                 output,
                 runner,
@@ -454,7 +815,7 @@ where
                 state,
                 executable,
                 arguments,
-                redirections,
+                &redirections,
                 span,
                 output,
                 runner,
@@ -472,7 +833,7 @@ where
                 &command,
                 distribution,
                 arguments,
-                redirections,
+                &redirections,
                 span,
                 output,
                 runner,
@@ -1536,7 +1897,7 @@ fn materialize_parent_task_endpoint(
 
 fn plan_parent_task_redirections(
     state: &ShellState,
-    redirections: &[Redirection],
+    redirections: &[ExpandedRedirection],
     mut stdin: ParentTaskRedirectionEndpoint,
     mut stdout: ParentTaskRedirectionEndpoint,
     mut stderr: ParentTaskRedirectionEndpoint,
@@ -1545,7 +1906,7 @@ fn plan_parent_task_redirections(
     let mut files = Vec::with_capacity(redirections.len());
     for redirection in redirections {
         let endpoint = match redirection.target() {
-            RedirectionTarget::File { path, mode } => {
+            ExpandedRedirectionTarget::File { path, mode } => {
                 if !matches!(
                     (redirection.descriptor(), mode),
                     (RedirectionDescriptor::Stdin, RedirectionFileMode::Read)
@@ -1559,19 +1920,6 @@ fn plan_parent_task_redirections(
                         span: redirection.operator_span(),
                     });
                 }
-                let mut expanded = expand_words(std::slice::from_ref(path), state).into_iter();
-                let Some(target) = expanded.next() else {
-                    return Err(RedirectionPlanError {
-                        message: "redirection target expands to no path".to_owned(),
-                        span: path.span(),
-                    });
-                };
-                if expanded.next().is_some() {
-                    return Err(RedirectionPlanError {
-                        message: "redirection target expands to multiple paths".to_owned(),
-                        span: path.span(),
-                    });
-                }
                 let id = ParentProcessFileId::new(*next_parent_file_id);
                 *next_parent_file_id =
                     next_parent_file_id
@@ -1583,7 +1931,7 @@ fn plan_parent_task_redirections(
                         })?;
                 files.push(ParentProcessFile {
                     id,
-                    path: state.cwd().join(PathBuf::from(target.into_value())),
+                    path: state.cwd().join(PathBuf::from(path)),
                     mode: match mode {
                         RedirectionFileMode::Read => NativeProcessFileMode::Read,
                         RedirectionFileMode::Write => NativeProcessFileMode::Write,
@@ -1592,7 +1940,7 @@ fn plan_parent_task_redirections(
                 });
                 ParentTaskRedirectionEndpoint::File(id)
             }
-            RedirectionTarget::Descriptor(source) => match source {
+            ExpandedRedirectionTarget::Descriptor(source) => match source {
                 RedirectionDescriptor::Stdin => stdin,
                 RedirectionDescriptor::Stdout => stdout,
                 RedirectionDescriptor::Stderr => stderr,
@@ -1617,7 +1965,7 @@ fn portable_pipeline_invocation(
     state: &ShellState,
     command: PortableCommand,
     arguments: Vec<OsString>,
-    redirections: &[Redirection],
+    redirections: &[ExpandedRedirection],
     span: SourceSpan,
     stage_index: usize,
     reads_stdin: bool,
@@ -1675,7 +2023,7 @@ fn stateful_pipeline_invocation(
     state: &ShellState,
     command: StatefulBuiltin,
     arguments: Vec<OsString>,
-    redirections: &[Redirection],
+    redirections: &[ExpandedRedirection],
     span: SourceSpan,
     stage_index: usize,
     stdout: ParentTaskRedirectionEndpoint,
@@ -1737,7 +2085,19 @@ where
         u32::try_from(commands.len() - 1).expect("pipeline stage ceiling fits u32");
     let mut next_parent_file_id = 0_u32;
     for (index, command) in commands.iter().enumerate() {
-        let expanded = expand_words(command.words(), state);
+        let substitutions = match execute_command_substitutions_for_command(
+            command, state, lookup, host, output, runner,
+        )
+        .await
+        {
+            Ok(substitutions) => substitutions,
+            Err(status) => return status,
+        };
+        let CommandSubstitutionValues {
+            words: word_substitutions,
+            redirections: redirection_substitutions,
+        } = substitutions;
+        let expanded = expand_words_with_substitutions(command.words(), state, word_substitutions);
         let name_span = expanded.first().map(|word| word.span());
         let words: Vec<OsString> = expanded
             .into_iter()
@@ -1768,6 +2128,20 @@ where
         };
         match resolved {
             Ok(ResolvedCommand::Native { executable, .. }) => {
+                let redirections = match expand_redirections_for_execution(
+                    command.redirections(),
+                    state,
+                    redirection_substitutions,
+                ) {
+                    Ok(redirections) => redirections,
+                    Err(error) => {
+                        return redirection_failure(
+                            error.message,
+                            error.span,
+                            &mut output.diagnostics,
+                        );
+                    }
+                };
                 let stdin = if index == 0 {
                     ProcessStdio::Null
                 } else {
@@ -1786,7 +2160,7 @@ where
                     state,
                     executable,
                     &words[1..],
-                    command.redirections(),
+                    &redirections,
                     capture_limit,
                     NativeStdio {
                         stdin,
@@ -1809,6 +2183,20 @@ where
                 command: linux_command,
                 distribution,
             }) => {
+                let redirections = match expand_redirections_for_execution(
+                    command.redirections(),
+                    state,
+                    redirection_substitutions,
+                ) {
+                    Ok(redirections) => redirections,
+                    Err(error) => {
+                        return redirection_failure(
+                            error.message,
+                            error.span,
+                            &mut output.diagnostics,
+                        );
+                    }
+                };
                 let stdin = if index == 0 {
                     ProcessStdio::Null
                 } else {
@@ -1829,7 +2217,7 @@ where
                     &linux_command,
                     distribution,
                     &words[1..],
-                    command.redirections(),
+                    &redirections,
                     capture_limit,
                     NativeStdio {
                         stdin,
@@ -1855,6 +2243,20 @@ where
                 {
                     return invalid_arguments(&error, command.span(), &mut output.diagnostics);
                 }
+                let redirections = match expand_redirections_for_execution(
+                    command.redirections(),
+                    state,
+                    redirection_substitutions,
+                ) {
+                    Ok(redirections) => redirections,
+                    Err(error) => {
+                        return redirection_failure(
+                            error.message,
+                            error.span,
+                            &mut output.diagnostics,
+                        );
+                    }
+                };
                 let stdout = if index + 1 == commands.len() {
                     ParentTaskRedirectionEndpoint::Capture(PipelineCaptureStream::Stdout)
                 } else {
@@ -1866,7 +2268,7 @@ where
                     state,
                     builtin,
                     arguments,
-                    command.redirections(),
+                    &redirections,
                     command.span(),
                     index,
                     stdout,
@@ -1902,6 +2304,20 @@ where
                         return invalid_arguments(&error, command.span(), &mut output.diagnostics);
                     }
                 };
+                let redirections = match expand_redirections_for_execution(
+                    command.redirections(),
+                    state,
+                    redirection_substitutions,
+                ) {
+                    Ok(redirections) => redirections,
+                    Err(error) => {
+                        return redirection_failure(
+                            error.message,
+                            error.span,
+                            &mut output.diagnostics,
+                        );
+                    }
+                };
                 let stdin = if index == 0 {
                     ParentTaskRedirectionEndpoint::Null
                 } else {
@@ -1920,7 +2336,7 @@ where
                     state,
                     portable,
                     arguments,
-                    command.redirections(),
+                    &redirections,
                     command.span(),
                     index,
                     reads_stdin,
@@ -2045,15 +2461,18 @@ where
             ShellStatusKind::SpawnError,
             126,
         ),
-        Err(NativeCommandError::CaptureLimit { .. }) => process_failure(
-            format!(
-                "pipeline output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
-            ),
-            span,
-            &mut output.diagnostics,
-            ShellStatusKind::Exited,
-            1,
-        ),
+        Err(NativeCommandError::CaptureLimit { .. }) => {
+            output.capture_failed = true;
+            process_failure(
+                format!(
+                    "pipeline output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
+                ),
+                span,
+                &mut output.diagnostics,
+                ShellStatusKind::Exited,
+                1,
+            )
+        }
         Err(NativeCommandError::Redirection(error)) => redirection_failure(
             format!("cannot apply pipeline redirection: {error}"),
             span,
@@ -2073,7 +2492,7 @@ fn execute_stateful_redirected(
     state: &mut ShellState,
     command: StatefulBuiltin,
     arguments: &[OsString],
-    redirections: &[Redirection],
+    redirections: &[ExpandedRedirection],
     span: SourceSpan,
     diagnostics: &mut Vec<ExecutionDiagnostic>,
 ) -> (ShellStatus, Option<i64>) {
@@ -2122,7 +2541,7 @@ async fn execute_portable_redirected<R>(
     state: &ShellState,
     command: PortableCommand,
     arguments: &[OsString],
-    redirections: &[Redirection],
+    redirections: &[ExpandedRedirection],
     span: SourceSpan,
     output: &mut ExecutionOutput,
     runner: &R,
@@ -2192,15 +2611,18 @@ where
             ShellStatusKind::SpawnError,
             126,
         ),
-        Err(NativeCommandError::CaptureLimit { .. }) => process_failure(
-            format!(
-                "portable command output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
-            ),
-            span,
-            &mut output.diagnostics,
-            ShellStatusKind::Exited,
-            1,
-        ),
+        Err(NativeCommandError::CaptureLimit { .. }) => {
+            output.capture_failed = true;
+            process_failure(
+                format!(
+                    "portable command output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
+                ),
+                span,
+                &mut output.diagnostics,
+                ShellStatusKind::Exited,
+                1,
+            )
+        }
         Err(NativeCommandError::Redirection(error)) => redirection_failure(
             format!("cannot apply portable redirection: {error}"),
             span,
@@ -2220,7 +2642,7 @@ async fn execute_native<R>(
     state: &ShellState,
     executable: PathBuf,
     arguments: &[OsString],
-    redirections: &[Redirection],
+    redirections: &[ExpandedRedirection],
     span: SourceSpan,
     output: &mut ExecutionOutput,
     runner: &R,
@@ -2251,15 +2673,18 @@ where
             output.stderr.extend_from_slice(&native.stderr);
             native_exit_status(native.exit)
         }
-        Err(NativeCommandError::CaptureLimit { .. }) => process_failure(
-            format!(
-                "native command output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
-            ),
-            span,
-            &mut output.diagnostics,
-            ShellStatusKind::Exited,
-            1,
-        ),
+        Err(NativeCommandError::CaptureLimit { .. }) => {
+            output.capture_failed = true;
+            process_failure(
+                format!(
+                    "native command output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
+                ),
+                span,
+                &mut output.diagnostics,
+                ShellStatusKind::Exited,
+                1,
+            )
+        }
         Err(NativeCommandError::Redirection(error)) => redirection_failure(
             format!(
                 "cannot apply redirection for `{}`: {error}",
@@ -2288,7 +2713,7 @@ async fn execute_wsl<R>(
     command: &str,
     distribution: Option<String>,
     arguments: &[OsString],
-    redirections: &[Redirection],
+    redirections: &[ExpandedRedirection],
     span: SourceSpan,
     output: &mut ExecutionOutput,
     runner: &R,
@@ -2329,16 +2754,19 @@ where
             output.stderr.extend_from_slice(&wsl.stderr);
             process_exit_status(wsl.exit, backend)
         }
-        Err(NativeCommandError::CaptureLimit { .. }) => process_failure_with_backend(
-            format!(
-                "WSL command output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
-            ),
-            span,
-            &mut output.diagnostics,
-            ShellStatusKind::Exited,
-            1,
-            backend,
-        ),
+        Err(NativeCommandError::CaptureLimit { .. }) => {
+            output.capture_failed = true;
+            process_failure_with_backend(
+                format!(
+                    "WSL command output exceeds the {MAX_READ_FILE_BYTES}-byte synchronous shell capture ceiling"
+                ),
+                span,
+                &mut output.diagnostics,
+                ShellStatusKind::Exited,
+                1,
+                backend,
+            )
+        }
         Err(NativeCommandError::Redirection(error)) => redirection_failure_with_backend(
             format!("cannot apply redirection for `linux:{command}`: {error}"),
             span,
@@ -2360,7 +2788,7 @@ fn native_invocation(
     state: &ShellState,
     executable: PathBuf,
     arguments: &[OsString],
-    redirections: &[Redirection],
+    redirections: &[ExpandedRedirection],
     capture_limit: u64,
     stdio: NativeStdio,
 ) -> Result<NativeInvocation, RedirectionPlanError> {
@@ -2382,7 +2810,7 @@ fn wsl_invocation(
     command: &str,
     distribution: Option<String>,
     arguments: &[OsString],
-    redirections: &[Redirection],
+    redirections: &[ExpandedRedirection],
     capture_limit: u64,
     stdio: NativeStdio,
 ) -> Result<NativeInvocation, RedirectionPlanError> {
@@ -2410,7 +2838,7 @@ fn process_invocation(
     state: &ShellState,
     executable: PathBuf,
     arguments: &[OsString],
-    redirections: &[Redirection],
+    redirections: &[ExpandedRedirection],
     capture_limit: u64,
     stdio: NativeStdio,
     backend: ExecutionBackend,
@@ -2423,7 +2851,7 @@ fn process_invocation(
     let mut files = Vec::with_capacity(redirections.len());
     for redirection in redirections {
         let endpoint = match redirection.target() {
-            RedirectionTarget::File { path, mode } => {
+            ExpandedRedirectionTarget::File { path, mode } => {
                 if !matches!(
                     (redirection.descriptor(), mode),
                     (RedirectionDescriptor::Stdin, RedirectionFileMode::Read)
@@ -2437,19 +2865,6 @@ fn process_invocation(
                         span: redirection.operator_span(),
                     });
                 }
-                let mut expanded = expand_words(std::slice::from_ref(path), state).into_iter();
-                let Some(target) = expanded.next() else {
-                    return Err(RedirectionPlanError {
-                        message: "redirection target expands to no path".to_owned(),
-                        span: path.span(),
-                    });
-                };
-                if expanded.next().is_some() {
-                    return Err(RedirectionPlanError {
-                        message: "redirection target expands to multiple paths".to_owned(),
-                        span: path.span(),
-                    });
-                }
                 let id = ProcessFileId::new(u32::try_from(files.len()).map_err(|_| {
                     RedirectionPlanError {
                         message: "redirection plan contains too many file targets".to_owned(),
@@ -2458,7 +2873,7 @@ fn process_invocation(
                 })?);
                 files.push(NativeProcessFile {
                     id,
-                    path: state.cwd().join(PathBuf::from(target.into_value())),
+                    path: state.cwd().join(PathBuf::from(path)),
                     mode: match mode {
                         RedirectionFileMode::Read => NativeProcessFileMode::Read,
                         RedirectionFileMode::Write => NativeProcessFileMode::Write,
@@ -2467,7 +2882,7 @@ fn process_invocation(
                 });
                 ProcessStdio::File(id)
             }
-            RedirectionTarget::Descriptor(source) => match source {
+            ExpandedRedirectionTarget::Descriptor(source) => match source {
                 RedirectionDescriptor::Stdin => stdin,
                 RedirectionDescriptor::Stdout => stdout,
                 RedirectionDescriptor::Stderr => stderr,
@@ -2505,10 +2920,16 @@ struct RedirectionPlanError {
 }
 
 fn remaining_capture(output: &ExecutionOutput) -> u64 {
-    let captured = u64::try_from(output.stdout.len())
+    output
+        .capture_limit
+        .saturating_sub(captured_output_size(output))
+}
+
+fn captured_output_size(output: &ExecutionOutput) -> u64 {
+    u64::try_from(output.stdout.len())
         .unwrap_or(u64::MAX)
-        .saturating_add(u64::try_from(output.stderr.len()).unwrap_or(u64::MAX));
-    MAX_READ_FILE_BYTES.saturating_sub(captured)
+        .saturating_add(u64::try_from(output.stderr.len()).unwrap_or(u64::MAX))
+        .saturating_add(output.retained_expansion_bytes)
 }
 
 fn unsupported_pipeline_stage(
@@ -3858,11 +4279,12 @@ mod tests {
         ExecutionDiagnosticCode, NativeCommandError, NativeCommandOutput, NativeCommandRunner,
         NativeInvocation, ParentPipelineCapture, ParentTaskStdio, PipelineCaptureStream,
         PipelineInvocation, PipelineOutput, PipelineStageInvocation, STDERR_CAPTURE,
-        STDOUT_CAPTURE, execute_source, execute_source_with, execute_source_with_runner,
-        run_pipeline,
+        STDOUT_CAPTURE, command_substitution_output, execute_script_with_runner, execute_source,
+        execute_source_with, execute_source_with_runner, run_pipeline,
     };
     use crate::{
         DiagnosticCode, ExecutionBackend, HostPlatform, ShellState, ShellStatusKind, SourceSpan,
+        parse,
     };
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -4247,6 +4669,251 @@ fn main() {
             fs::read(directory.0.join("existing")).expect("existing remains"),
             b"keep\n"
         );
+    }
+
+    #[tokio::test]
+    async fn command_substitutions_trim_split_nest_and_isolate_shell_state() {
+        let directory = TestDirectory::new();
+        fs::create_dir(directory.0.join("child")).expect("child directory");
+        fs::write(directory.0.join("input"), b"hit\n").expect("input fixture");
+        let mut state = ShellState::new(&directory.0);
+
+        let execution = execute_source(
+            r#"export TOKEN=parent; grep -F missing input; echo pre$(echo "left right")post "$(echo "  kept  "; echo)" "$(echo "$?")" "$?"; echo "$(cd child; pwd)"; pwd; echo "$(export TOKEN=child; echo "$TOKEN")" "$TOKEN"; echo "$(echo "$(echo nested)")"; echo "$(echo before; exit 7; echo after)"; $(echo echo) substituted-command; echo parent"#,
+            &mut state,
+        )
+        .await;
+
+        let child = fs::canonicalize(directory.0.join("child")).expect("canonical child");
+        let expected = format!(
+            "preleft rightpost   kept   1 1\n{}\n{}\nchild parent\nnested\nbefore\nsubstituted-command\nparent\n",
+            child.display(),
+            directory.0.display()
+        );
+        assert_eq!(execution.stdout(), expected.as_bytes());
+        assert!(execution.stderr().is_empty());
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(execution.status().code(), 0);
+        assert_eq!(state.cwd(), directory.0);
+        assert_eq!(
+            state.variable("TOKEN"),
+            Some(std::ffi::OsStr::new("parent"))
+        );
+        assert_eq!(state.last_status().code(), 0);
+    }
+
+    #[tokio::test]
+    async fn command_substitutions_expand_redirections_preserve_effects_and_shift_diagnostics() {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("input"), b"hit\n").expect("input fixture");
+        let mut state = ShellState::new(&directory.0);
+
+        let execution = execute_source(
+            "echo payload >$(echo target); echo pipe | cat - >$(echo pipeline); grep -F hit input || echo \"$(touch skipped)\"; echo \"$(touch made; echo made)\"",
+            &mut state,
+        )
+        .await;
+        assert_eq!(execution.stdout(), b"hit\nmade\n");
+        assert!(
+            execution.stderr().is_empty(),
+            "stderr={:?}, diagnostics={:?}",
+            execution.stderr(),
+            execution.diagnostics()
+        );
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("target")).expect("simple redirection target"),
+            b"payload\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("pipeline")).expect("pipeline redirection target"),
+            b"pipe\n"
+        );
+        assert!(directory.0.join("made").is_file());
+        assert!(!directory.0.join("skipped").exists());
+
+        let ordered = execute_source(
+            "echo $(echo first >>order; echo value) >$(echo second >>order; echo ordered-target) $(echo third >>order; echo tail)",
+            &mut state,
+        )
+        .await;
+        assert_eq!(ordered.status().code(), 0);
+        assert!(ordered.diagnostics().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("order")).expect("substitution effect order"),
+            b"first\nsecond\nthird\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("ordered-target")).expect("ordered redirection target"),
+            b"value tail\n"
+        );
+
+        for source in [
+            "echo payload >$(echo 'ambiguous target')",
+            "echo payload >$(echo)",
+        ] {
+            let invalid_target = execute_source(source, &mut state).await;
+            assert!(invalid_target.stdout().is_empty(), "source={source}");
+            assert_eq!(invalid_target.status().code(), 1, "source={source}");
+            assert_eq!(
+                invalid_target.diagnostics()[0].code(),
+                ExecutionDiagnosticCode::Redirection,
+                "source={source}"
+            );
+        }
+
+        let preflight = execute_source(
+            "echo \"$(touch substitution-effect; echo payload)\" | __ash_missing_stage__",
+            &mut state,
+        )
+        .await;
+        assert!(preflight.stdout().is_empty());
+        assert_eq!(preflight.status().code(), 127);
+        assert!(directory.0.join("substitution-effect").is_file());
+
+        let source = "echo before \"$(__ash_missing_command__)\" after";
+        let diagnostic = execute_source(source, &mut state).await;
+        assert_eq!(diagnostic.stdout(), b"before  after\n");
+        assert_eq!(diagnostic.status().code(), 0);
+        assert_eq!(diagnostic.diagnostics().len(), 1);
+        let start = source
+            .find("__ash_missing_command__")
+            .expect("command span");
+        assert_eq!(
+            diagnostic.diagnostics()[0].span(),
+            SourceSpan::new(start, start + "__ash_missing_command__".len())
+        );
+        assert_eq!(
+            std::str::from_utf8(diagnostic.stderr())
+                .expect("diagnostic UTF-8")
+                .matches("__ash_missing_command__")
+                .count(),
+            1
+        );
+
+        let lookup =
+            |command: &str, _cwd: &std::path::Path, _environment: &crate::PlatformEnvironment| {
+                (command == "tool").then(|| PathBuf::from("/fixture/bin/tool"))
+            };
+        let nested_runner = RecordingRunner::new(NativeCommandOutput {
+            stdout: b"runner-value\n".to_vec(),
+            stderr: b"nested-stderr\n".to_vec(),
+            exit: ProcessExit {
+                success: false,
+                code: Some(7),
+                signal: None,
+            },
+        });
+        let nested_status = execute_source_with_runner(
+            "grep -F missing input; echo \"$(tool)\" \"$?\"",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &nested_runner,
+        )
+        .await;
+        assert_eq!(nested_status.stdout(), b"runner-value 1\n");
+        assert_eq!(nested_status.stderr(), b"nested-stderr\n");
+        assert!(nested_status.diagnostics().is_empty());
+        assert_eq!(nested_status.status().code(), 0);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+
+            let mut diagnostics = Vec::new();
+            let native =
+                command_substitution_output(vec![0xff], SourceSpan::new(0, 2), &mut diagnostics)
+                    .expect("Unix command substitution preserves native bytes");
+            assert!(diagnostics.is_empty());
+            assert_eq!(native.as_bytes(), &[0xff]);
+        }
+
+        #[cfg(windows)]
+        {
+            let mut diagnostics = Vec::new();
+            let status =
+                command_substitution_output(vec![0xff], SourceSpan::new(0, 2), &mut diagnostics)
+                    .expect_err("Windows command substitution requires UTF-8");
+            assert_eq!(status.code(), 2);
+            assert!(diagnostics[0].message().contains("valid UTF-8 on Windows"));
+        }
+
+        let malformed = execute_source("touch parse-blocked; echo $(echo", &mut state).await;
+        assert_eq!(malformed.status().kind(), ShellStatusKind::ParseError);
+        assert!(!directory.0.join("parse-blocked").exists());
+
+        let runner = RecordingRunner::new(NativeCommandOutput {
+            stdout: vec![0],
+            stderr: Vec::new(),
+            exit: ProcessExit {
+                success: true,
+                code: Some(0),
+                signal: None,
+            },
+        });
+        let nul = execute_source_with_runner(
+            "echo \"$(tool)\"",
+            &mut state,
+            &lookup,
+            HostPlatform::Linux,
+            &runner,
+        )
+        .await;
+        assert!(nul.stdout().is_empty());
+        assert_eq!(nul.status().code(), 2);
+        assert_eq!(
+            nul.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::InvalidArguments
+        );
+        assert!(nul.diagnostics()[0].message().contains("NUL byte"));
+
+        let bounded_script =
+            parse(r#"echo "$(echo 12345)" "$(echo 67890)""#).expect("bounded substitution source");
+        let mut bounded_state = ShellState::new(&directory.0);
+        let bounded_lookup =
+            |_command: &str, _cwd: &std::path::Path, _environment: &crate::PlatformEnvironment| {
+                None
+            };
+        let bounded = execute_script_with_runner(
+            &bounded_script,
+            &mut bounded_state,
+            &bounded_lookup,
+            HostPlatform::Linux,
+            &FailingRunner {
+                capture_limit: false,
+            },
+            8,
+            true,
+        )
+        .await;
+        assert!(bounded.stdout().is_empty());
+        assert_eq!(bounded.status().code(), 1);
+        assert!(
+            bounded
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == ExecutionDiagnosticCode::Process)
+        );
+
+        let blocked_script = parse("touch capture-leaked $(echo 123456789)")
+            .expect("capture-failure substitution source");
+        let blocked = execute_script_with_runner(
+            &blocked_script,
+            &mut bounded_state,
+            &bounded_lookup,
+            HostPlatform::Linux,
+            &FailingRunner {
+                capture_limit: false,
+            },
+            8,
+            true,
+        )
+        .await;
+        assert!(blocked.stdout().is_empty());
+        assert_eq!(blocked.status().code(), 1);
+        assert!(blocked.capture_failed);
+        assert!(!directory.0.join("capture-leaked").exists());
     }
 
     #[tokio::test]

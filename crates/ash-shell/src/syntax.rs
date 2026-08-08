@@ -43,6 +43,17 @@ impl SourceSpan {
     pub fn source_text(self, source: &str) -> Option<&str> {
         source.get(self.range())
     }
+
+    pub(crate) fn shifted(self, offset: usize) -> Self {
+        Self::new(
+            self.start
+                .checked_add(offset)
+                .expect("nested shell source spans fit usize"),
+            self.end
+                .checked_add(offset)
+                .expect("nested shell source spans fit usize"),
+        )
+    }
 }
 
 /// Quoting applied to one expansion-ready word segment.
@@ -83,6 +94,42 @@ impl Parameter {
     }
 }
 
+/// One parsed `$(...)` command substitution retained inside a word.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandSubstitution {
+    script: Box<Script>,
+    body_span: SourceSpan,
+    span: SourceSpan,
+}
+
+impl CommandSubstitution {
+    pub(crate) fn new(script: Script, body_span: SourceSpan, span: SourceSpan) -> Self {
+        Self {
+            script: Box::new(script),
+            body_span,
+            span,
+        }
+    }
+
+    /// Returns the parsed substitution body with spans relative to its own source.
+    #[must_use]
+    pub fn script(&self) -> &Script {
+        &self.script
+    }
+
+    /// Returns the outer-source span of the bytes between `$(` and `)`.
+    #[must_use]
+    pub const fn body_span(&self) -> SourceSpan {
+        self.body_span
+    }
+
+    /// Returns the outer-source span covering `$(`, its body, and `)`.
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
 /// One expansion-ready segment of a shell word.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -97,15 +144,20 @@ pub enum WordPart {
         quote: QuoteMode,
         span: SourceSpan,
     },
+    CommandSubstitution {
+        substitution: CommandSubstitution,
+        quote: QuoteMode,
+    },
 }
 
 impl WordPart {
-    /// Returns a literal value, variable name, or `?` for the status parameter.
+    /// Returns a literal value, parameter name/status marker, or substitution body source.
     #[must_use]
     pub fn value(&self) -> &str {
         match self {
             Self::Literal { value, .. } => value,
             Self::Parameter { parameter, .. } => parameter.name().unwrap_or("?"),
+            Self::CommandSubstitution { substitution, .. } => substitution.script().source(),
         }
     }
 
@@ -113,8 +165,17 @@ impl WordPart {
     #[must_use]
     pub const fn parameter(&self) -> Option<&Parameter> {
         match self {
-            Self::Literal { .. } => None,
+            Self::Literal { .. } | Self::CommandSubstitution { .. } => None,
             Self::Parameter { parameter, .. } => Some(parameter),
+        }
+    }
+
+    /// Returns the parsed command substitution for this segment, when present.
+    #[must_use]
+    pub const fn command_substitution(&self) -> Option<&CommandSubstitution> {
+        match self {
+            Self::CommandSubstitution { substitution, .. } => Some(substitution),
+            Self::Literal { .. } | Self::Parameter { .. } => None,
         }
     }
 
@@ -123,6 +184,7 @@ impl WordPart {
         match self {
             Self::Literal { quote, .. } => *quote,
             Self::Parameter { quote, .. } => *quote,
+            Self::CommandSubstitution { quote, .. } => *quote,
         }
     }
 
@@ -131,6 +193,19 @@ impl WordPart {
         match self {
             Self::Literal { span, .. } => *span,
             Self::Parameter { span, .. } => *span,
+            Self::CommandSubstitution { substitution, .. } => substitution.span(),
+        }
+    }
+
+    fn shift_for_execution(&mut self, offset: usize) {
+        match self {
+            Self::Literal { span, .. } | Self::Parameter { span, .. } => {
+                *span = span.shifted(offset);
+            }
+            Self::CommandSubstitution { substitution, .. } => {
+                substitution.body_span = substitution.body_span.shifted(offset);
+                substitution.span = substitution.span.shifted(offset);
+            }
         }
     }
 }
@@ -181,9 +256,21 @@ impl Word {
                     parameter: Parameter::LastStatus,
                     ..
                 } => value.push_str("$?"),
+                WordPart::CommandSubstitution { substitution, .. } => {
+                    value.push_str("$(");
+                    value.push_str(substitution.script().source());
+                    value.push(')');
+                }
             }
         }
         value
+    }
+
+    fn shift_for_execution(&mut self, offset: usize) {
+        self.span = self.span.shifted(offset);
+        for part in &mut self.parts {
+            part.shift_for_execution(offset);
+        }
     }
 }
 
@@ -257,6 +344,14 @@ impl Redirection {
     pub const fn span(&self) -> SourceSpan {
         self.span
     }
+
+    fn shift_for_execution(&mut self, offset: usize) {
+        if let RedirectionTarget::File { path, .. } = &mut self.target {
+            path.shift_for_execution(offset);
+        }
+        self.operator_span = self.operator_span.shifted(offset);
+        self.span = self.span.shifted(offset);
+    }
 }
 
 /// A foreground simple command in the currently implemented syntax subset.
@@ -290,6 +385,16 @@ impl SimpleCommand {
     pub const fn span(&self) -> SourceSpan {
         self.span
     }
+
+    fn shift_for_execution(&mut self, offset: usize) {
+        for word in &mut self.words {
+            word.shift_for_execution(offset);
+        }
+        for redirection in &mut self.redirections {
+            redirection.shift_for_execution(offset);
+        }
+        self.span = self.span.shifted(offset);
+    }
 }
 
 /// One operator in a left-associative conditional pipeline list.
@@ -321,6 +426,10 @@ impl PipelineCondition {
     #[must_use]
     pub const fn span(self) -> SourceSpan {
         self.span
+    }
+
+    fn shift_for_execution(&mut self, offset: usize) {
+        self.span = self.span.shifted(offset);
     }
 }
 
@@ -376,6 +485,16 @@ impl Pipeline {
     pub const fn span(&self) -> SourceSpan {
         self.span
     }
+
+    fn shift_for_execution(&mut self, offset: usize) {
+        for span in &mut self.pipe_spans {
+            *span = span.shifted(offset);
+        }
+        if let Some(condition) = &mut self.condition {
+            condition.shift_for_execution(offset);
+        }
+        self.span = self.span.shifted(offset);
+    }
 }
 
 /// A parsed script retaining its exact original source and byte spans.
@@ -384,6 +503,7 @@ pub struct Script {
     source: String,
     commands: Vec<SimpleCommand>,
     pipelines: Vec<Pipeline>,
+    span: SourceSpan,
 }
 
 impl Script {
@@ -392,10 +512,12 @@ impl Script {
         commands: Vec<SimpleCommand>,
         pipelines: Vec<Pipeline>,
     ) -> Self {
+        let span = SourceSpan::new(0, source.len());
         Self {
             source,
             commands,
             pipelines,
+            span,
         }
     }
 
@@ -416,6 +538,22 @@ impl Script {
 
     #[must_use]
     pub fn span(&self) -> SourceSpan {
-        SourceSpan::new(0, self.source.len())
+        self.span
+    }
+
+    pub(crate) fn shifted_for_execution(&self, offset: usize) -> Self {
+        let mut shifted = self.clone();
+        shifted.shift_for_execution(offset);
+        shifted
+    }
+
+    fn shift_for_execution(&mut self, offset: usize) {
+        for command in &mut self.commands {
+            command.shift_for_execution(offset);
+        }
+        for pipeline in &mut self.pipelines {
+            pipeline.shift_for_execution(offset);
+        }
+        self.span = self.span.shifted(offset);
     }
 }
