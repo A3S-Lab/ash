@@ -68,7 +68,14 @@ variables, environment, options, status, or `exit` back to the parent. Nested
 stderr and diagnostics propagate once, and substitution values share the
 128 MiB synchronous capture allowance with command stdout/stderr. A separate
 native-string expansion stage performs the documented fixed field splitting
-before resolution. Shared provider-neutral semantic
+before a separate pathname stage applies only unquoted `*`, `?`, and bracket
+classes. Backslash escapes and quoted segments stay protected, while unquoted
+parameter or substitution output can introduce a pattern. Relative patterns
+enumerate from persistent cwd; case-sensitive native-unit matches sort
+deterministically and fail closed on malformed syntax or no match. One command
+and its redirections share the 32,768-pattern-unit, 65,536-entry, and
+4,096-match ceilings, and a redirection still requires exactly one resulting
+path before any file opens. Shared provider-neutral semantic
 services live below the ASH/1 adapters in `a3s-ash-ops`; portable discovery
 commands reuse bounded list/read/search semantics through an ordinary-authority
 native provider, while portable mutations and ASH/1 `fs` share the raw durable
@@ -144,7 +151,7 @@ native, mixed, portable-only,
 stateful, closed-reader, and ordered-redirection regressions lock backpressure,
 exact bytes, EOF, handle closure, cloned-state isolation, descriptor sharing,
 global file-open order, transaction conflicts, and mutation/open ordering.
-Visible terminal streaming, globbing, aliases, functions, subshell state, and
+Visible terminal streaming, aliases, functions, subshell state, and
 the remaining command language,
 foreground interactive programs and jobs, plus installed-distribution
 probing, general WSL path/environment mapping, backend policy, Linux-side

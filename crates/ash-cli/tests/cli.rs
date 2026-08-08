@@ -749,6 +749,66 @@ fn shell_command_executes_nested_command_substitutions() {
 
 #[cfg(feature = "human-shell")]
 #[test]
+fn shell_command_executes_portable_pathname_expansion() {
+    let directory = TestDirectory::new();
+    fs::create_dir(directory.0.join("inputs")).expect("input directory");
+    fs::write(directory.0.join("inputs/a.txt"), b"a\n").expect("a fixture");
+    fs::write(directory.0.join("inputs/b.txt"), b"b\n").expect("b fixture");
+    fs::write(directory.0.join("inputs/.hidden.txt"), b"hidden\n").expect("hidden fixture");
+    fs::write(directory.0.join("out-a.txt"), b"old\n").expect("output fixture");
+
+    let output = run_in(
+        &directory,
+        &[
+            "shell",
+            "--no-profile",
+            "-c",
+            r#"export PATTERN='inputs/*.txt'; echo $PATTERN; echo "$PATTERN"; echo $(echo 'inputs/[a-b].txt'); echo inputs/.*.txt; echo "inputs/*.txt" inputs/\*.txt; echo payload >out-[a].txt"#,
+        ],
+        b"",
+    );
+
+    let a = PathBuf::from("inputs").join("a.txt");
+    let b = PathBuf::from("inputs").join("b.txt");
+    let hidden = PathBuf::from("inputs").join(".hidden.txt");
+    let expected = format!(
+        "{} {}\ninputs/*.txt\n{} {}\n{}\ninputs/*.txt inputs/*.txt\n",
+        a.display(),
+        b.display(),
+        a.display(),
+        b.display(),
+        hidden.display()
+    );
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    assert_eq!(output.stdout, expected.as_bytes());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        fs::read(directory.0.join("out-a.txt")).expect("expanded redirection target"),
+        b"payload\n"
+    );
+
+    let no_match = run_in(
+        &directory,
+        &[
+            "shell",
+            "--no-profile",
+            "-c",
+            "echo inputs/*.missing >should-not-open",
+        ],
+        b"",
+    );
+    assert_eq!(no_match.status.code(), Some(2));
+    assert!(no_match.stdout.is_empty());
+    assert!(
+        std::str::from_utf8(&no_match.stderr)
+            .expect("pathname diagnostic")
+            .contains("pathname pattern matched no paths")
+    );
+    assert!(!directory.0.join("should-not-open").exists());
+}
+
+#[cfg(feature = "human-shell")]
+#[test]
 fn shell_profiles_are_opt_in_share_state_and_keep_cli_paths_anchored() {
     let directory = TestDirectory::new();
     fs::create_dir(directory.0.join("child")).expect("child directory");

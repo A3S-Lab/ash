@@ -22,6 +22,10 @@ use regex::{Regex, RegexBuilder};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::expand::{ExpandedWord, expand_word_with_substitutions};
+use crate::glob::{
+    PathnameExpansionBudget, PathnameExpansionError, PathnameExpansionErrorKind,
+    expand_pathnames_with_budget,
+};
 use crate::state::validate_identifier;
 use crate::{
     CommandResolver, CommandSubstitution, ConditionalOperator, DiagnosticCode, ExecutionBackend,
@@ -405,13 +409,15 @@ fn expand_words_with_substitutions(
     words: &[Word],
     state: &ShellState,
     substitution_values: Vec<Vec<OsString>>,
-) -> Vec<ExpandedWord> {
+    pathname_budget: &mut PathnameExpansionBudget,
+) -> Result<Vec<ExpandedWord>, PathnameExpansionError> {
     debug_assert_eq!(words.len(), substitution_values.len());
-    words
+    let fields = words
         .iter()
         .zip(substitution_values)
         .flat_map(|(word, values)| expand_word_with_substitutions(word, state, values))
-        .collect()
+        .collect();
+    expand_pathnames_with_budget(fields, state.cwd(), pathname_budget)
 }
 
 async fn execute_command_substitution<L, R>(
@@ -545,14 +551,21 @@ fn expand_redirections_for_execution(
     redirections: &[Redirection],
     state: &ShellState,
     substitution_values: Vec<Vec<OsString>>,
+    pathname_budget: &mut PathnameExpansionBudget,
 ) -> Result<Vec<ExpandedRedirection>, RedirectionPlanError> {
     debug_assert_eq!(redirections.len(), substitution_values.len());
     let mut expanded_redirections = Vec::with_capacity(redirections.len());
     for (redirection, substitutions) in redirections.iter().zip(substitution_values) {
         let target = match redirection.target() {
             RedirectionTarget::File { path, mode } => {
+                let fields = expand_word_with_substitutions(path, state, substitutions);
                 let mut expanded =
-                    expand_word_with_substitutions(path, state, substitutions).into_iter();
+                    expand_pathnames_with_budget(fields, state.cwd(), pathname_budget)
+                        .map_err(|error| RedirectionPlanError {
+                            message: error.message().to_owned(),
+                            span: error.span(),
+                        })?
+                        .into_iter();
                 let Some(target) = expanded.next() else {
                     return Err(RedirectionPlanError {
                         message: "redirection target expands to no path".to_owned(),
@@ -610,7 +623,16 @@ where
         words: word_substitutions,
         redirections: redirection_substitutions,
     } = substitutions;
-    let expanded = expand_words_with_substitutions(command.words(), state, word_substitutions);
+    let mut pathname_budget = PathnameExpansionBudget::default();
+    let expanded = match expand_words_with_substitutions(
+        command.words(),
+        state,
+        word_substitutions,
+        &mut pathname_budget,
+    ) {
+        Ok(expanded) => expanded,
+        Err(error) => return pathname_expansion_failure(error, &mut output.diagnostics),
+    };
     let name_span = expanded.first().map(|word| word.span());
     let words: Vec<OsString> = expanded
         .into_iter()
@@ -643,6 +665,7 @@ where
                 &words[1..],
                 command,
                 redirection_substitutions,
+                &mut pathname_budget,
                 output,
                 exit_requested,
                 runner,
@@ -664,6 +687,7 @@ async fn execute_command<R>(
     arguments: &[OsString],
     command: &SimpleCommand,
     redirection_substitutions: Vec<Vec<OsString>>,
+    pathname_budget: &mut PathnameExpansionBudget,
     output: &mut ExecutionOutput,
     exit_requested: &mut Option<i64>,
     runner: &R,
@@ -702,6 +726,7 @@ where
             syntax_redirections,
             state,
             redirection_substitutions,
+            pathname_budget,
         ) {
             Ok(redirections) => redirections,
             Err(error) => {
@@ -2097,7 +2122,16 @@ where
             words: word_substitutions,
             redirections: redirection_substitutions,
         } = substitutions;
-        let expanded = expand_words_with_substitutions(command.words(), state, word_substitutions);
+        let mut pathname_budget = PathnameExpansionBudget::default();
+        let expanded = match expand_words_with_substitutions(
+            command.words(),
+            state,
+            word_substitutions,
+            &mut pathname_budget,
+        ) {
+            Ok(expanded) => expanded,
+            Err(error) => return pathname_expansion_failure(error, &mut output.diagnostics),
+        };
         let name_span = expanded.first().map(|word| word.span());
         let words: Vec<OsString> = expanded
             .into_iter()
@@ -2132,6 +2166,7 @@ where
                     command.redirections(),
                     state,
                     redirection_substitutions,
+                    &mut pathname_budget,
                 ) {
                     Ok(redirections) => redirections,
                     Err(error) => {
@@ -2187,6 +2222,7 @@ where
                     command.redirections(),
                     state,
                     redirection_substitutions,
+                    &mut pathname_budget,
                 ) {
                     Ok(redirections) => redirections,
                     Err(error) => {
@@ -2247,6 +2283,7 @@ where
                     command.redirections(),
                     state,
                     redirection_substitutions,
+                    &mut pathname_budget,
                 ) {
                     Ok(redirections) => redirections,
                     Err(error) => {
@@ -2308,6 +2345,7 @@ where
                     command.redirections(),
                     state,
                     redirection_substitutions,
+                    &mut pathname_budget,
                 ) {
                     Ok(redirections) => redirections,
                     Err(error) => {
@@ -4111,6 +4149,17 @@ fn invalid_arguments(
     shell_status(2, ShellStatusKind::Exited)
 }
 
+fn pathname_expansion_failure(
+    error: PathnameExpansionError,
+    diagnostics: &mut Vec<ExecutionDiagnostic>,
+) -> ShellStatus {
+    if error.kind() == PathnameExpansionErrorKind::Filesystem {
+        filesystem_failure(error.message().to_owned(), error.span(), diagnostics)
+    } else {
+        invalid_arguments(error.message(), error.span(), diagnostics)
+    }
+}
+
 fn filesystem_failure(
     message: String,
     span: SourceSpan,
@@ -4700,6 +4749,88 @@ fn main() {
             Some(std::ffi::OsStr::new("parent"))
         );
         assert_eq!(state.last_status().code(), 0);
+    }
+
+    #[tokio::test]
+    async fn pathname_expansion_is_quote_aware_sorted_and_applies_to_redirections() {
+        let directory = TestDirectory::new();
+        fs::create_dir(directory.0.join("inputs")).expect("input directory");
+        fs::write(directory.0.join("inputs/a.txt"), b"a\n").expect("a fixture");
+        fs::write(directory.0.join("inputs/b.txt"), b"b\n").expect("b fixture");
+        fs::write(directory.0.join("inputs/.hidden.txt"), b"hidden\n").expect("hidden fixture");
+        fs::write(directory.0.join("marker"), b"hit\n").expect("marker fixture");
+        fs::write(directory.0.join("out-a.txt"), b"old-a\n").expect("output a");
+        fs::write(directory.0.join("out-b.txt"), b"old-b\n").expect("output b");
+        let mut state = ShellState::new(&directory.0);
+
+        let execution = execute_source(
+            r#"export PATTERN='inputs/*.txt'; echo $PATTERN; echo "$PATTERN"; echo $(echo 'inputs/[a-b].txt'); cat inputs/[a].txt; cat inputs/[b].txt; echo inputs/.*.txt; echo "inputs/*.txt" inputs/\*.txt 'inputs/*.txt'; echo inputs/*.txt | cat -; cat inputs/[a].txt >combined"#,
+            &mut state,
+        )
+        .await;
+        let a = PathBuf::from("inputs").join("a.txt");
+        let b = PathBuf::from("inputs").join("b.txt");
+        let hidden = PathBuf::from("inputs").join(".hidden.txt");
+        let expected = format!(
+            "{} {}\ninputs/*.txt\n{} {}\na\nb\n{}\ninputs/*.txt inputs/*.txt inputs/*.txt\n{} {}\n",
+            a.display(),
+            b.display(),
+            a.display(),
+            b.display(),
+            hidden.display(),
+            a.display(),
+            b.display()
+        );
+        assert_eq!(execution.stdout(), expected.as_bytes());
+        assert!(execution.stderr().is_empty());
+        assert!(execution.diagnostics().is_empty());
+        assert_eq!(execution.status().code(), 0);
+        assert_eq!(
+            fs::read(directory.0.join("combined")).expect("combined glob input"),
+            b"a\n"
+        );
+
+        let no_match = execute_source("echo inputs/*.missing >should-not-open", &mut state).await;
+        assert_eq!(no_match.status().code(), 2);
+        assert_eq!(no_match.diagnostics().len(), 1);
+        assert_eq!(
+            no_match.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::InvalidArguments
+        );
+        assert!(
+            no_match.diagnostics()[0]
+                .message()
+                .contains("matched no paths")
+        );
+        assert!(!directory.0.join("should-not-open").exists());
+
+        let skipped =
+            execute_source("grep -F hit marker || echo inputs/*.missing", &mut state).await;
+        assert_eq!(skipped.stdout(), b"hit\n");
+        assert!(skipped.diagnostics().is_empty());
+
+        let ambiguous = execute_source("echo payload >out-?.txt", &mut state).await;
+        assert_eq!(ambiguous.status().code(), 1);
+        assert_eq!(
+            ambiguous.diagnostics()[0].code(),
+            ExecutionDiagnosticCode::Redirection
+        );
+        assert_eq!(
+            fs::read(directory.0.join("out-a.txt")).expect("ambiguous a unchanged"),
+            b"old-a\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("out-b.txt")).expect("ambiguous b unchanged"),
+            b"old-b\n"
+        );
+
+        let single = execute_source("echo payload >out-[a].txt", &mut state).await;
+        assert_eq!(single.status().code(), 0);
+        assert!(single.diagnostics().is_empty());
+        assert_eq!(
+            fs::read(directory.0.join("out-a.txt")).expect("single glob target"),
+            b"payload\n"
+        );
     }
 
     #[tokio::test]

@@ -25,6 +25,14 @@ fn parameter_ast_fixture_is_stable() {
 }
 
 #[test]
+fn pathname_ast_fixture_is_stable() {
+    let source = include_str!("fixtures/parser/pathnames.ash");
+    let expected = include_str!("fixtures/parser/pathnames.ast");
+    let script = parse(source).expect("parse pathname golden source");
+    assert_eq!(render_script(&script), expected);
+}
+
+#[test]
 fn parser_diagnostic_fixture_is_stable() {
     let source = include_str!("fixtures/parser/unsupported-syntax.ash");
     let expected = include_str!("fixtures/parser/unsupported-syntax.diagnostic");
@@ -139,10 +147,15 @@ fn render_script(script: &Script) -> String {
                         )
                         .expect("string write");
                     } else {
+                        let quote = if part.is_escaped_literal() {
+                            "escaped"
+                        } else {
+                            quote_name(part.quote())
+                        };
                         writeln!(
                             output,
                             "      literal {} {}..{} \"{}\"",
-                            quote_name(part.quote()),
+                            quote,
                             part.span().start(),
                             part.span().end(),
                             part.value().escape_debug()

@@ -1,0 +1,16 @@
+script 0..43
+pipeline 0..42
+  command 0..42
+    word 0..4
+      literal unquoted 0..4 "echo"
+    word 5..9
+      literal unquoted 5..9 "*.rs"
+    word 10..15
+      literal escaped 10..12 "*"
+      literal unquoted 12..15 ".rs"
+    word 16..22
+      literal double 16..22 "*.rs"
+    word 23..33
+      literal single 23..33 "$PATTERN"
+    word 34..42
+      parameter unquoted 34..42 named "PATTERN"

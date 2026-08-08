@@ -7,6 +7,67 @@ use crate::{Parameter, QuoteMode, ShellState, SourceSpan, Word, WordPart};
 pub(crate) struct ExpandedWord {
     value: OsString,
     span: SourceSpan,
+    pathname_segments: Vec<PathnameSegment>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PathnameSegment {
+    value: OsString,
+    active: bool,
+}
+
+impl PathnameSegment {
+    pub(crate) fn value(&self) -> &OsStr {
+        &self.value
+    }
+
+    pub(crate) const fn is_active(&self) -> bool {
+        self.active
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ExpandedFieldBuilder {
+    value: OsString,
+    pathname_segments: Vec<PathnameSegment>,
+    present: bool,
+}
+
+impl ExpandedFieldBuilder {
+    fn append(&mut self, value: &OsStr, pathname_active: bool) {
+        if value.is_empty() {
+            return;
+        }
+        self.value.push(value);
+        if let Some(segment) = self
+            .pathname_segments
+            .last_mut()
+            .filter(|segment| segment.active == pathname_active)
+        {
+            segment.value.push(value);
+        } else {
+            self.pathname_segments.push(PathnameSegment {
+                value: value.to_owned(),
+                active: pathname_active,
+            });
+        }
+        self.present = true;
+    }
+
+    const fn mark_present(&mut self) {
+        self.present = true;
+    }
+
+    fn take(&mut self) -> Option<(OsString, Vec<PathnameSegment>)> {
+        if !self.present {
+            return None;
+        }
+        self.present = false;
+        Some((
+            std::mem::take(&mut self.value),
+            std::mem::take(&mut self.pathname_segments),
+        ))
+    }
 }
 
 impl ExpandedWord {
@@ -14,8 +75,24 @@ impl ExpandedWord {
         self.value
     }
 
+    pub(crate) fn value(&self) -> &OsStr {
+        &self.value
+    }
+
     pub(crate) const fn span(&self) -> SourceSpan {
         self.span
+    }
+
+    pub(crate) fn pathname_segments(&self) -> &[PathnameSegment] {
+        &self.pathname_segments
+    }
+
+    pub(crate) fn from_pathname(value: OsString, span: SourceSpan) -> Self {
+        Self {
+            value,
+            span,
+            pathname_segments: Vec::new(),
+        }
     }
 }
 
@@ -38,27 +115,29 @@ pub(crate) fn expand_word_with_substitutions(
     substitution_values: impl IntoIterator<Item = OsString>,
 ) -> Vec<ExpandedWord> {
     let mut fields = Vec::new();
-    let mut current = OsString::new();
-    let mut present = false;
+    let mut current = ExpandedFieldBuilder::default();
     let mut substitution_values = substitution_values.into_iter();
 
     for part in word.parts() {
         match part {
             WordPart::Literal { value, quote, .. } => {
-                current.push(value);
-                if !value.is_empty() || *quote != QuoteMode::Unquoted {
-                    present = true;
+                current.append(OsStr::new(value), matches!(quote, QuoteMode::Unquoted));
+                if value.is_empty() && *quote != QuoteMode::Unquoted {
+                    current.mark_present();
                 }
+            }
+            WordPart::EscapedLiteral { value, .. } => {
+                current.append(OsStr::new(value), false);
             }
             WordPart::Parameter {
                 parameter, quote, ..
             } => {
                 let value = parameter_value(parameter, state);
                 if *quote == QuoteMode::Unquoted {
-                    append_split_value(value.as_ref(), &mut fields, &mut current, &mut present);
+                    append_split_value(value.as_ref(), &mut fields, &mut current);
                 } else {
-                    current.push(value.as_ref() as &OsStr);
-                    present = true;
+                    current.append(value.as_ref(), false);
+                    current.mark_present();
                 }
             }
             WordPart::CommandSubstitution { quote, .. } => {
@@ -66,10 +145,10 @@ pub(crate) fn expand_word_with_substitutions(
                     .next()
                     .expect("every command substitution has one execution value");
                 if *quote == QuoteMode::Unquoted {
-                    append_split_value(&value, &mut fields, &mut current, &mut present);
+                    append_split_value(&value, &mut fields, &mut current);
                 } else {
-                    current.push(&value);
-                    present = true;
+                    current.append(&value, false);
+                    current.mark_present();
                 }
             }
         }
@@ -79,12 +158,13 @@ pub(crate) fn expand_word_with_substitutions(
         "command substitution values align with word parts"
     );
 
-    finish_field(&mut fields, &mut current, &mut present);
+    finish_field(&mut fields, &mut current);
     fields
         .into_iter()
-        .map(|value| ExpandedWord {
+        .map(|(value, pathname_segments)| ExpandedWord {
             value,
             span: word.span(),
+            pathname_segments,
         })
         .collect()
 }
@@ -99,10 +179,12 @@ fn parameter_value<'a>(parameter: &Parameter, state: &'a ShellState) -> Cow<'a, 
     }
 }
 
-fn finish_field(fields: &mut Vec<OsString>, current: &mut OsString, present: &mut bool) {
-    if *present {
-        fields.push(std::mem::take(current));
-        *present = false;
+fn finish_field(
+    fields: &mut Vec<(OsString, Vec<PathnameSegment>)>,
+    current: &mut ExpandedFieldBuilder,
+) {
+    if let Some(field) = current.take() {
+        fields.push(field);
     }
 }
 
@@ -113,9 +195,8 @@ const fn is_field_separator(value: u32) -> bool {
 #[cfg(unix)]
 fn append_split_value(
     value: &OsStr,
-    fields: &mut Vec<OsString>,
-    current: &mut OsString,
-    present: &mut bool,
+    fields: &mut Vec<(OsString, Vec<PathnameSegment>)>,
+    current: &mut ExpandedFieldBuilder,
 ) {
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -124,25 +205,22 @@ fn append_split_value(
     for (index, byte) in bytes.iter().copied().enumerate() {
         if is_field_separator(u32::from(byte)) {
             if segment_start < index {
-                current.push(OsStr::from_bytes(&bytes[segment_start..index]));
-                *present = true;
+                current.append(OsStr::from_bytes(&bytes[segment_start..index]), true);
             }
-            finish_field(fields, current, present);
+            finish_field(fields, current);
             segment_start = index + 1;
         }
     }
     if segment_start < bytes.len() {
-        current.push(OsStr::from_bytes(&bytes[segment_start..]));
-        *present = true;
+        current.append(OsStr::from_bytes(&bytes[segment_start..]), true);
     }
 }
 
 #[cfg(windows)]
 fn append_split_value(
     value: &OsStr,
-    fields: &mut Vec<OsString>,
-    current: &mut OsString,
-    present: &mut bool,
+    fields: &mut Vec<(OsString, Vec<PathnameSegment>)>,
+    current: &mut ExpandedFieldBuilder,
 ) {
     use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 
@@ -151,41 +229,36 @@ fn append_split_value(
     for (index, unit) in units.iter().copied().enumerate() {
         if is_field_separator(u32::from(unit)) {
             if segment_start < index {
-                current.push(OsString::from_wide(&units[segment_start..index]));
-                *present = true;
+                current.append(&OsString::from_wide(&units[segment_start..index]), true);
             }
-            finish_field(fields, current, present);
+            finish_field(fields, current);
             segment_start = index + 1;
         }
     }
     if segment_start < units.len() {
-        current.push(OsString::from_wide(&units[segment_start..]));
-        *present = true;
+        current.append(&OsString::from_wide(&units[segment_start..]), true);
     }
 }
 
 #[cfg(not(any(unix, windows)))]
 fn append_split_value(
     value: &OsStr,
-    fields: &mut Vec<OsString>,
-    current: &mut OsString,
-    present: &mut bool,
+    fields: &mut Vec<(OsString, Vec<PathnameSegment>)>,
+    current: &mut ExpandedFieldBuilder,
 ) {
     let value = value.to_string_lossy();
     let mut segment_start = 0;
     for (index, character) in value.char_indices() {
         if is_field_separator(u32::from(character)) {
             if segment_start < index {
-                current.push(&value[segment_start..index]);
-                *present = true;
+                current.append(OsStr::new(&value[segment_start..index]), true);
             }
-            finish_field(fields, current, present);
+            finish_field(fields, current);
             segment_start = index + character.len_utf8();
         }
     }
     if segment_start < value.len() {
-        current.push(&value[segment_start..]);
-        *present = true;
+        current.append(OsStr::new(&value[segment_start..]), true);
     }
 }
 

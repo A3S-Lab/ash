@@ -1,6 +1,6 @@
 # Portable Human Shell Architecture
 
-- Status: accepted; H1, twelve H2 checkpoints, and the first three H3 checkpoints implemented
+- Status: accepted; H1, twelve H2 checkpoints, and the first four H3 checkpoints implemented
 - Target: post-ASH/1 version one
 - Last updated: 2026-08-08
 
@@ -26,7 +26,8 @@ stdin, and native script-file sources. One persistent state executes sequential
 bounded raw-byte `cat` and text `grep`, journaled regular-file `cp`/`mv`/`rm`
 and create-only `touch`, source-spanned named and last-status
 expansion, nested `$(...)` command substitution, direct-argv native host
-commands, and left-associative `&&`/`||` pipeline lists. H2 adds explicit per-stream
+commands, quote-aware pathname expansion, and left-associative `&&`/`||`
+pipeline lists. H2 adds explicit per-stream
 modes, validated direct OS pipe graphs, same-line pipelines of two to 32 native,
 explicit WSL, implemented portable, or implemented stateful-builtin stages,
 configurable `pipefail`, and source-ordered native, WSL, portable, or stateful
@@ -50,7 +51,8 @@ mutations to the persistent cwd and reuses the ASH/1 journaled transaction
 boundary. The second adds source-spanned `&&`/`||` lists over visible pipeline
 status without changing ASH/1. The third adds recursively parsed, bounded,
 state-isolated command substitution without changing ASH/1. Foreground
-interactive programs and jobs, terminal streaming, globbing, aliases,
+The fourth adds bounded deterministic pathname expansion without changing
+ASH/1. Foreground interactive programs and jobs, terminal streaming, aliases,
 functions, subshell state, the remaining command language, and the remaining WSL policy, general
 path/environment mapping, and interruption contracts remain unimplemented.
 
@@ -285,12 +287,19 @@ enum WordPart {
         quote: QuoteMode,
         span: SourceSpan,
     },
+    EscapedLiteral {
+        value: String,
+        span: SourceSpan,
+    },
     Parameter {
         parameter: Parameter,
         quote: QuoteMode,
         span: SourceSpan,
     },
-    CommandSubstitution(CommandList),
+    CommandSubstitution {
+        substitution: CommandSubstitution,
+        quote: QuoteMode,
+    },
 }
 
 struct Word {
@@ -353,8 +362,8 @@ Values and resulting fields remain native `OsString` data. Unix non-UTF-8 bytes
 and Windows unpaired native units survive lookup, splitting, concatenation, and
 direct argv launch. Only a command name must be UTF-8 because command
 classification is textual; an unrepresentable expanded name fails explicitly
-with status 127. Tilde, arithmetic, and glob expansion remain staged work and
-do not run implicitly.
+with status 127. Tilde and arithmetic expansion remain staged work and do not
+run implicitly. Pathname expansion follows the contract in section 7.3.
 
 ### 7.2 Current H3 command-substitution contract
 
@@ -394,7 +403,58 @@ so a trailing parse error still prevents all prefix effects. If a later stage
 fails outer-pipeline preflight, effects from substitutions already executed in
 earlier source positions remain.
 
-### 7.3 Current conditional-list contract
+### 7.3 Current H3 pathname-expansion contract
+
+Pathname expansion runs after parameter/command-substitution expansion and the
+fixed unquoted field split, but before command resolution, builtin argument
+validation, or redirection file opens. It applies to every resulting command
+field, including the command name, and to file-redirection targets.
+
+The word plan retains whether each native-string segment was unquoted, quoted,
+or produced by an unquoted backslash escape. Only active unquoted operators are
+recognized:
+
+- `*` matches zero or more native units within one path component;
+- `?` matches exactly one native unit;
+- `[abc]` matches one listed unit, `[a-z]` one unit in an ascending inclusive
+  range, and `[!abc]` or `[^abc]` negates the class;
+- consecutive stars are equivalent to one `*`; `**` never crosses a path
+  separator and has no recursive meaning.
+
+Single-quoted, double-quoted, and backslash-escaped operators remain literal.
+An unquoted `$NAME` or `$(...)` result remains active after field splitting and
+can therefore introduce a pattern; quoting the same expansion prevents that.
+An active `[` class must be non-empty, terminated, and contain only ascending
+ranges. Malformed classes fail explicitly rather than falling back to a
+literal spelling.
+
+Relative patterns enumerate from the persistent cwd and return normalized
+relative native paths. Absolute patterns remain absolute. Ordinary `.` and
+`..` components use native path semantics. Matching is case-sensitive even on
+Windows and operates losslessly over native bytes on Unix or native UTF-16
+units on Windows; `?` and bracket ranges each consume one such unit. Results
+sort lexicographically by the complete native path representation before they
+enter argv. Unix non-UTF-8 names and Windows unpaired units are not converted to
+UTF-8. A wildcard component does not match a leading-dot name unless its first
+token is a literal dot; the rule applies independently at every component.
+
+A syntactically active pattern with no matches returns status 2 and an
+`InvalidArguments` diagnostic at the source word, and the outer command does
+not launch. Filesystem enumeration failures use the filesystem diagnostic
+category. A redirection converts either failure into status 1 with a
+redirection diagnostic, and multiple matches remain ambiguous; quoted or
+escaped pattern characters allow creation or access to a literal spelling.
+Each command and all of its redirections share three fail-closed ceilings:
+32,768 native units across active patterns, 65,536 inspected directory entries,
+and 4,096 intermediate/final matches. A short-circuited pipeline performs no
+pathname expansion or directory read.
+
+This is ordinary human-shell filesystem discovery, not ASH/1 workspace
+confinement. Absolute paths, parent components, and directory symlinks use the
+shell process's normal user authority. A later confined portable mutation still
+revalidates its expanded argument against the persistent-cwd transaction root.
+
+### 7.4 Current conditional-list contract
 
 The current command language accepts `pipeline && pipeline` and
 `pipeline || pipeline`. Both operators have equal precedence and evaluate left
@@ -1215,7 +1275,8 @@ raw-byte `cat`, bounded text `grep`, journaled `cp`/`mv`/`rm`, create-only
 source-spanned human diagnostics and conventional status propagation. Named
 `$NAME`/`${NAME}` parameters and `$?` expand in a distinct, quote-aware stage
 with native-string preservation and the fixed field contract in section 7.1;
-nested `$(...)` follows the state-isolated, bounded contract in section 7.2.
+nested `$(...)` follows the state-isolated, bounded contract in section 7.2,
+and active pathname operators follow section 7.3.
 File, stdin, and Profile sources share a 1 MiB valid-UTF-8 ceiling, while file
 and external-command operands retain native representation. `ls`, `cat`, and
 `grep` reuse the provider-neutral list/read/search services with an unconfined
@@ -1235,7 +1296,7 @@ command and an unredirected first pipeline stage still receive null stdin, so
 foreground terminal programs and Ctrl+C job-tree delivery remain H4 rather
 than being claimed by this REPL checkpoint. The `human-shell` feature is enabled
 for the normal binary and can be disabled for a minimal machine-only build.
-Globbing, aliases, functions, subshell state, the remaining command language,
+Aliases, functions, subshell state, the remaining command language,
 terminal streaming, job control, and
 the remaining WSL detection, policy, path, environment, and interruption
 contracts remain for later increments.
@@ -1301,7 +1362,9 @@ ordered host-file redirection, and backend-aware `pipefail` status.
 - left-associative `&&` and `||` conditional pipeline lists are implemented;
 - nested command substitution in command words and redirection targets is
   implemented;
-- add globbing, aliases, functions, and subshell state;
+- quote-aware, bounded pathname expansion in command words and redirection
+  targets is implemented;
+- add aliases, functions, and subshell state;
 - complete the first stable `ash` dialect specification.
 
 Current checkpoint: mutation resolution precedes native lookup, exact-arity
@@ -1318,8 +1381,12 @@ source. Nested command substitutions are recursively parsed to 32 levels,
 execute in source order on full state clones, trim trailing LF from bounded
 stdout, retain external effects, and propagate stderr plus absolute-span
 diagnostics without changing parent state or `$?`; capture failure blocks the
-outer command. Globbing, aliases, functions, subshell state, and the stable
-dialect specification remain open.
+outer command. Pathname expansion then applies active `*`, `?`, and bracket
+classes over persistent-cwd or absolute native paths, preserves quoted and
+escaped literals, sorts matches, excludes implicit leading-dot matches, and
+fails on malformed or unmatched patterns. One command and its redirections
+share the 32,768-pattern-unit, 65,536-entry, and 4,096-match ceilings. Aliases,
+functions, subshell state, and the stable dialect specification remain open.
 
 ### H4: interactive jobs
 

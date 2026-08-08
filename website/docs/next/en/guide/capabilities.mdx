@@ -108,7 +108,7 @@ ARM64, with checksums, SBOMs, and provenance.
 
 ## Evidence behind the claims
 
-- 318 Rust workspace tests cover typed schemas, RPC, operations, store,
+- 327 Rust workspace tests cover typed schemas, RPC, operations, store,
   transactions, recovery, cancellation, updates, deterministic scheduling, and
   the human shell.
 - The schema-14 runtime harness contains 22 scenarios across worker matrices,
@@ -139,7 +139,8 @@ bounded text `grep`, journaled `cp`/`mv`/`rm`, create-only `touch`, and direct-a
 stdin/native script files. Source-spanned `$NAME`, `${NAME}`, and `$?` nodes
 expand in a quote-aware native-string stage with fixed unquoted field splitting
 before resolution; nested `$(...)` nodes recursively retain the same typed
-script plan and absolute diagnostic spans. Stateful and portable commands use ordinary user authority,
+script plan and absolute diagnostic spans. Active unquoted pathname patterns
+then expand under fixed match and directory-scan limits. Stateful and portable commands use ordinary user authority,
 while native programs inherit the persistent shell cwd/environment and OS
 authority through the owned platform process boundary. Unredirected standalone
 native stdin and first-stage pipeline stdin remain null; foreground interactive
@@ -209,7 +210,16 @@ remaining 128 MiB capture allowance with stdout/stderr. Capture failure blocks
 the outer command, while short-circuited pipelines run no substitution. If a
 later stage fails outer preflight, external effects from substitutions already
 executed in earlier source positions remain.
-Visible terminal streaming, installed-distribution probing, backend policy, general WSL
+The fourth H3 checkpoint adds deterministic pathname expansion for unquoted
+`*`, `?`, and bracket classes after field splitting. Quoted or escaped operators
+stay literal; unquoted parameters and substitutions can introduce patterns.
+Matches are case-sensitive, sorted by lossless native path units, require an
+explicit leading dot for dotfiles, and fail closed on malformed syntax or no
+match. `**` is not recursive. A command plus its redirections share 32,768
+active pattern units, 65,536 inspected entries, and 4,096 matches; redirections
+still require exactly one path and skipped pipelines scan nothing.
+Aliases, functions, subshell state, visible terminal streaming,
+installed-distribution probing, backend policy, general WSL
 argument path/environment mapping, Linux-side ownership, and interruption
 normalization remain later slices.
 

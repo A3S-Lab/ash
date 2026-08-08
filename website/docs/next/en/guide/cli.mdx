@@ -34,7 +34,8 @@ a terminal and executes the current command and pipeline syntax sequentially
 against one persistent native state. It implements `pwd`, `echo` (with `-n`),
 `cd`, expanded `export`/`unset`, `set` pipefail control, `exit`, portable `ls`,
 raw-byte `cat`, text `grep`, portable `cp`, `mv`, `rm`, create-only `touch`,
-named and last-status parameter expansion, native host executables, explicit
+named and last-status parameter expansion, nested command substitution,
+quote-aware pathname expansion, native host executables, explicit
 WSL commands on Windows, plus same-line native/WSL/portable/stateful
 pipelines, left-associative `&&`/`||` conditional lists, and ordered native,
 WSL, portable, and stateful redirections. Source
@@ -51,6 +52,7 @@ ash shell -c 'native:rustc --version >version.txt 2>&1'
 ash shell -c 'cat - <input.bin >copy.bin'
 ash shell -c 'cp input.bin backup.bin; mv backup.bin archive.bin'
 ash shell -c 'grep -F ready status.txt && echo complete || echo pending'
+ash shell -c 'echo crates/*/Cargo.toml'
 ash shell ./script.ash
 printf 'echo from-stdin\n' | ash shell --no-profile
 ash shell --profile ./profile.ash
@@ -145,6 +147,19 @@ a capture failure prevents the outer command from running. Short-circuited
 pipelines execute no substitutions, and full-source parsing still precedes all
 effects.
 
+After fixed unquoted field splitting, pathname expansion recognizes active `*`,
+`?`, `[abc]`, ascending `[a-z]`, and negated `[!abc]` or `[^abc]` operators in
+command fields and redirection targets. Single quotes, double quotes, and a
+backslash protect operators; unquoted parameter and command-substitution output
+can introduce them. Relative patterns enumerate from persistent cwd, absolute
+patterns stay absolute, and results sort by lossless native path units with
+case-sensitive matching. A wildcard component selects a leading-dot name only
+when it begins with a literal dot. `**` is not recursive. Malformed classes and
+patterns with no matches fail before launch; redirections still require exactly
+one match. Each command and its redirections share limits of 32,768 active
+pattern units, 65,536 inspected directory entries, and 4,096 matches. Skipped
+conditional branches perform no directory scan.
+
 Native programs resolve through the persistent `PATH` or an explicit `native:`
 prefix. The resolved host executable receives the parsed argument vector,
 current directory, and exported environment directly; ash never inserts a host
@@ -167,8 +182,8 @@ Native, WSL, and portable commands plus implemented stateful builtins accept
 `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
 Assignments apply from left to right: `command >out 2>&1` merges both streams
 into `out`, while `command 2>&1 >out` leaves stderr on the original stdout
-capture. Every file target, including `$(...)`, must expand to exactly one
-native field; relative
+capture. Every file target, including `$(...)` and pathname patterns, must
+finish as exactly one native field; relative
 paths resolve against persistent cwd. Files connect directly to child or
 parent-task OS handles, so redirected output does not consume the synchronous
 capture allowance. One validated graph order interleaves native, portable, and
@@ -232,7 +247,7 @@ submitted source still parses before effects, so malformed skipped syntax blocks
 every prefix command. Layout, comments, and newlines may continue a source after
 an operator; an unlinked newline or `;` starts a new unconditional list.
 
-The remaining command language (including globbing, aliases, functions, and
+The remaining command language (including aliases, functions, and
 subshell state), terminal
 streaming, foreground interactive programs and jobs, plus installed
 WSL distribution probing, backend policy/configuration, general argument path

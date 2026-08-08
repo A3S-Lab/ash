@@ -12,7 +12,8 @@ pipeline 0..69
     word 24..31
       literal single 24..31 "$NAME"
     word 32..38
-      literal unquoted 32..38 "$NAME"
+      literal escaped 32..34 "$"
+      literal unquoted 34..38 "NAME"
     word 39..69
       command-substitution double 40..68 body 42..67
         script 0..25
