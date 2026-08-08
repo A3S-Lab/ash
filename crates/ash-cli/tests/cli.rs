@@ -685,6 +685,70 @@ fn shell_command_executes_short_circuit_conditional_lists() {
 
 #[cfg(feature = "human-shell")]
 #[test]
+fn shell_command_executes_nested_command_substitutions() {
+    let directory = TestDirectory::new();
+    fs::create_dir(directory.0.join("child")).expect("child directory");
+    fs::write(directory.0.join("input.txt"), b"hit\n").expect("substitution input");
+
+    let output = run_in(
+        &directory,
+        &[
+            "shell",
+            "--no-profile",
+            "-c",
+            "export TOKEN=parent; echo \"value=$(echo one; echo two)\" $(echo \"split fields\"); echo \"$(cd child; pwd)\"; pwd; grep -F hit input.txt || echo \"$(touch skipped)\"; echo payload >$(echo output.txt); echo \"$(cat output.txt)\"; echo \"$(exit 7)\" after",
+        ],
+        b"",
+    );
+
+    let root = fs::canonicalize(&directory.0).expect("canonical root");
+    let child = fs::canonicalize(directory.0.join("child")).expect("canonical child");
+    assert!(output.status.success(), "stderr={:?}", output.stderr);
+    let lines = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 8, "stdout={:?}", output.stdout);
+    assert_eq!(lines[0], b"value=one");
+    assert_eq!(lines[1], b"two split fields");
+    assert_eq!(lines[4], b"hit");
+    assert_eq!(lines[5], b"payload");
+    assert_eq!(lines[6], b" after");
+    assert!(lines[7].is_empty());
+    let reported_child = std::str::from_utf8(lines[2]).expect("UTF-8 child path");
+    let reported_root = std::str::from_utf8(lines[3]).expect("UTF-8 root path");
+    assert_eq!(
+        fs::canonicalize(reported_child).expect("canonical reported child"),
+        child
+    );
+    assert_eq!(
+        fs::canonicalize(reported_root).expect("canonical reported root"),
+        root
+    );
+    assert!(output.stderr.is_empty());
+    assert!(!directory.0.join("skipped").exists());
+    assert_eq!(
+        fs::read(directory.0.join("output.txt")).expect("expanded redirection target"),
+        b"payload\n"
+    );
+
+    let malformed = run_in(
+        &directory,
+        &[
+            "shell",
+            "--no-profile",
+            "-c",
+            "touch parse-blocked; echo \"$(echo",
+        ],
+        b"",
+    );
+    assert_eq!(malformed.status.code(), Some(2));
+    assert!(malformed.stdout.is_empty());
+    assert!(!directory.0.join("parse-blocked").exists());
+}
+
+#[cfg(feature = "human-shell")]
+#[test]
 fn shell_profiles_are_opt_in_share_state_and_keep_cli_paths_anchored() {
     let directory = TestDirectory::new();
     fs::create_dir(directory.0.join("child")).expect("child directory");

@@ -25,7 +25,7 @@ pub use interactive::{
     DEFAULT_INTERACTIVE_PROMPT, InteractiveConfig, InteractiveEditor, InteractiveError,
     InteractiveEvent,
 };
-pub use parser::parse;
+pub use parser::{MAX_COMMAND_SUBSTITUTION_DEPTH, parse};
 pub use resolver::{
     CommandResolver, HostPlatform, NativeCommandLookup, PathCommandLookup, PortableCommand,
     ResolutionError, ResolvedCommand, StatefulBuiltin,
@@ -35,7 +35,7 @@ pub use state::{
     ShellOptions, ShellState, ShellStatus, ShellStatusKind, StateError,
 };
 pub use syntax::{
-    ConditionalOperator, Parameter, Pipeline, PipelineCondition, QuoteMode, Redirection,
-    RedirectionDescriptor, RedirectionFileMode, RedirectionTarget, Script, SimpleCommand,
-    SourceSpan, Word, WordPart,
+    CommandSubstitution, ConditionalOperator, Parameter, Pipeline, PipelineCondition, QuoteMode,
+    Redirection, RedirectionDescriptor, RedirectionFileMode, RedirectionTarget, Script,
+    SimpleCommand, SourceSpan, Word, WordPart,
 };

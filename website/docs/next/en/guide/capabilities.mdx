@@ -108,7 +108,7 @@ ARM64, with checksums, SBOMs, and provenance.
 
 ## Evidence behind the claims
 
-- 313 Rust workspace tests cover typed schemas, RPC, operations, store,
+- 318 Rust workspace tests cover typed schemas, RPC, operations, store,
   transactions, recovery, cancellation, updates, deterministic scheduling, and
   the human shell.
 - The schema-14 runtime harness contains 22 scenarios across worker matrices,
@@ -138,7 +138,8 @@ and `exit`, and can execute sequential `pwd`, `echo`, `cd`, expanded
 bounded text `grep`, journaled `cp`/`mv`/`rm`, create-only `touch`, and direct-argv native host commands from terminal, inline source, or bounded
 stdin/native script files. Source-spanned `$NAME`, `${NAME}`, and `$?` nodes
 expand in a quote-aware native-string stage with fixed unquoted field splitting
-before resolution. Stateful and portable commands use ordinary user authority,
+before resolution; nested `$(...)` nodes recursively retain the same typed
+script plan and absolute diagnostic spans. Stateful and portable commands use ordinary user authority,
 while native programs inherit the persistent shell cwd/environment and OS
 authority through the owned platform process boundary. Unredirected standalone
 native stdin and first-stage pipeline stdin remain null; foreground interactive
@@ -197,6 +198,17 @@ against visible final-stage or `pipefail` status. A short-circuited pipeline
 keeps that status and performs no expansion, resolution, preflight,
 redirection open, launch, state change, or filesystem transaction; only an
 admitted `exit` stops the source. Full-source parsing still precedes effects.
+The third H3 checkpoint adds nested command substitution to command words and
+file-redirection targets with a 32-level limit and strict source-order
+execution. Each substitution uses a full shell-state clone, trims every trailing
+LF from bounded stdout, keeps external effects, and propagates stderr plus
+diagnostics once without changing parent state or `$?`. Double quotes preserve
+one field; unquoted output uses fixed ASCII splitting. NUL is rejected, Unix
+keeps non-UTF-8 bytes, Windows requires UTF-8, and substitution values share the
+remaining 128 MiB capture allowance with stdout/stderr. Capture failure blocks
+the outer command, while short-circuited pipelines run no substitution. If a
+later stage fails outer preflight, external effects from substitutions already
+executed in earlier source positions remain.
 Visible terminal streaming, installed-distribution probing, backend policy, general WSL
 argument path/environment mapping, Linux-side ownership, and interruption
 normalization remain later slices.

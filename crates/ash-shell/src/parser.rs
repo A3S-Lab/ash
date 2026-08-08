@@ -1,8 +1,11 @@
 use crate::{
-    ConditionalOperator, Diagnostic, DiagnosticCode, Parameter, Pipeline, PipelineCondition,
-    QuoteMode, Redirection, RedirectionDescriptor, RedirectionFileMode, RedirectionTarget, Script,
-    SimpleCommand, SourceSpan, Word, WordPart,
+    CommandSubstitution, ConditionalOperator, Diagnostic, DiagnosticCode, Parameter, Pipeline,
+    PipelineCondition, QuoteMode, Redirection, RedirectionDescriptor, RedirectionFileMode,
+    RedirectionTarget, Script, SimpleCommand, SourceSpan, Word, WordPart,
 };
+
+/// Maximum recursively parsed `$(...)` nesting accepted by one source.
+pub const MAX_COMMAND_SUBSTITUTION_DEPTH: usize = 32;
 
 /// Parses the currently implemented human-shell syntax subset.
 ///
@@ -10,8 +13,9 @@ use crate::{
 /// left-associative `&&`/`||` conditional lists, source-ordered file and
 /// descriptor redirections, simple commands separated by a newline or `;`,
 /// shell comments, single and double quotes, backslash escaping, named
-/// parameters, and `$?`. Syntax reserved for later milestones is rejected with
-/// a source span instead of being reinterpreted as a literal argument.
+/// parameters, `$?`, and recursively parsed `$(...)` command substitutions.
+/// Syntax reserved for later milestones is rejected with a source span instead
+/// of being reinterpreted as a literal argument.
 pub fn parse(source: &str) -> Result<Script, Diagnostic> {
     Parser::new(source).parse()
 }
@@ -19,13 +23,22 @@ pub fn parse(source: &str) -> Result<Script, Diagnostic> {
 struct Parser<'a> {
     source: &'a str,
     position: usize,
+    command_substitution_depth: usize,
 }
 
 impl<'a> Parser<'a> {
     const fn new(source: &'a str) -> Self {
+        Self::with_command_substitution_depth(source, 0)
+    }
+
+    const fn with_command_substitution_depth(
+        source: &'a str,
+        command_substitution_depth: usize,
+    ) -> Self {
         Self {
             source,
             position: 0,
+            command_substitution_depth,
         }
     }
 
@@ -424,12 +437,16 @@ impl<'a> Parser<'a> {
                         &mut unquoted_start,
                         self.position,
                     );
-                    let dollar_start = self.position;
-                    if let Some(parameter) = self.parse_parameter(QuoteMode::Unquoted)? {
-                        parts.push(parameter);
+                    if self.starts_command_substitution() {
+                        parts.push(self.parse_command_substitution(QuoteMode::Unquoted)?);
                     } else {
-                        unquoted_start = Some(dollar_start);
-                        unquoted.push('$');
+                        let dollar_start = self.position;
+                        if let Some(parameter) = self.parse_parameter(QuoteMode::Unquoted)? {
+                            parts.push(parameter);
+                        } else {
+                            unquoted_start = Some(dollar_start);
+                            unquoted.push('$');
+                        }
                     }
                 }
                 '\\' => {
@@ -510,7 +527,12 @@ impl<'a> Parser<'a> {
                 }
                 Some('$') => {
                     let dollar_start = self.position;
-                    if let Some(parameter) = self.parse_parameter(QuoteMode::Double)? {
+                    let expansion = if self.starts_command_substitution() {
+                        Some(self.parse_command_substitution(QuoteMode::Double)?)
+                    } else {
+                        self.parse_parameter(QuoteMode::Double)?
+                    };
+                    if let Some(expansion) = expansion {
                         if !value.is_empty() {
                             parts.push(WordPart::Literal {
                                 value: std::mem::take(&mut value),
@@ -518,7 +540,7 @@ impl<'a> Parser<'a> {
                                 span: SourceSpan::new(literal_start, dollar_start),
                             });
                         }
-                        parts.push(parameter);
+                        parts.push(expansion);
                         literal_start = self.position;
                     } else {
                         value.push('$');
@@ -556,6 +578,171 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    fn parse_command_substitution(&mut self, quote: QuoteMode) -> Result<WordPart, Diagnostic> {
+        let substitution_start = self.position;
+        debug_assert!(self.starts_command_substitution());
+        if self.source[substitution_start..].starts_with("$((") {
+            return Err(Diagnostic::new(
+                DiagnosticCode::InvalidParameterExpansion,
+                "arithmetic expansion is not implemented",
+                SourceSpan::new(substitution_start, substitution_start + 3),
+            ));
+        }
+        if self.command_substitution_depth >= MAX_COMMAND_SUBSTITUTION_DEPTH {
+            return Err(Diagnostic::new(
+                DiagnosticCode::CommandSubstitutionDepthExceeded,
+                "command substitution nesting exceeds the 32-level limit",
+                SourceSpan::new(substitution_start, substitution_start + 2),
+            ));
+        }
+        self.bump();
+        self.bump();
+        let body_start = self.position;
+        let body_end = self.find_command_substitution_end(substitution_start)?;
+        let body = &self.source[body_start..body_end];
+        let script =
+            Self::with_command_substitution_depth(body, self.command_substitution_depth + 1)
+                .parse()
+                .map_err(|diagnostic| diagnostic.shifted(body_start))?;
+        if script.commands().is_empty() {
+            return Err(Diagnostic::new(
+                DiagnosticCode::UnexpectedSeparator,
+                "a command substitution must contain a command",
+                SourceSpan::new(substitution_start, substitution_start + 2),
+            ));
+        }
+        self.position = body_end;
+        debug_assert_eq!(self.bump(), Some(')'));
+        let span = SourceSpan::new(substitution_start, self.position);
+        Ok(WordPart::CommandSubstitution {
+            substitution: CommandSubstitution::new(
+                script,
+                SourceSpan::new(body_start, body_end),
+                span,
+            ),
+            quote,
+        })
+    }
+
+    fn find_command_substitution_end(
+        &self,
+        substitution_start: usize,
+    ) -> Result<usize, Diagnostic> {
+        let mut position = substitution_start + 2;
+        let mut frames = vec![CommandSubstitutionScanFrame::new()];
+        while position < self.source.len() {
+            let character = self.source[position..]
+                .chars()
+                .next()
+                .expect("a non-EOF parser position starts a UTF-8 character");
+            let character_end = position + character.len_utf8();
+            let frame = frames
+                .last_mut()
+                .expect("one command-substitution scan frame remains active");
+
+            if frame.comment {
+                position = character_end;
+                if character == '\n' {
+                    frame.comment = false;
+                    frame.comment_boundary = true;
+                }
+                continue;
+            }
+
+            match frame.quote {
+                CommandSubstitutionScanQuote::Single => {
+                    position = character_end;
+                    if character == '\'' {
+                        frame.quote = CommandSubstitutionScanQuote::Unquoted;
+                    }
+                }
+                CommandSubstitutionScanQuote::Double => {
+                    if character == '\\' {
+                        position = character_end;
+                        if position < self.source.len() {
+                            position += self.source[position..]
+                                .chars()
+                                .next()
+                                .expect("escaped UTF-8 character")
+                                .len_utf8();
+                        }
+                    } else if character == '"' {
+                        frame.quote = CommandSubstitutionScanQuote::Unquoted;
+                        position = character_end;
+                    } else if self.source[position..].starts_with("$(") {
+                        self.push_command_substitution_scan_frame(&mut frames, position)?;
+                        position += 2;
+                    } else {
+                        position = character_end;
+                    }
+                }
+                CommandSubstitutionScanQuote::Unquoted => {
+                    if character == '\\' {
+                        position = character_end;
+                        if position < self.source.len() {
+                            position += self.source[position..]
+                                .chars()
+                                .next()
+                                .expect("escaped UTF-8 character")
+                                .len_utf8();
+                        }
+                        frame.comment_boundary = false;
+                    } else if character == '\'' {
+                        frame.quote = CommandSubstitutionScanQuote::Single;
+                        frame.comment_boundary = false;
+                        position = character_end;
+                    } else if character == '"' {
+                        frame.quote = CommandSubstitutionScanQuote::Double;
+                        frame.comment_boundary = false;
+                        position = character_end;
+                    } else if character == '#' && frame.comment_boundary {
+                        frame.comment = true;
+                        position = character_end;
+                    } else if self.source[position..].starts_with("$(") {
+                        self.push_command_substitution_scan_frame(&mut frames, position)?;
+                        position += 2;
+                    } else if character == ')' {
+                        if frames.len() == 1 {
+                            return Ok(position);
+                        }
+                        frames.pop();
+                        frames
+                            .last_mut()
+                            .expect("a parent substitution scan frame remains")
+                            .comment_boundary = false;
+                        position = character_end;
+                    } else {
+                        frame.comment_boundary =
+                            character.is_ascii_whitespace() || matches!(character, ';' | '|' | '&');
+                        position = character_end;
+                    }
+                }
+            }
+        }
+
+        Err(Diagnostic::new(
+            DiagnosticCode::UnterminatedCommandSubstitution,
+            "command substitution is missing its closing parenthesis",
+            SourceSpan::new(substitution_start, substitution_start + 2),
+        ))
+    }
+
+    fn push_command_substitution_scan_frame(
+        &self,
+        frames: &mut Vec<CommandSubstitutionScanFrame>,
+        position: usize,
+    ) -> Result<(), Diagnostic> {
+        if self.command_substitution_depth + frames.len() >= MAX_COMMAND_SUBSTITUTION_DEPTH {
+            return Err(Diagnostic::new(
+                DiagnosticCode::CommandSubstitutionDepthExceeded,
+                "command substitution nesting exceeds the 32-level limit",
+                SourceSpan::new(position, position + 2),
+            ));
+        }
+        frames.push(CommandSubstitutionScanFrame::new());
+        Ok(())
     }
 
     fn parse_parameter(&mut self, quote: QuoteMode) -> Result<Option<WordPart>, Diagnostic> {
@@ -623,13 +810,6 @@ impl<'a> Parser<'a> {
                     name: self.source[name_start..self.position].to_owned(),
                     braced: false,
                 }
-            }
-            Some('(') => {
-                return Err(Diagnostic::new(
-                    DiagnosticCode::UnsupportedSyntax,
-                    "command substitution is reserved for a later milestone",
-                    SourceSpan::new(parameter_start, self.position + 1),
-                ));
             }
             Some(character) if is_unsupported_special_parameter(character) => {
                 return Err(Diagnostic::new(
@@ -714,6 +894,10 @@ impl<'a> Parser<'a> {
             || self.source[self.position..].starts_with("||")
     }
 
+    fn starts_command_substitution(&self) -> bool {
+        self.source[self.position..].starts_with("$(")
+    }
+
     fn peek(&self) -> Option<char> {
         self.source.get(self.position..)?.chars().next()
     }
@@ -726,6 +910,30 @@ impl<'a> Parser<'a> {
 
     const fn is_eof(&self) -> bool {
         self.position == self.source.len()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandSubstitutionScanQuote {
+    Unquoted,
+    Single,
+    Double,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CommandSubstitutionScanFrame {
+    quote: CommandSubstitutionScanQuote,
+    comment: bool,
+    comment_boundary: bool,
+}
+
+impl CommandSubstitutionScanFrame {
+    const fn new() -> Self {
+        Self {
+            quote: CommandSubstitutionScanQuote::Unquoted,
+            comment: false,
+            comment_boundary: true,
+        }
     }
 }
 
@@ -842,6 +1050,95 @@ mod tests {
     }
 
     #[test]
+    fn parses_nested_command_substitutions_with_quote_and_outer_source_spans() {
+        let source = r#"echo pre$(echo one; echo "$(echo two)")post "$(echo '#)'; echo \))" '$(echo no)' \$\("#;
+        let script = parse(source).expect("parse command substitutions");
+        let words = script.commands()[0].words();
+
+        assert_eq!(words[1].parts().len(), 3);
+        let substitution = words[1].parts()[1]
+            .command_substitution()
+            .expect("unquoted command substitution");
+        assert_eq!(
+            substitution.script().source(),
+            r#"echo one; echo "$(echo two)""#
+        );
+        assert_eq!(substitution.script().commands().len(), 2);
+        assert_eq!(
+            substitution.span().source_text(source),
+            Some(r#"$(echo one; echo "$(echo two)")"#)
+        );
+        assert_eq!(
+            substitution.body_span().source_text(source),
+            Some(r#"echo one; echo "$(echo two)""#)
+        );
+        let nested = substitution.script().commands()[1].words()[1].parts()[0]
+            .command_substitution()
+            .expect("nested command substitution");
+        assert_eq!(nested.script().source(), "echo two");
+        assert_eq!(words[1].parts()[1].quote(), QuoteMode::Unquoted);
+
+        let quoted = words[2].parts()[0]
+            .command_substitution()
+            .expect("double-quoted command substitution");
+        assert_eq!(quoted.script().source(), r#"echo '#)'; echo \)"#);
+        assert_eq!(words[2].parts()[0].quote(), QuoteMode::Double);
+        assert_eq!(words[3].literal(), "$(echo no)");
+        assert!(
+            words[3]
+                .parts()
+                .iter()
+                .all(|part| part.command_substitution().is_none())
+        );
+        assert_eq!(words[4].literal(), "$(");
+        assert_eq!(
+            words[1].literal(),
+            r#"pre$(echo one; echo "$(echo two)")post"#
+        );
+    }
+
+    #[test]
+    fn rejects_empty_unterminated_invalid_and_overdeep_command_substitutions() {
+        for (source, code, span) in [
+            (
+                "echo $(",
+                DiagnosticCode::UnterminatedCommandSubstitution,
+                SourceSpan::new(5, 7),
+            ),
+            (
+                "echo $()",
+                DiagnosticCode::UnexpectedSeparator,
+                SourceSpan::new(5, 7),
+            ),
+            (
+                "echo $(# comment only\n)",
+                DiagnosticCode::UnexpectedSeparator,
+                SourceSpan::new(5, 7),
+            ),
+            (
+                "echo $(echo |)",
+                DiagnosticCode::UnexpectedSeparator,
+                SourceSpan::new(12, 13),
+            ),
+        ] {
+            let error = parse(source).expect_err("invalid command substitution");
+            assert_eq!(error.code(), code, "source={source}");
+            assert_eq!(error.span(), span, "source={source}");
+        }
+
+        let accepted = format!("echo {}echo deep{}", "$(".repeat(32), ")".repeat(32));
+        parse(&accepted).expect("32 nested command substitutions");
+
+        let source = format!("echo {}echo deep{}", "$(".repeat(33), ")".repeat(33));
+        let error = parse(&source).expect_err("overdeep command substitution");
+        assert_eq!(
+            error.code(),
+            DiagnosticCode::CommandSubstitutionDepthExceeded
+        );
+        assert_eq!(error.span().source_text(&source), Some("$("));
+    }
+
+    #[test]
     fn keeps_non_parameter_dollars_literal_in_unquoted_and_double_quoted_words() {
         let script = parse("echo $ $: \"$:\" \"\\$NAME\"").expect("literal dollars");
         let values: Vec<String> = script.commands()[0]
@@ -888,14 +1185,14 @@ mod tests {
                 SourceSpan::new(0, 2),
             ),
             (
-                "$(echo)",
+                "$$",
                 DiagnosticCode::UnsupportedSyntax,
                 SourceSpan::new(0, 2),
             ),
             (
-                "$$",
-                DiagnosticCode::UnsupportedSyntax,
-                SourceSpan::new(0, 2),
+                "$((1 + 2))",
+                DiagnosticCode::InvalidParameterExpansion,
+                SourceSpan::new(0, 3),
             ),
         ] {
             let error = parse(source).expect_err("unsupported parameter form");

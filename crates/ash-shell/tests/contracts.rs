@@ -113,7 +113,21 @@ fn render_script(script: &Script) -> String {
                 )
                 .expect("string write");
                 for part in word.parts() {
-                    if let Some(parameter) = part.parameter() {
+                    if let Some(substitution) = part.command_substitution() {
+                        writeln!(
+                            output,
+                            "      command-substitution {} {}..{} body {}..{}",
+                            quote_name(part.quote()),
+                            substitution.span().start(),
+                            substitution.span().end(),
+                            substitution.body_span().start(),
+                            substitution.body_span().end()
+                        )
+                        .expect("string write");
+                        for line in render_script(substitution.script()).lines() {
+                            writeln!(output, "        {line}").expect("string write");
+                        }
+                    } else if let Some(parameter) = part.parameter() {
                         let (kind, name) = parameter_name(parameter);
                         writeln!(
                             output,

@@ -31,14 +31,17 @@ and `exit [STATUS]`. The same persistent state executes sequential `pwd`,
 `echo`, `cd`, `export`, `unset`, `set` pipefail control, portable `ls`, `cat`,
 and `grep`, portable `cp`, `mv`, `rm`, and create-only `touch`, plus native host
 executables with direct argument vectors. Pipelines compose into
-left-associative `&&`/`||` conditional lists. Inline
+left-associative `&&`/`||` conditional lists, and nested `$(...)` command
+substitutions expand in command words and redirection targets. Inline
 source, native script files, and bounded stdin remain available without changing
 the machine contracts of `ash run` and `ash rpc`. H2 now provides explicit
 process-stdio modes, validated native OS pipe graphs, same-line pipelines of two
 to 32 native, portable, or implemented stateful-builtin stages, configurable
 `pipefail`, and source-ordered native, portable, or stateful redirections. Every
-admitted pipeline is fully preflighted before execution; a short-circuited
-conditional branch is not expanded, resolved, or opened. Native pairs remain directly connected;
+admitted outer pipeline is fully preflighted before any of its stages executes;
+a short-circuited conditional branch is not expanded, resolved, or opened.
+Expansion-time substitutions run in source order, so an external effect from an
+earlier substitution remains if a later stage fails preflight. Native pairs remain directly connected;
 in-process boundaries use explicit parent-owned asynchronous pipe and file
 handles and preserve OS backpressure. Mixed-stage files open in global source
 order before spawn. Replaced or non-consuming internal endpoints still deliver
@@ -51,6 +54,9 @@ The first H3 checkpoint routes those four portable mutations through the same
 BLAKE3-preimage, journaled, no-overwrite transaction service as ASH/1 `fs`.
 The second adds source-spanned, left-associative `&&`/`||` lists over complete
 pipeline statuses without introducing an implicit host shell.
+The third adds recursively parsed, source-spanned command substitution with
+cloned shell state, bounded capture, quote-aware field behavior, and no host
+shell string.
 
 ## What ash covers
 
@@ -64,7 +70,7 @@ pipeline statuses without introducing an implicit host shell.
 | Retained evidence    | `/ # ? - \| >`                        | Byte and line slices, search, release, ordered table projection, and capability-gated materialization                                                                  |
 | Model context        | ASON, `×N`, `×N#K`, `⋯N`              | Columnar records, path dictionaries, explicit reductions, stable merge, and references back to the full source                                                         |
 | Trust and delivery   | capabilities, permits, signed updates | Least-privilege negotiation, session/action/policy/expiry-bound one-time permits, replay rejection, transactional activation, recovery, rollback, SBOM, and provenance |
-| Human shell          | `ash shell`                           | H1 REPL lifecycle, H2 supervised streaming/redirection, and H3 journaled mutations plus `&&`/`||` pipeline lists                                                    |
+| Human shell          | `ash shell`                           | H1 REPL lifecycle, H2 supervised streaming/redirection, and H3 journaled mutations, `&&`/`||` pipeline lists, plus nested `$(...)` command substitution              |
 
 The [complete capability map](https://a3s-lab.github.io/ash/guide/capabilities.html)
 documents guarantees, evidence, and deliberate non-goals for the full surface.
@@ -170,11 +176,27 @@ Other `set` forms remain explicit errors. A Profile can select the policy before
 the main source runs. In a pipeline, `set` operates on that stage's state clone
 and cannot mutate the parent policy.
 
-`$NAME`, `${NAME}`, and `$?` expand immediately before each command resolves.
-Single quotes and escaped dollars remain literal; double quotes preserve one
-field, while unquoted values split on fixed ASCII space, tab, and LF separators.
-Variables precede host-aware exported-environment lookup, undefined values are
-empty, and native argument units are preserved through direct argv launch.
+`$NAME`, `${NAME}`, `$?`, and nested `$(...)` expand immediately before each
+command resolves. Single quotes and escaped dollars remain literal; double
+quotes preserve one field, while unquoted values split on fixed ASCII space,
+tab, and LF separators. Variables precede host-aware exported-environment
+lookup, undefined values are empty, and native argument units are preserved
+through direct argv launch.
+
+Each command substitution is parsed recursively into the same typed `Script`
+plan, with a 32-level nesting limit and top-level source spans for diagnostics.
+It executes against a full `ShellState` clone: cwd, variables, environment,
+options, last status, and `exit` remain local, while ordinary external process
+and filesystem effects remain visible. Ash captures the complete substitution
+stdout, removes every trailing LF, preserves internal newlines inside double
+quotes, and applies the fixed field split only when unquoted. A nonzero nested
+status does not overwrite the parent `$?` or block the outer command; nested
+stderr and diagnostics propagate once. NUL output is rejected. Unix preserves
+non-UTF-8 stdout as native argument bytes, while Windows requires valid UTF-8.
+Substitution values, stdout, and stderr share the remaining 128 MiB synchronous
+capture allowance, and a capture failure prevents the outer command from
+running. Substitutions across command words and file-redirection targets execute
+in source order; a short-circuited pipeline executes none of them.
 
 Native commands resolve through the shell state's `PATH` or an explicit
 `native:` prefix, then launch the resolved executable directly with the parsed
@@ -200,7 +222,8 @@ Native, WSL, and portable commands plus implemented stateful builtins accept
 `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `1>&2`.
 Redirections are applied from left to right, so `command >out 2>&1` merges both
 streams into `out`, while `command 2>&1 >out` leaves stderr on the original
-stdout capture. File targets expand to exactly one native field, resolve from
+stdout capture. File targets, including `$(...)`, expand to exactly one native
+field, resolve from
 the persistent cwd, and connect directly to child or parent-task OS handles
 without buffering file output in shell memory. One graph order interleaves
 native, portable, and stateful resources by stage and redirection source order;
@@ -268,7 +291,8 @@ still parses before any command runs, so a malformed trailing branch prevents
 all prefix effects. An admitted `exit` stops the source; a skipped one does not.
 
 User-visible terminal streaming, foreground interactive programs and job
-control, broader expansion and the remaining command language, and the remaining H5 WSL
+control, globbing, aliases, functions, subshell state, the remaining command
+language, and the remaining H5 WSL
 policy, path, environment, and interruption contracts are not implemented yet. A minimal
 machine-only binary can be built with `--no-default-features`.
 
@@ -329,7 +353,7 @@ the store lifecycle.
 
 The current `main` baseline includes:
 
-- **313 Rust workspace tests** across protocol schemas, RPC, every operation,
+- **318 Rust workspace tests** across protocol schemas, RPC, every operation,
   transactions, recovery, the retained store, cancellation, signed updates, and
   the human shell.
 - **22 schema-14 runtime scenarios** across worker matrices, including an 8 MiB

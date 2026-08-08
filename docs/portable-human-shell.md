@@ -1,6 +1,6 @@
 # Portable Human Shell Architecture
 
-- Status: accepted; H1, twelve H2 checkpoints, and the first two H3 checkpoints implemented
+- Status: accepted; H1, twelve H2 checkpoints, and the first three H3 checkpoints implemented
 - Target: post-ASH/1 version one
 - Last updated: 2026-08-08
 
@@ -25,13 +25,15 @@ stdin, and native script-file sources. One persistent state executes sequential
 `pwd`, `echo`, `cd`, `export`/`unset`, `set` pipefail control, portable `ls`,
 bounded raw-byte `cat` and text `grep`, journaled regular-file `cp`/`mv`/`rm`
 and create-only `touch`, source-spanned named and last-status
-expansion, direct-argv native host commands, and left-associative `&&`/`||`
-pipeline lists. H2 adds explicit per-stream
+expansion, nested `$(...)` command substitution, direct-argv native host
+commands, and left-associative `&&`/`||` pipeline lists. H2 adds explicit per-stream
 modes, validated direct OS pipe graphs, same-line pipelines of two to 32 native,
 explicit WSL, implemented portable, or implemented stateful-builtin stages,
 configurable `pipefail`, and source-ordered native, WSL, portable, or stateful
-redirections. Every admitted pipeline is fully expanded and resolved before
-execution, while a short-circuited conditional branch performs neither step;
+redirections. Before any outer pipeline stage starts, every admitted pipeline
+is fully expanded and resolved; expansion-time substitutions can retain
+external effects if a later stage fails preflight, while a short-circuited
+conditional branch performs neither step;
 native pairs use direct pipes, while
 in-process boundaries retain explicit async parent pipe/file handles and run as
 concurrent bounded tasks. Unredirected final stdout and stage-ordered native
@@ -46,8 +48,10 @@ The explicit Windows adapter discovers `wsl.exe`, constructs exact
 and host-file redirection. The first H3 checkpoint binds portable file
 mutations to the persistent cwd and reuses the ASH/1 journaled transaction
 boundary. The second adds source-spanned `&&`/`||` lists over visible pipeline
-status without changing ASH/1. Foreground interactive programs and jobs,
-terminal streaming, broader expansion and the remaining command language, and the remaining WSL policy, general
+status without changing ASH/1. The third adds recursively parsed, bounded,
+state-isolated command substitution without changing ASH/1. Foreground
+interactive programs and jobs, terminal streaming, globbing, aliases,
+functions, subshell state, the remaining command language, and the remaining WSL policy, general
 path/environment mapping, and interruption contracts remain unimplemented.
 
 ## 1. Executive decision
@@ -317,13 +321,13 @@ before script execution is declared stable. `.sh` files are not interpreted as
 
 ### 7.1 Current H1 parameter expansion contract
 
-The current expansion stage recognizes exactly `$NAME`, `${NAME}`, and `$?`.
+The parameter portion of the current expansion stage recognizes exactly
+`$NAME`, `${NAME}`, and `$?`.
 `NAME` is an ASCII shell identifier and the unbraced form consumes the longest
 valid name. Braces only delimit a plain name: empty names, positional or other
-special parameters, `${NAME:-fallback}`-style operators, and command
-substitution fail with source-spanned diagnostics instead of being
-reinterpreted. A `$` not followed by a supported or reserved parameter starter
-remains literal.
+special parameters, and `${NAME:-fallback}`-style operators fail with
+source-spanned diagnostics instead of being reinterpreted. A `$` not followed
+by a supported or reserved parameter starter remains literal.
 
 Expansion is quote-aware and runs once for each simple command immediately
 before command resolution:
@@ -349,10 +353,48 @@ Values and resulting fields remain native `OsString` data. Unix non-UTF-8 bytes
 and Windows unpaired native units survive lookup, splitting, concatenation, and
 direct argv launch. Only a command name must be UTF-8 because command
 classification is textual; an unrepresentable expanded name fails explicitly
-with status 127. Tilde, command, arithmetic, and glob expansion remain staged
-work and do not run implicitly.
+with status 127. Tilde, arithmetic, and glob expansion remain staged work and
+do not run implicitly.
 
-### 7.2 Current conditional-list contract
+### 7.2 Current H3 command-substitution contract
+
+`$(SOURCE)` is available in unquoted or double-quoted command words and file
+redirection targets. Single quotes and a backslash-escaped `$` keep it literal.
+The parser recursively builds the same complete typed `Script` used by a
+top-level source, preserves the outer `$()` and body spans, and rejects an
+empty, comment-only, malformed, unterminated, or more-than-32-level body before
+any command runs. Nested execution shifts diagnostics back to absolute byte
+spans in the submitted top-level source.
+
+Each admitted substitution executes in source order against a full clone of
+the shell state. Changes to cwd, variables, exported environment, options,
+last status, and `exit` remain local to that nested source. Ordinary process
+and filesystem effects are external and therefore remain visible. A nonzero
+nested command or final status does not by itself fail the expansion, overwrite
+the parent `$?`, or block the outer command. Nested raw stderr and shell
+diagnostics propagate to the parent execution and each diagnostic is rendered
+once.
+
+Ash captures the complete nested stdout and removes every trailing LF. In
+double quotes, the result contributes exactly one field, including an empty
+field, and preserves spaces, tabs, and internal newlines. Unquoted output uses
+the same fixed ASCII space, tab, and LF field splitting as an unquoted
+parameter; an empty result can remove its word. NUL output is an expansion
+error. Unix converts arbitrary non-NUL bytes directly to a native `OsString`;
+Windows requires valid UTF-8 before constructing its native string.
+
+Substitution values, shell stdout, and shell stderr share the remaining
+128 MiB synchronous capture allowance. Exceeding that allowance is an
+infrastructure failure and prevents the outer command from running. Command
+words and file-redirection targets participate in one substitution source
+order, although redirection files still open only after complete plan
+validation. A short-circuited pipeline performs no substitution. The complete
+top-level source and every nested body are parsed before top-level execution,
+so a trailing parse error still prevents all prefix effects. If a later stage
+fails outer-pipeline preflight, effects from substitutions already executed in
+earlier source positions remain.
+
+### 7.3 Current conditional-list contract
 
 The current command language accepts `pipeline && pipeline` and
 `pipeline || pipeline`. Both operators have equal precedence and evaluate left
@@ -364,10 +406,11 @@ so a later link and `$?` observe the same value. This gives the conventional
 left-associative result for combinations such as `a && b || c && d` without
 constructing an implicit host-shell string.
 
-Short-circuiting skips the entire pipeline before parameter expansion, command
-resolution, argument or regular-expression validation, redirection planning or
-file opens, process launch, parent-state mutation, and portable filesystem
-transactions. It emits no diagnostic from the skipped branch. An admitted
+Short-circuiting skips the entire pipeline before parameter or command-
+substitution expansion, command resolution, argument or regular-expression
+validation, redirection planning or file opens, process launch, parent-state
+mutation, and portable filesystem transactions. It emits no diagnostic from
+the skipped branch. An admitted
 `exit` stops the submitted source normally; a skipped `exit` has no effect.
 The complete source, including every skipped branch, is still parsed before any
 command runs, so a malformed trailing operator or pipeline prevents all prefix
@@ -824,6 +867,19 @@ continuation, operator spans, and missing operands; executor and CLI regressions
 lock left associativity, `$?`, side-effect suppression, pipeline/`pipefail`
 selection, and `exit` gating.
 
+The third H3 checkpoint adds a `CommandSubstitution` node inside `WordPart`.
+The parser scans quote, escape, comment, and nested `$()` boundaries, then
+recursively parses each body into a complete `Script`; a 32-level ceiling keeps
+both parsing and async execution bounded. At execution time, nested spans shift
+to the top-level source, substitutions across words and redirection targets run
+in source order, and each nested script receives a full `ShellState` clone.
+Captured stdout has every trailing LF removed before quote-aware field handling.
+Nested stderr and diagnostics propagate once, while nested status and `exit`
+remain local. The expansion retains external effects, rejects NUL, preserves
+Unix native bytes, requires Windows UTF-8, and shares the 128 MiB synchronous
+capture allowance with shell output. A capture failure stops the outer command;
+conditional short-circuiting occurs before any substitution.
+
 ## 12. Streaming pipelines
 
 Add a dedicated platform-neutral I/O model:
@@ -1158,7 +1214,8 @@ raw-byte `cat`, bounded text `grep`, journaled `cp`/`mv`/`rm`, create-only
 `touch`, and native host executables against one native `ShellState`, with
 source-spanned human diagnostics and conventional status propagation. Named
 `$NAME`/`${NAME}` parameters and `$?` expand in a distinct, quote-aware stage
-with native-string preservation and the fixed field contract in section 7.1.
+with native-string preservation and the fixed field contract in section 7.1;
+nested `$(...)` follows the state-isolated, bounded contract in section 7.2.
 File, stdin, and Profile sources share a 1 MiB valid-UTF-8 ceiling, while file
 and external-command operands retain native representation. `ls`, `cat`, and
 `grep` reuse the provider-neutral list/read/search services with an unconfined
@@ -1178,7 +1235,8 @@ command and an unredirected first pipeline stage still receive null stdin, so
 foreground terminal programs and Ctrl+C job-tree delivery remain H4 rather
 than being claimed by this REPL checkpoint. The `human-shell` feature is enabled
 for the normal binary and can be disabled for a minimal machine-only build.
-Broader expansion and the remaining command language, terminal streaming, job control, and
+Globbing, aliases, functions, subshell state, the remaining command language,
+terminal streaming, job control, and
 the remaining WSL detection, policy, path, environment, and interruption
 contracts remain for later increments.
 
@@ -1241,7 +1299,9 @@ ordered host-file redirection, and backend-aware `pipefail` status.
 
 - portable `cp`, `mv`, `rm`, and create-only `touch` adapters are implemented;
 - left-associative `&&` and `||` conditional pipeline lists are implemented;
-- add command substitution, globbing, aliases, functions, and subshell state;
+- nested command substitution in command words and redirection targets is
+  implemented;
+- add globbing, aliases, functions, and subshell state;
 - complete the first stable `ash` dialect specification.
 
 Current checkpoint: mutation resolution precedes native lookup, exact-arity
@@ -1254,8 +1314,12 @@ selection. Source-spanned `&&`/`||` links consume that selected pipeline status
 with equal precedence and left associativity. Rejected branches preserve the
 preceding status and perform no expansion, resolution, preflight, file open,
 process launch, state change, or transaction; only an admitted `exit` stops the
-source. Command substitution, globbing, aliases, functions, subshell state, and
-the stable dialect specification remain open.
+source. Nested command substitutions are recursively parsed to 32 levels,
+execute in source order on full state clones, trim trailing LF from bounded
+stdout, retain external effects, and propagate stderr plus absolute-span
+diagnostics without changing parent state or `$?`; capture failure blocks the
+outer command. Globbing, aliases, functions, subshell state, and the stable
+dialect specification remain open.
 
 ### H4: interactive jobs
 
