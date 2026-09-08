@@ -2,6 +2,13 @@
   <img src="./assets/readme/hero.svg" width="100%" alt="ash — AI Native Shell executing typed work across bounded I/O and CPU planes and returning compact ASON evidence">
 </p>
 
+
+<p align="center">
+  <strong>Language / 语言:</strong>
+  <a href="README.md">English</a> ·
+  <a href="README.zh-CN.md">中文</a>
+</p>
+
 <p align="center"><strong>AI Native Shell</strong> · typed execution · guarded mutation · compact, retrievable evidence</p>
 
 <p align="center">
