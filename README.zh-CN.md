@@ -1,80 +1,74 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="ash — AI Native
-Shell executing typed work across bounded I/O and CPU planes and
-returning compact ASON evidence">
+  <img src="./assets/readme/hero.svg" width="100%" alt="ash — AI Native Shell 在有界 I/O 与 CPU 平面上执行类型化工作，并返回紧凑的 ASON 证据">
 </p>
 
-
 <p align="center">
-  <strong>Language / 语言:</strong>  <a href="README.md">English</a> ·
-<a href="README.zh-CN.md">中文</a>
+  <strong>Language / 语言:</strong>
+  <a href="README.md">English</a> ·
+  <a href="README.zh-CN.md">中文</a>
 </p>
 
-<p align="center"><strong>AI Native Shell</strong> · 类型化执行 · 受保护的突变 · 紧凑、可检索的证据</p>
+<p align="center"><strong>AI Native Shell</strong> · 类型化执行 · 受护变异 · 紧凑可检索证据</p>
 
 <p align="center">
-  <a href="https://a3s-lab.github.io/ash/">中文网站</a>·  <a
-href="https://a3s-lab.github.io/ash/en/">英文文档</a> ·  <a
-href="https://a3s-lab.github.io/ash/guide/capabilities.html">能力</a> ·
-<a href="https://a3s-lab.github.io/ash/guide/coding-agents.html">编码代
-理技能</a> ·  <a
-href="https://a3s-lab.github.io/ash/guide/install.html">安装</a>
+  <a href="https://a3s-lab.github.io/ash/">中文网站</a> ·
+  <a href="https://a3s-lab.github.io/ash/en/">English docs</a> ·
+  <a href="https://a3s-lab.github.io/ash/guide/capabilities.html">能力</a> ·
+  <a href="https://a3s-lab.github.io/ash/guide/coding-agents.html">Coding Agent Skill</a> ·
+  <a href="https://a3s-lab.github.io/ash/guide/install.html">安装</a>
 </p>
 
 > [!IMPORTANT]
-> `ash` 已预发布。源代码实现、跨平台安装程序、
-> 和失败关闭的六目标发布工作流程可用，但发布
-> 未提供凭据且未提供受支持的签名二进制文件
-> 已发表。从源代码构建以进行开发验证。
+> `ash` 处于预发布阶段。源码实现、跨平台安装器与失败关闭的六目标发布工作流
+> 均已可用，但发布凭证尚未配置，也尚未发布受支持的已签名二进制。
+> 请从源码构建以进行开发验证。
 
-`ash` 是一个围绕编码代理而不是终端设计的全新 shell用户。它接受类型化的
-ASH/1 程序，在显式下执行独立工作预算，并返回规范的 ASON，并参考完整保留
-证据。没有隐藏的 shell 字符串、静默截断或完成顺序输出成为合同的一部分。
+`ash` 是围绕 Coding Agent 而非终端用户设计的全新 shell。它接受类型化 ASH/1
+程序，在显式预算下执行独立工作，并返回规范 ASON，以及对完整保留证据的引用。
+隐藏的 shell 字符串、静默截断或按完成顺序的输出都不会成为契约的一部分。
 
-可选的人类前端已到达交互式 H1 检查点功能门控`ash shell`路线。终端调用打
-开行编辑的 REPL具有可配置的提示、私有持久历史记录、选择加入启动配置文件
-，和`exit [STATUS]`。相同的持久状态执行顺序`pwd`，`echo`、`cd`、`export`
-、`unset`、`set` 管道故障控制、便携式 `ls`、`cat`、和 `grep`、可移植
-`cp`、`mv`、`rm` 和仅创建的 `touch`，以及本机主机具有直接参数向量的可执
-行文件。管道组成左关联 `&&``||`/ 条件列表和嵌套 `$(...)` 命令替换在命令
-字和重定向目标中扩展。内联源代码、本机脚本文件和有界标准输入保持可用，无
-需更改`ash run`和`ash rpc`的机器合同。 H2 现在提供明确的process-stdio 模
-式、经过验证的本机操作系统管道图、两个的同线管道32 个本机、可移植或实现
-的有状态内置阶段，可配置`pipefail`，以及按源顺序的本机、可移植或有状态重
-定向。每个承认的外部管道在其任何阶段执行之前已完全预检；短路条件分支不会
-被扩展、解析或打开。扩展时间替换按源顺序运行，因此来自如果后续阶段预检失
-败，则保留较早的替换。本机对保持直接连接；进程内边界使用显式父级拥有的异
-步管道和文件处理并保持操作系统背压。在全局源中打开混合阶段文件产卵前订购
-。更换或非消耗性内部端点仍然可以提供服务EOF 或本机断管行为。最终标准输出
-和本机标准错误共享剩余的有限捕获津贴。声明父资源后，原生图变成一张
-`NativeProcessJob`：等待保存规范顺序，任何生成后的设置、捕获或等待失败都
-会终止并收获每一个返回之前本机成员拥有的进程树。第一个 H3 检查点通过相同
-的路径路由这四个可移植突变BLAKE3-原像、日志式、无覆盖事务服务，如 ASH/1
-`fs`。第二个添加了源跨度、左关联 `&&``||`/ 完整列表管道状态，无需引入隐
-式主机 shell。第三个添加了递归解析、跨源命令替换克隆 shell 状态、有界捕
-获、引号感知字段行为和无主机外壳字符串。
+可选的人类前端已达到交互式 H1 检查点，并提供特性门控的 `ash shell` 路由。
+在终端调用会打开带行编辑的 REPL，含可配置提示符、私有持久历史、可选启动
+Profile，以及 `exit [STATUS]`。同一持久状态执行顺序的 `pwd`、`echo`、`cd`、
+`export`、`unset`、`set` pipefail 控制、可移植 `ls`、`cat` 与 `grep`、可移植
+`cp`、`mv`、`rm`，以及仅创建的 `touch`，外加带直接参数向量的原生主机可执行文件。
+管道可组合为左结合的 `&&`/`||` 条件列表，嵌套的 `$(...)` 命令替换可在命令词与
+重定向目标中展开。内联源、原生脚本文件与有界 stdin 仍然可用，且不改变
+`ash run` 与 `ash rpc` 的机器契约。H2 现提供显式进程 stdio 模式、经验证的原生
+OS 管道图、两到 32 个原生/可移植/已实现有状态内建阶段的同行管道、可配置
+`pipefail`，以及按源顺序的原生、可移植或有状态重定向。每个被准入的外层管道在
+任一阶段执行前都经过完整预检；短路的条件分支不会被展开、解析或打开。
+展开期替换按源顺序运行，因此若较晚阶段预检失败，较早替换的外部效应仍会保留。
+原生对保持直接连接；进程内边界使用显式的父拥有异步管道与文件句柄，并保留
+OS 背压。混合阶段文件在 spawn 前按全局源顺序打开。被替换或不消费的内部端点
+仍交付 EOF 或原生 broken-pipe 行为。最终 stdout 与原生 stderr 共享剩余的有界捕获配额。
+在父资源被声明后，原生图成为单一 `NativeProcessJob`：等待保留规范顺序，
+且任何 spawn 后的设置、捕获或等待失败都会在返回前终止并回收每个原生成员拥有的进程树。
+第一个 H3 检查点将这四种可移植变异路由到与 ASH/1 `fs` 相同的 BLAKE3 原像、
+日记式、不覆盖事务服务。第二个检查点在完整管道状态上增加带源跨度、左结合的
+`&&`/`||` 列表，且不引入隐式主机 shell。第三个检查点增加递归解析、带源跨度的
+命令替换，含克隆的 shell 状态、有界捕获、感知引号的字段行为，且无主机 shell 字符串。
 
-## 灰覆盖了什么
+## ash 覆盖范围
 
-|表面|运营|实施了什么 |
-| -------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-|存储库发现 | `read r`、`list l`、`search g` |工作空间限制的字节/行读取、稳定遍历、文字和正则表达式搜索 |
-|流程| `exec x`、`cancel k` |直接可执行文件 + argv 启动、环境/标准输入控制、截止日期、并发标准输出/标准错误捕获以及拥有的进程树清理 |
-|保护突变| `patch p`、`fs f` | BLAKE3 比较和交换编辑以及日志记录、无覆盖文件创建/复制/移动/删除，并具有回滚和重新启动恢复功能 |
-|并行程序| `batch b` |已验证的非循环图、就绪节点并发、失败后代跳过、独立消耗和稳定的最低索引错误 |
-|工作区状态 | `snapshot s` |确定性范围清单和匹配之前/之后的增量 |
-|保留证据| `/ # ? - \| >` |字节和行切片、搜索、发布、有序表投影和功能门控具体化 |
-|模型上下文 | ASON、`×N`、`×N#K`、`⋯N` |列式记录、路径字典、显式缩减、稳定合并以及对完整源代码的引用 |
-|信任与交付|功能、许可、签名更新|最低权限协商、会话/操作/策略/过期一次性许可、重放拒绝、事务激活、恢复、回滚、SBOM 和来源 |
-|人体外壳| `ash shell` | H1 REPL 生命周期、H2 监督流/重定向和 H3 日志突变、`&&`/`||` 管道列表，以及嵌套 `$(...)` 命令替换 |
+| 表面 | 操作 | 已实现内容 |
+| -------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 仓库发现 | `read r`、`list l`、`search g` | 工作区受限的字节/行读取、稳定遍历、字面量与正则搜索 |
+| 进程 | `exec x`、`cancel k` | 直接可执行文件 + argv 启动、环境/stdin 控制、截止期限、并发 stdout/stderr 捕获，以及拥有的进程树清理 |
+| 受护变异 | `patch p`、`fs f` | BLAKE3 比较并交换编辑，以及带回滚与重启恢复的日记式、不覆盖文件创建/复制/移动/删除 |
+| 并行程序 | `batch b` | 经验证的无环图、就绪节点并发、失败后代跳过、独立排空，以及稳定的最低索引错误 |
+| 工作区状态 | `snapshot s` | 确定性作用域清单与匹配的 before/after 增量 |
+| 保留证据 | `/ # ? - \| >` | 字节与行切片、搜索、释放、有序表投影，以及能力门控的物化 |
+| 模型上下文 | ASON、`×N`、`×N#K`、`⋯N` | 列式记录、路径字典、显式归约、稳定合并，以及回指完整源的引用 |
+| 信任与交付 | capabilities、permits、已签名更新 | 最小权限协商、会话/动作/策略/过期绑定的一次性许可、重放拒绝、事务性激活、恢复、回滚、SBOM 与溯源 |
+| 人类 shell | `ash shell` | H1 REPL 生命周期、H2 受监督流式/重定向，以及 H3 日记式变异、`&&`/`||` 管道列表，外加嵌套 `$(...)` 命令替换 |
 
-[complete capability
-map](https://a3s-lab.github.io/ash/guide/capabilities.html)记录整个表面
-的保证、证据和故意的非目标。
+[完整能力图](https://a3s-lab.github.io/ash/guide/capabilities.html)
+记录完整表面的保证、证据与刻意非目标。
 
-## 编码代理技能
+## Coding Agent Skill
 
-该存储库包含项目本机代理技能：
+仓库包含项目原生的 Agent Skill：
 
 ```text
 .agents/skills/use-ash/
@@ -85,21 +79,20 @@ map](https://a3s-lab.github.io/ash/guide/capabilities.html)记录整个表面
     └── workflows.md
 ```
 
-它教代理选择一个操作，发出准确的`t,i,o,a,u`信封，使用消化保护突变，构建
-有界 DAG，检索保留的证据，并验证结果。在兼容的编码代理中调用它：
+它教导 Agent 选择操作、发出精确的 `t,i,o,a,u` 信封、使用摘要保护的变异、
+构建有界 DAG、检索保留证据并验证结果。在兼容的 Coding Agent 中这样调用：
 
 ```text
 Use $use-ash to inspect this repository, make the requested change, and verify it.
 ```
 
-阅读[Coding Agent integration
-guide](https://a3s-lab.github.io/ash/guide/coding-agents.html)或检查
-[Skill source](./.agents/skills/use-ash/SKILL.md)。
+阅读 [Coding Agent 集成指南](https://a3s-lab.github.io/ash/guide/coding-agents.html)
+或查看 [Skill 源码](./.agents/skills/use-ash/SKILL.md)。
 
-## 第一个人类命令
+## 首批人类命令
 
-在终端上运行 `ash shell` 以获取默认的 `ash> ` 提示符，或选择一个非交互式
-源明确：
+在终端运行 `ash shell` 以获得默认 `ash> ` 提示符，或显式选择
+非交互源：
 
 ```sh
 ash shell
@@ -110,152 +103,148 @@ printf 'echo from-stdin\n' | ash shell --no-profile
 ash shell --profile ./profile.ash
 ```
 
-每个脚本、标准输入源和配置文件都限制为 1 MiB 的有效 UTF-8。使用当文件操
-作数以 `-` 开头时，`ash shell -- ./-script.ash`。个人资料可以通过
-`--profile FILE`或非空`ASH_PROFILE`选择加入；`--no-profile` 提供确定性恢
-复。配置文件已完全解析在它执行任何一个之前。解析失败会停止非交互式启动，
-而交互式 shell 报告源跨度并且仍然打开，没有部分轮廓效果。
-`exit [STATUS]` 接受 0 到 255，使用之前的状态当省略时，并停止剩余的提交
-源。
+每个脚本、stdin 源与 Profile 限制为 1 MiB 有效 UTF-8。当文件操作数以 `-`
+开头时，使用 `ash shell -- ./-script.ash`。
+Profile 通过 `--profile FILE` 或非空 `ASH_PROFILE` 选择启用；
+`--no-profile` 提供确定性恢复。Profile 在执行任何部分前被完整解析。
+解析失败会停止非交互启动，而交互 shell 报告源跨度并以无部分
+Profile 效应的状态打开。`exit [STATUS]` 接受 0 到 255，省略时使用上一状态，
+并停止剩余已提交源。
 
-`ASH_PROMPT` 替换提示并且必须是有效的 UTF-8。 `ASH_HISTORY`选择相对于初
-始 cwd 的历史文件；空值会禁用持久性历史。否则默认为
-`$XDG_STATE_HOME/ash/history`，`$HOME/.local/state/ash/history`，或
-`%LOCALAPPDATA%\ash\history`，取决于主机。不记录以空格或制表符开头的行。
-历史档案当它们是符号链接或非常规目标时被拒绝，使用模式Unix 上的 `0600`，
-如果持续存在，则降级为内存中会话并发出警告不安全或不可用。
+`ASH_PROMPT` 替换提示符且必须为有效 UTF-8。`ASH_HISTORY` 选择相对初始 cwd
+的历史文件；空值禁用持久历史。否则默认是 `$XDG_STATE_HOME/ash/history`、
+`$HOME/.local/state/ash/history`，或 `%LOCALAPPDATA%\ash\history`，取决于
+主机。以空格或制表符开头的行不被记录。历史文件在为符号链接或非普通目标时
+被拒绝，在 Unix 上使用模式 `0600`，并在持久化不安全或不可用时降级为带警告
+的内存会话。
 
-可移植的`ls`列出一个路径（默认`.`），每个路径发出一个稳定的本机名称线，
-支持`-a``--all`/、`-d``--directory`/、`-1`、组合短线选项和`--`。不受支持
-的 GNU 选项显然会失败。便携式`cat`需要一个文件路径，无需转换即可写入其字
-节或添加换行符，接受 `--`，并共享 128 MiB 语义读取/捕获天花板。在多级管
-道中，`cat -`消耗传入的字节流；在一个简单的命令中，它使用一个显式的 `<`
-文件。一个未重定向的独立的标准输入操作数仍然是一个显式错误。选项和多个文
-件没有实施。可移植 `grep` 需要一个有效的 UTF-8 常规文件并使用 Rust 常规
-默认表达式。支持`-E``--extended-regexp`/，`-F``--fixed-strings`/、`-i`
-`--ignore-case`/、`-n``--line-number`/，组合空头期权和`--`。搜索限制为
-64 MiB；没有匹配返回状态1 无诊断。在多级管道中，`grep PATTERN -`消耗具有
-相同搜索语义和 128 MiB 输出的传入 UTF-8 流天花板；一个简单的命令可以提供
-`-`到`<`。目录，多个文件、未重定向的独立标准输入`-`以及不受支持的选项失
-败明确地。
+可移植 `ls` 列出一个路径（默认 `.`），每行发出一个稳定原生名，并支持
+`-a`/`--all`、`-d`/`--directory`、`-1`、组合短选项与 `--`。不支持的 GNU
+选项明确失败。
+可移植 `cat` 需要一个文件路径，原样写出其字节且不转换、不追加换行，接受
+`--`，并共享 128 MiB 语义读/捕获上限。在多阶段管道中，`cat -` 消费传入
+字节流；在简单命令中它消费显式 `<` 文件。未重定向的独立 stdin 操作数仍是
+显式错误。选项与多文件尚未实现。
+可移植 `grep` 需要一个有效 UTF-8 普通文件，默认使用 Rust 正则表达式。它支持
+`-E`/`--extended-regexp`、`-F`/`--fixed-strings`、`-i`/`--ignore-case`、
+`-n`/`--line-number`、组合短选项与 `--`。搜索限制为 64 MiB；无匹配返回状态
+1 且无诊断。在多阶段管道中，`grep PATTERN -` 以相同搜索语义消费传入 UTF-8
+流，输出上限为 128 MiB；简单命令可通过 `<` 提供 `-`。目录、多文件、未重定向
+的独立 stdin `-` 与不支持选项均明确失败。
 
-便携式 `cp SOURCE DESTINATION`、`mv SOURCE DESTINATION`、`rm PATH` 和
-`touch PATH` 仅接受那些精确的常规文件参数加上 `--`。他们绑定当前cwd作为
-持久事务根，拒绝父级遍历，符号链接/重新解析遍历、目录、超过 128 MiB 的文
-件以及路径不能由 UTF-8 事务日志表示。复制、移动和触摸切勿覆盖；该检查点
-的 `touch` 创建一个新的空文件并执行不更新现有文件上的时间戳。复制、移动
-和删除派生BLAKE3 在执行前立即进行原像，然后是共享事务重新验证它而不进行
-静默重试。冲突返回状态 1 并保留外部更改或现有的文件。下保留的`.ash`目录
-事务根拥有跨进程锁定、回滚和重启恢复。
+可移植 `cp SOURCE DESTINATION`、`mv SOURCE DESTINATION`、`rm PATH` 与
+`touch PATH` 仅接受这些精确的普通文件元数外加 `--`。它们将当前 cwd 绑定为
+持久事务根，拒绝父级遍历、符号链接/reparse 遍历、目录、超过 128 MiB 的文件，
+以及无法由 UTF-8 事务日记表示的路径。复制、移动与 touch 从不覆盖；本检查点的
+`touch` 创建新的空文件，且不更新已有文件的时间戳。复制、移动与删除在执行前
+立即派生 BLAKE3 原像，然后共享事务在无静默重试的情况下重新验证它。冲突返回
+状态 1 并保留外部已更改或已存在的文件。事务根下保留的 `.ash` 目录拥有跨进程
+锁定、回滚与重启恢复。
 
-`export NAME=VALUE` 和 `unset NAME` 更新 shell 变量和导出的变量后续命令
-的环境状态。每人接受一项扩展作业或姓名加`--`；名称是 ASCII shell 标识符
-，保留空值，并且取消设置丢失的名称成功。引用可能包含字段的值分隔符，例如
-`export COPY="$SOURCE"`。列表和多个名称在此检查点中保持显式非特征。
+`export NAME=VALUE` 与 `unset NAME` 同时更新 shell 变量与导出环境状态，供后续
+命令使用。每个接受一个已展开赋值或名称外加 `--`；名称是 ASCII shell 标识符，
+空值被保留，取消不存在的名称成功。可能包含字段分隔符的值请加引号，例如
+`export COPY="$SOURCE"`。列出与多个名称在本检查点仍是显式非功能。
 
-`set -o pipefail` 为持久化启用最右边的故障管道状态shell状态，而
-`set +o pipefail`恢复默认的最终阶段策略。其他`set`形式仍然存在明显错误。
-Profile 可以先选择策略主要来源运行。在管道中，`set` 在该阶段的状态克隆上
-运行并且不能改变父策略。
+`set -o pipefail` 为持久 shell 状态启用最右失败管道状态，而 `set +o pipefail`
+恢复默认的最终阶段策略。其他 `set` 形式仍是显式错误。Profile 可在主源运行前
+选择该策略。在管道中，`set` 作用于该阶段的状态克隆，不能变更父策略。
 
-`$NAME`、`${NAME}`、`$?` 和嵌套的 `$(...)` 在每个之前立即展开命令解决。
-单引号和转义美元仍然是字面意思；双引号保留一个字段，而未加引号的值则在固
-定的 ASCII 空间上分割，制表符和 LF 分隔符。变量先于主机感知的导出环境查
-找，未定义的值为空，并且保留本机参数单元通过直接 argv 启动。
+`$NAME`、`${NAME}`、`$?` 与嵌套 `$(...)` 在每个命令解析前立即展开。单引号与
+转义美元符保持字面；双引号保留一个字段，而未加引号的值按固定 ASCII 空格、
+制表符与 LF 分隔符拆分。变量优先于主机感知的导出环境查找，未定义值为空，
+原生参数单元经直接 argv 启动保留。
 
-每个命令替换都会递归地解析为相同类型的`Script`计划，具有 32 级嵌套限制和
-用于诊断的顶级源跨度。它针对完整的`ShellState`克隆执行：cwd、变量、环境
-、选项、最后状态和`exit`保留在本地，而普通外部进程并且文件系统的影响仍然
-可见。阿什完成了替换stdout，删除每个尾随 LF，保留 double 内的内部换行符
-引号，并且仅在未加引号时应用固定字段拆分。非零嵌套status 不会覆盖父级
-`$?` 或阻止外部命令；嵌套的stderr 和诊断传播一次。 NUL 输出被拒绝。 Unix
-保留非 UTF-8 标准输出作为本机参数字节，而 Windows 需要有效的 UTF-8。替换
-值、stdout 和 stderr 共享剩余的 128 MiB 同步空间捕获允许，并且捕获失败会
-阻止外部命令运行。执行命令字和文件重定向目标之间的替换按源顺序；短路的管
-道不会执行其中任何一个。
+每个命令替换被递归解析为同一类型化 `Script` 计划，嵌套限制 32 层，诊断使用
+顶层源跨度。它针对完整 `ShellState` 克隆执行：cwd、变量、环境、选项、上一
+状态与 `exit` 保持本地，而普通外部进程与文件系统效应仍然可见。Ash 捕获完整
+替换 stdout，移除每个尾随 LF，在双引号内保留内部换行，且仅在未加引号时应用
+固定字段拆分。非零嵌套状态不会覆盖父 `$?` 或阻止外层命令；嵌套 stderr 与
+诊断传播一次。NUL 输出被拒绝。Unix 将非 UTF-8 stdout 保留为原生参数字节，
+而 Windows 要求有效 UTF-8。替换值、stdout 与 stderr 共享剩余 128 MiB 同步
+捕获配额，捕获失败会阻止外层命令运行。跨命令词与文件重定向目标的替换按源
+顺序执行；短路管道不执行其中任何一个。
 
-不带引号的参数和命令替换字段拆分后，路径名扩展适用 `*`、`?`、`[abc]`、升
-序 `[a-z]` 以及否定 `[!abc]` 或`[^abc]` 命令字段和文件重定向目标的模式。
-单引号，双引号和反斜杠保护模式字符；不带引号的参数或替换输出保持模式活跃
-。相对模式枚举从持久的 cwd 中，绝对模式保持绝对，匹配按以下顺序排序无损
-本机路径单元和 Unix 非 UTF-8 名称仍然可表示。一个通配符永远不会选择前导
-点名称，除非该组件以字面点。匹配区分大小写，`**`没有递归意义，并且未终止
-、空或降序类或没有匹配项的模式失败在外部命令运行之前。一个命令及其重定向
-共享限制32,768 个活动模式单元、65,536 个已检查目录条目和 4,096 个匹配。
-短路管道不执行目录扫描。
+在未加引号的参数与命令替换字段拆分之后，路径名展开将 `*`、`?`、`[abc]`、
+升序 `[a-z]` 以及取反的 `[!abc]` 或 `[^abc]` 模式应用于命令字段与文件重定向
+目标。单引号、双引号与反斜杠保护模式字符；未加引号的参数或替换输出仍保持
+模式活跃。相对模式从持久 cwd 枚举，绝对模式保持绝对，匹配按无损原生路径
+单元排序，Unix 非 UTF-8 名称仍可表示。通配符从不选择以点开头的名称，除非
+该组件以字面点开头。匹配区分大小写，`**` 无递归含义，未终止、空或降序的
+字符类或无匹配的模式在外层命令运行前失败。一个命令及其重定向共享 32,768
+个活跃模式单元、65,536 个已检查目录项与 4,096 个匹配的限制。短路管道不
+执行目录扫描。
 
-本机命令通过 shell 状态的 `PATH` 或显式解析`native:`前缀，然后直接使用解
-析后的可执行文件启动参数向量、当前目录和导出环境。没有`sh -c`，`cmd /c`
-，或插入 PowerShell 命令字符串。未重定向的独立孩子的标准输入保持为空并且
-输出保持同步捕获，因此本机本身需要前台终端的程序仍然推迟到H4工作控制工作
-。 Stdout 和 stderr 共享剩余的 128 MiB 捕获津贴，并返回本机退出状态。
+原生命令通过 shell 状态的 `PATH` 或显式 `native:` 前缀解析，然后以解析后的
+参数向量、当前目录与导出环境直接启动已解析可执行文件。不插入 `sh -c`、
+`cmd /c` 或 PowerShell 命令字符串。未重定向的独立子进程 stdin 保持为空，
+输出保持同步捕获，因此本身需要前台终端的原生程序仍推迟到 H4 作业控制工作。
+Stdout 与 stderr 共享剩余 128 MiB 捕获配额，并返回原生退出状态。
 
-在 Windows 上，`linux:COMMAND` 显式选择 WSL。分辨率首先定位`wsl.exe`;丢
-失的启动器是类型化的后端不可用故障，并且未解决的普通命令永远不会落入 WSL
-。包装器接收一个可选的选定发行版，当前的 Windows cwd 至 `--cd`，以及
-Linux 命令在 `--exec` 之后分别加上每个参数。无主机或 Linux shell字符串被
-合成。当前 CLI 使用用户的默认 WSL分布，而嵌入者可以通过`ShellOptions`选
-择一个；所选择的值保留在命令状态中。安装分布探测，一般参数路径映射、显式
-环境转发、中断正常化和后端政策仍然是 H5 工作。
+在 Windows 上，`linux:COMMAND` 显式选择 WSL。解析首先定位 `wsl.exe`；缺少
+启动器是类型化的后端不可用失败，未解析的普通命令从不回退到 WSL。包装器接收
+可选的选定发行版、通过 `--cd` 的当前 Windows cwd，以及在 `--exec` 之后分别
+传入的 Linux 命令与每个参数。不合成主机或 Linux shell 字符串。当前 CLI 使用
+用户的默认 WSL 发行版，而嵌入方可经 `ShellOptions` 选择一个；所选值保留在
+命令状态中。已安装发行版探测、通用参数路径映射、显式环境转发、中断规范化与
+后端策略仍属 H5 工作。
 
-本机、WSL 和可移植命令以及已实现的有状态内置命令接受`<`、`>`、`>>`、`2>`
-、`2>>`、`2>&1` 和 `1>&2`。重定向是从左到右应用的，因此
-`command >out 2>&1` 合并两者流到 `out`，而 `command 2>&1 >out` 将 stderr
-保留在原始版本上标准输出捕获。文件目标，包括 `$(...)` 和路径名模式，必须
-完全作为一个本地字段完成，解析自持久 cwd，并直接连接到子任务或父任务操作
-系统句柄不在 shell 内存中缓冲文件输出。一张图顺序交错按阶段和重定向源顺
-序划分的本机、可移植和有状态资源；被取代的目标仍然开放。目标缺失、不明确
-或无法打开返回带有重定向诊断的状态 1。有状态和可移植突变参数经过验证在文
-件打开之前；成功的打开先于父状态突变，所以稍后内置文件系统故障保留了正常
-的 shell 文件副作用。便携式突变交易同样仅在所有重定向文件之后开始打开成
-功。有状态的内置函数不发出原始命令输出，并且它们的跨源诊断仍然存在shell
-stderr 而不是由命令 stderr 重定向捕获。世界SL文件由 Windows 主机以相同的
-源顺序打开并附加直接连接到包装纸的标准手柄。
+原生、WSL 与可移植命令以及已实现的有状态内建接受 `<`、`>`、`>>`、`2>`、
+`2>>`、`2>&1` 与 `1>&2`。
+重定向从左到右应用，因此 `command >out 2>&1` 将两个流合并到 `out`，而
+`command 2>&1 >out` 将 stderr 留在原始 stdout 捕获上。文件目标（含 `$(...)`
+与路径名模式）必须结束为恰好一个原生字段，从持久 cwd 解析，并直接连接到
+子或父任务 OS 句柄，而不在 shell 内存中缓冲文件输出。一个图顺序按阶段与
+重定向源顺序交错原生、可移植与有状态资源；被取代的目标仍会被打开。缺失、
+歧义或无法打开的目标返回状态 1 与重定向诊断。有状态与可移植变异参数在文件
+打开前校验；成功打开先于父状态变异，因此较晚的内建文件系统失败仍保留正常的
+shell 文件副作用。可移植变异事务同样仅在其所有重定向文件成功打开后开始。
+有状态内建不发出原始命令输出，其带源跨度的诊断仍是 shell stderr，而非被命令
+stderr 重定向捕获。WSL 文件由 Windows 主机按相同源顺序打开，并直接附加到
+包装器的标准句柄。
 
-同一条线`|`构成2到32级的前台流水线。每个阶段都可以是本机主机命令，
-Windows 上的显式 WSL 命令，可移植 `pwd`，`echo`、`ls`、`cat`、`grep`、
-`cp`、`mv`、`rm`或`touch`，或实现的有状态`cd`、`export`、`unset`、`set`
-、或`exit`；别名、函数和未实现的有状态命令在完整的预检期间仍然失败。本机
-和 WSL 包装器边缘保留直接操作系统管道。正在进行中边界仅保留显式声明的父
-读取器或写入器并运行该阶段与本机执行和捕获同时进行。原生流和可移植的
-`cat``grep`/流在下一个流之前不会作为一个整体具体化阶段，并且应用正常的操
-作系统背压。仅`cat -` 和 `grep PATTERN -` 消耗传入的标准输入。其他便携式
-表格关闭该读取器，允许上游写入器和`pipefail`观察损坏的管道失败。突变阶段
-不发出标准输出，执行其文件系统事务，并将冲突或文件系统状态贡献给相同的
-`pipefail`向量。有状态阶段同样关闭传入的标准输入，执行独立的`ShellState`
-克隆，并在完成后关闭它们的空标准输出，所以他们不能改变父级和下游读者收到
-的 EOF。管道`exit` 仅贡献其阶段状态，并且永远不会停止父源。一个最终进程
-内阶段是在相同的 128 MiB 聚合下同时捕获的津贴；本机 stderr 按阶段顺序捕
-获。所有本机成员（包括 WSL 包装器）仍由一名图级作业主管拥有，同时可移植/
-有状态的 future 和捕获消耗被一起轮询。一旦那些结算成功，supervisor 完成
-每一次本地等待，无需取消正在进行的收获。设置、捕获或等待失败终止并收获每
-一个本机进程树；成功退出与来源保持一致阶段顺序。
+同行的 `|` 形成两到 32 个阶段的前台管道。每个阶段可以是原生主机命令、
+Windows 上的显式 WSL 命令、可移植 `pwd`、`echo`、`ls`、`cat`、`grep`、`cp`、
+`mv`、`rm` 或 `touch`，或已实现的有状态 `cd`、`export`、`unset`、`set` 或
+`exit`；别名、函数与未实现的有状态命令仍在完整预检期间失败。原生与 WSL
+包装器边保持直接 OS 管道。进程内边界仅保留显式声明的父读取器或写入器，并与
+原生执行与捕获并发运行该阶段。原生流与可移植 `cat`/`grep` 流在下一阶段之前
+不会整体物化，并应用正常 OS 背压。仅 `cat -` 与 `grep PATTERN -` 消费传入
+stdin。其他可移植形式关闭该读取器，使上游写入器与 `pipefail` 能观察到
+broken-pipe 失败。变异阶段不发出 stdout，执行其文件系统事务，并将冲突或
+文件系统状态贡献到同一 `pipefail` 向量。有状态阶段同样关闭传入 stdin，针对
+独立 `ShellState` 克隆执行，并在完成时关闭其空 stdout，因此它们不能变更父
+状态，下游读取器收到 EOF。管道 `exit` 仅贡献其阶段状态，从不停止父源。最终
+进程内阶段在同一 128 MiB 聚合配额下并发捕获；原生 stderr 按阶段顺序捕获。
+所有原生成员（含 WSL 包装器）在可移植/有状态 future 与捕获排空一起轮询时，
+仍由一个图级作业监督器拥有。一旦这些成功落定，监督器在不取消进行中回收的
+情况下完成每次原生等待。设置、捕获或等待失败会终止并回收每个原生进程树；
+成功退出仍与源阶段顺序对齐。
 
-管道状态默认为最后阶段。有了`set -o pipefail`，就变成了最右边不成功的阶
-段，包括常规的`128 + signal`测绘；完全成功的管道仍然使用其最后阶段。丢失
-的便携式文件、不匹配`grep`、有状态内置失败或进程内写入器损坏参与相同的退
-出向量。任何本机、WSL、可移植或已实现的有状态阶段可能会重定向 stdin、
-stdout 或 stderr 或重复描述符源订单。如果生产者没有更长地写入内部管道，
-下游阅读器收到EOF。如果消费者替换了它的管道标准输入，上游编写器接收平台
-的断管行为。描述符即使原始描述符已连接，从管道复制的副本仍然保持连接后来
-重定向。有状态文件加入相同的全局开放秩序；替换它们的空标准输出通常会关闭
-传出管道。 WSL 阶段重用相同的管道和文件图，没有中间中继或全流缓冲区。
+管道状态默认为最终阶段。启用 `set -o pipefail` 时，它变为最右不成功阶段，
+含常规 `128 + signal` 映射；全成功管道仍使用其最终阶段。缺失可移植文件、
+无匹配 `grep`、失败的有状态内建或损坏的进程内写入器参与同一退出向量。任何
+原生、WSL、可移植或已实现有状态阶段可按源顺序重定向 stdin、stdout 或 stderr，
+或复制描述符。若生产者不再写入内部管道，下游读取器收到 EOF。若消费者替换其
+管道 stdin，上游写入器收到平台的 broken-pipe 行为。从管道复制的描述符即使
+原始描述符稍后被重定向仍保持连接。有状态文件加入同一全局打开顺序；替换其空
+stdout 会正常关闭外向管道。WSL 阶段复用同一管道与文件图，无中间中继或全流
+缓冲。
 
-`&&` 和 `||` 以相同的优先级和左侧链接完整的管道关联性。 `&&` 仅在状态 0
-后才允许下一个管道； `||`承认仅在非零状态之后。跳过的管道不执行扩展，解
-析、参数验证、重定向打开、进程启动、状态更改、或文件系统事务，并将前面的
-状态保留给下一个链接和`$?`。换行符或注释可以在运算符之后继续列表；`;` 或
-未链接的换行符开始一个新的无条件列表。完整源码仍然在任何命令运行之前进行
-解析，因此格式错误的尾随分支会阻止所有前缀效果。承认的`exit`会停止源头；
-跳过的则不会。
+`&&` 与 `||` 以相等优先级与左结合链接完整管道。`&&` 仅在状态 0 后准入下一
+管道；`||` 仅在非零状态后准入。被跳过的管道不执行展开、解析、参数校验、
+重定向打开、进程启动、状态变更或文件系统事务，并将前一状态留给下一链接与
+`$?`。换行或注释可在运算符后继续列表；`;` 或未链接的换行开始新的无条件列表。
+完整源仍在任何命令运行前解析，因此格式错误的尾随分支会阻止所有前缀效应。
+被准入的 `exit` 停止源；被跳过的不会。
 
-用户可见的终端流、前台交互程序和作业控制、别名、函数、子 shell 状态、剩
-余命令语言，剩余的H5 WSL策略、路径、环境和中断合约尚未实施。最小的可以使
-用 `--no-default-features` 构建仅限机器的二进制文件。
+面向用户的终端流式、前台交互程序与作业控制、别名、函数、子 shell 状态、剩余
+命令语言，以及剩余的 H5 WSL 策略、路径、环境与中断契约尚未实现。可用
+`--no-default-features` 构建最小的仅机器二进制。
 
-## 第一个输入的请求
+## 首个类型化请求
 
-此规范请求使用显式标记在 `src` 中搜索文字 `TODO`，记录和挂钟预算：
+此规范请求在显式 token、记录与挂钟预算下，于 `src` 中搜索字面量 `TODO`：
 
 ```ason
 t:1
@@ -267,63 +256,58 @@ u{tok,rec,ms}:
 256,64,30000
 ```
 
-从工作区包含 `src` 的源包中运行已检查的装置：
+从工作区包含 `src` 的源码 crate 运行已校验 fixture：
 
 ```sh
 cd crates/ash-cli
 cargo run -p a3s-ash -- run < ../../spec/fixtures/ason/search-request.ason
 ```
 
-安装的二进制文件使用`ash run < request.ason`。 Windows PowerShell 必须保
-留规范的 UTF-8/LF 字节完好无损；使用
+已安装二进制使用 `ash run < request.ason`。Windows PowerShell 必须保持规范
+UTF-8/LF 字节完整；请使用
 `Start-Process ash -ArgumentList run -NoNewWindow -Wait -RedirectStandardInput request.ason`
-而不是通过管道传输解码后的字符串。
+，而不是通过管道传入已解码字符串。
 
-为了实现长期集成，`ash rpc` 添加了框架握手、并发请求、取消、功能、许可和
-保留引用生命周期。在创作请求时使用 `ash ason` 来验证和规范化请求。引用是
-会话本地的：以后的`ash run`进程不能使用别名，快照基线、批次子响应、取消
-目标或许可较早进程返回的挑战。需要这些值的工作流程必须保持一个框架
-`ash rpc`会话处于活动状态。
+对于长生命周期集成，`ash rpc` 增加成帧握手、并发请求、取消、能力、许可与
+保留引用生命周期。使用 `ash ason` 在编写时校验并规范化请求。引用是会话本地
+的：稍后的 `ash run` 进程不能消费较早进程返回的别名、快照基线、批量子响应、
+取消目标或许可挑战。需要这些值的工作流必须保持一个成帧的 `ash rpc` 会话存活。
 
 ## 一个运行时，两个执行平面
 
 <p align="center">
-  <img src="./assets/readme/architecture.svg" width="100%" alt="ash
-architecture from Coding Agent through typed program and hierarchical
-governor into Tokio I/O and Rayon CPU planes, stable merge, and
-canonical ASON">
+  <img src="./assets/readme/architecture.svg" width="100%" alt="ash 架构：从 Coding Agent 经类型化程序与分层治理器进入 Tokio I/O 与 Rayon CPU 平面，再经稳定合并输出规范 ASON">
 </p>
 
-Tokio 拥有 RPC、子进程、管道、截止日期和取消。一个固定的Rayon 工作窃取池
-拥有搜索、散列、差异、缩减、存储提交、和其他可分割的CPU工作。一个分层的
-调控器限制主机、会话、请求和操作并发。稳定合并消除了工人完成顺序在规范
-ASON发布之前。
+Tokio 拥有 RPC、子进程、管道、截止期限与取消。固定的 Rayon work-stealing 池
+拥有搜索、哈希、diff、归约、存储提交及其他可拆分 CPU 工作。一个分层治理器
+约束主机、会话、请求与操作并发。稳定合并在发出规范 ASON 之前抹除 worker
+完成顺序。
 
-大型流程流保持无损，不会淹没模型上下文。一个固定头/尾投影立即返回；超过
-4 MiB 的证据会话内存上限溢出到私有不可变文件。有界范围获取，别名、重复数
-据删除、租用、发布以及经过验证的崩溃孤儿清理已完成商店生命周期。
+大型进程流在不淹没模型上下文的情况下保持无损。固定的头/尾投影立即返回；
+超出 4 MiB 会话内存上限的证据溢出到私有不可变文件。有界范围获取、别名、
+去重、租约、释放与经证明的崩溃孤儿清理完成存储生命周期。
 
 ## 证据，而非愿望
 
-当前的`main`基线包括：
+当前 `main` 基线包括：
 
-- **327 Rust 工作区测试** 跨协议模式、RPC、每个操作，
-  交易、恢复、保留存储、取消、签名更新，以及  人类的外壳。
-- **跨工作矩阵的 22 个 schema-14 运行时场景**，包括 8 MiB
-  保留捕获跨越 4 MiB 内存上限并仅获取其最终结果  64 KiB。
-- **7 个锁定的编码代理任务** 比较本机 shell 和 ash 跟踪
-  一项任务、结果和成绩单模式。
-- **1,024 个详尽的四节点 DAG/成功掩码案例**，强制完成
-  订单变化和稳定的错误选择。
-- **30 个远期交易切点加上 12 个恢复切点**，包括
-  硬链接身份崩溃窗口。
-- 源绑定格式/令牌报告、每周两次模糊测试、AddressSanitizer
-  工件、六目标安装程序烟雾测试和第三方许可证门。
+- 跨协议模式、RPC、每个操作、事务、恢复、保留存储、取消、已签名更新与人类
+  shell 的 **327 个 Rust 工作区测试**。
+- 跨 worker 矩阵的 **22 个 schema-14 运行时场景**，包括越过 4 MiB 内存上限的
+  8 MiB 保留捕获，且仅获取其最后 64 KiB。
+- **7 个锁定的 Coding Agent 任务**，在同一任务、结果与转录模式下比较原生
+  shell 与 ash 轨迹。
+- **1,024 个穷尽的四节点 DAG/成功掩码用例**，含强制完成顺序变更与稳定错误
+  选择。
+- **30 个前向事务切点外加 12 个恢复切点**，含硬链接身份崩溃窗口。
+- 源绑定的格式/token 报告、每周两次模糊测试、AddressSanitizer 产物、六目标
+  安装器冒烟测试，以及第三方许可证门。
 
-检查格式语料库报告规范 ASON 为紧凑行对象的 **62%两个固定标记生成器的
-JSON 标记**。明确的减少和参考公式分别测量；完整的来源仍然可以检索。
+已校验格式语料报告：对两个固定分词器，规范 ASON 均为紧凑行对象 JSON token
+的 **62%**。显式归约与引用公式单独度量；完整源仍可检索。
 
-重现门：
+复现这些门：
 
 ```sh
 cargo test --workspace --all-targets
@@ -338,61 +322,57 @@ npm --prefix website ci
 npm --prefix website run check
 ```
 
-阅读[benchmark
-contract](https://a3s-lab.github.io/ash/guide/benchmarks.html)在解释数字
-之前。
+在解读数字之前，请阅读
+[基准契约](https://a3s-lab.github.io/ash/guide/benchmarks.html)。
 
 ## 安装
 
 > [!WARNING]
-> 版本安装程序故意失败关闭，直到受支持的签名
-> 二进制文件存在。下面的 Cargo 命令构建当前源；它不是一个
-> 签署发布。
+> 发布安装器在受支持的已签名二进制存在之前刻意失败关闭。下方 Cargo 命令构建
+> 当前源码；它不是已签名发布。
 
-Linux 和 macOS、x86-64 和 ARM64：
+Linux 与 macOS，x86-64 与 ARM64：
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/A3S-Lab/ash/main/install.sh | sh
 ```
 
-Windows PowerShell、x86-64 和 ARM64：
+Windows PowerShell，x86-64 与 ARM64：
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 irm https://raw.githubusercontent.com/A3S-Lab/ash/main/install.ps1 | iex
 ```
 
-使用 Cargo 构建当前源：
+用 Cargo 构建当前源码：
 
 ```sh
 cargo install --git https://github.com/A3S-Lab/ash --locked a3s-ash
 ```
 
-请参阅 [installation](https://a3s-lab.github.io/ash/guide/install.html)
-进行固定版本、自定义前缀、离线存档、验证、事务激活、升级、回滚、恢复和卸
-载。
+固定版本、自定义前缀、离线归档、验证、事务性激活、升级、回滚、恢复与卸载见
+[安装](https://a3s-lab.github.io/ash/guide/install.html)。
 
-## 明确边界
+## 刻意边界
 
-ASH/1不是人类的REPL、POSIX兼容层、嵌入式模型、远程执行器，或通用子进程沙
-箱。它不提供互动终端语义、shell 语言评估、覆盖、递归目录突变，或批处理节
-点之间的运行时值管道。子程序继承ash 进程的操作系统权限。
+ASH/1 不是人类 REPL、POSIX 兼容层、嵌入式模型、远程执行器或通用子进程沙箱。
+它不提供交互终端语义、shell 语言求值、覆盖、递归目录变异，或批处理节点之间
+的运行时值管道。子程序继承 ash 进程的操作系统权限。
 
-这些是合同边界，而不是未记录的差距。参见
-[security](https://a3s-lab.github.io/ash/guide/security.html) 精确能力、
-许可、路径、交易和签名更新模型。
+这些是契约边界，而非未文档化的缺口。精确的能力、许可、路径、事务与已签名
+更新模型见 [安全](https://a3s-lab.github.io/ash/guide/security.html)。
 
-## 文档导航
+## 文档地图
 
-- [Get started](https://a3s-lab.github.io/ash/guide/) — 读取器路径和第一个请求
-- [Complete capabilities](https://a3s-lab.github.io/ash/guide/capabilities.html) — 每项操作、保证和非目标
-- [Coding Agent integration](https://a3s-lab.github.io/ash/guide/coding-agents.html) — 技能和驾驭工作流程
-- [Architecture](./docs/architecture.md) — 语义 IR、调度程序、调控器和平台边界
-- [Portable human-shell architecture](./docs/portable-human-shell.md) 和 [separation decision](./docs/decisions/0002-separate-portable-human-shell-layer.md)
-- [ASH/1 and ASON](./docs/protocol.md) — 权威的电汇和数据合约
-- [Distribution](./docs/distribution.md) 和 [release operations](./docs/releasing.md)
-- [Benchmark methodology](./docs/benchmarks.md)
+- [入门](https://a3s-lab.github.io/ash/guide/) — 读者路径与首次请求
+- [完整能力](https://a3s-lab.github.io/ash/guide/capabilities.html) — 每个操作、保证与非目标
+- [Coding Agent 集成](https://a3s-lab.github.io/ash/guide/coding-agents.html) — Skill 与 harness 工作流
+- [架构](./docs/architecture.md) — 语义 IR、调度器、治理器与平台边界
+- [可移植人类 shell 架构](./docs/portable-human-shell.md) 与 [分离决策](./docs/decisions/0002-separate-portable-human-shell-layer.md)
+- [ASH/1 与 ASON](./docs/protocol.md) — 权威线缆与数据契约
+- [分发](./docs/distribution.md) 与 [发布运维](./docs/releasing.md)
+- [基准方法](./docs/benchmarks.md)
 
-贡献遵循项目[CONTRIBUTING.md](./CONTRIBUTING.md)[Code of
-Conduct](./CODE_OF_CONDUCT.md)和[SECURITY.md](./SECURITY.md)。Rust 工作
-区已获得 MIT 许可。
+贡献遵循 [CONTRIBUTING.md](./CONTRIBUTING.md)、项目
+[行为准则](./CODE_OF_CONDUCT.md) 与 [SECURITY.md](./SECURITY.md)。
+Rust 工作区采用 MIT 许可。
